@@ -1,25 +1,12 @@
 # Binance Trading Bot - Exchange Interface
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import ccxt
 import time
 import logging
 import threading
-from collections import deque
-
+import requests
+from requests.adapters import HTTPAdapter
 
 class ThrottledExchange:
     def __init__(self, exchange, delay_ms=42):
@@ -45,22 +32,26 @@ class ThrottledExchange:
             return throttled_wrapper
         return attr
 
+def create_ccxt_session():
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    return session
+
 class ExchangeInterface:
-    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
-        raise NotImplementedError
-    def create_order(self, symbol, side, amount, price=None):
-        raise NotImplementedError
-    def fetch_balance(self):
-        raise NotImplementedError
-    def fetch_ticker(self, symbol):
-        raise NotImplementedError
-    def fetch_trading_fee(self, symbol):
-        raise NotImplementedError
+    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
+    def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
+    def fetch_balance(self): raise NotImplementedError
+    def fetch_ticker(self, symbol): raise NotImplementedError
+    def fetch_trading_fee(self, symbol): raise NotImplementedError
 
 class BinanceExchange(ExchangeInterface):
     def __init__(self, api_key, api_secret):
         self.exchange = ThrottledExchange(ccxt.binance({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 50},
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'options': {'defaultType': 'spot', 'poolSize': 50},
+            'session': create_ccxt_session()
         }))
 
     def load_markets(self):
@@ -94,31 +85,21 @@ class BinanceExchange(ExchangeInterface):
     def create_order(self, symbol, side, amount, price=None):
         try:
             if not self.exchange.markets: self.exchange.load_markets()
-
-            # Ensure precision is handled
             amount_str = self.exchange.amount_to_precision(symbol, amount)
             amount = float(amount_str)
-
             if side == 'sell':
                 base, _ = symbol.split('/')
                 balance = self.fetch_balance()
-                # Use a small buffer or just use the precision-adjusted amount
                 free_balance = balance.get(base, {}).get('free', 0)
                 if free_balance < amount:
-                    # If we are very close (due to precision), use the free balance instead
                     if free_balance > 0 and (amount - free_balance) / amount < 0.01:
                         amount = float(self.exchange.amount_to_precision(symbol, free_balance))
                     else:
                         logging.warning(f"Aborting sell of {symbol}: Insufficient {base} balance ({free_balance} < {amount})")
                         return None
-
-            if side == 'buy':
-                order = self.exchange.create_market_buy_order(symbol, amount)
-            else:
-                order = self.exchange.create_market_sell_order(symbol, amount)
-
-            if order and 'fee' in order and order['fee']:
-                order['calculated_fee'] = order['fee'].get('cost', 0)
+            if side == 'buy': order = self.exchange.create_market_buy_order(symbol, amount)
+            else: order = self.exchange.create_market_sell_order(symbol, amount)
+            if order and 'fee' in order and order['fee']: order['calculated_fee'] = order['fee'].get('cost', 0)
             else:
                  ticker = self.fetch_ticker(symbol)
                  fee_rate = self.fetch_trading_fee(symbol)
@@ -132,7 +113,11 @@ class MockExchange(ExchangeInterface):
         self.markets = {}
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                self.real_exchange = ThrottledExchange(ccxt.binance({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 50}}))
+                self.real_exchange = ThrottledExchange(ccxt.binance({
+                    'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+                    'options': {'defaultType': 'spot', 'poolSize': 50},
+                    'session': create_ccxt_session()
+                }))
                 logging.info("Mock initialized with real API balance fetching (markets deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")
 
@@ -148,33 +133,23 @@ class MockExchange(ExchangeInterface):
         if self.real_exchange:
              try: return self.real_exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
              except Exception: pass
-
-        # Fallback to public fetch if no mock data
         if symbol not in self.ohlcv_data:
             try:
-                public_ex = ccxt.binance()
+                public_ex = ccxt.binance({'session': create_ccxt_session()})
                 return public_ex.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-            except Exception:
-                return []
-
+            except Exception: return []
         return self.ohlcv_data.get(symbol, [])[:limit]
 
     def fetch_ticker(self, symbol):
         if self.real_exchange:
              try: return self.real_exchange.fetch_ticker(symbol)
              except Exception: pass
-        # Fallback for mock if no real exchange or call fails
         data = self.ohlcv_data.get(symbol, [])
-        if data:
-            return {'last': data[-1][4]}
-
-        # If no internal mock data, try a public CCXT call (no API keys needed)
+        if data: return {'last': data[-1][4]}
         try:
-            import ccxt
-            public_ex = ccxt.binance()
+            public_ex = ccxt.binance({'session': create_ccxt_session()})
             return public_ex.fetch_ticker(symbol)
-        except Exception:
-            return {'last': 0.0}
+        except Exception: return {'last': 0.0}
 
     def fetch_balance(self):
         if self.real_exchange:
@@ -211,8 +186,6 @@ class MockExchange(ExchangeInterface):
                 self.balance[quote] = free_quote - (cost + fee); self.balance[base] = free_base + amount
                 return {'id': 'mock_buy_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
         else:
-            # For sell, we allow it if real API keys are present even if real balance is 0
-            # because simulation should be isolated from real wallet
             if self.real_exchange or free_base >= amount:
                 self.balance[base] = free_base - amount; self.balance[quote] = free_quote + cost - fee
                 return {'id': 'mock_sell_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}

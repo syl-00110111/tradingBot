@@ -46,7 +46,7 @@ import readchar
 
 from exchange_handler import BinanceExchange, MockExchange
 from indicators import get_signals, calculate_similarity, STRATEGIES
-from persistence import DataManager, CacheManager
+from persistence import DataManager, CacheManager, PatternManager
 from trading_engine import TradingEngine
 from monte_carlo import MonteCarloEngine
 
@@ -442,7 +442,7 @@ def update_available_assets_live(exchange):
         logging.error(f"Failed to update assets from API: {e}")
         with bot_lock: pending_asset_update = False
 
-def trading_thread_func(exchange, data_manager, engine, config, mode):
+def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
     global available_assets, pending_asset_update
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
@@ -456,7 +456,7 @@ def trading_thread_func(exchange, data_manager, engine, config, mode):
 
     while not shutdown_event.is_set():
         if mode == 'simulation' and not sim_init_done:
-            initialize_simulation(exchange, data_manager, engine, config, bot_state)
+            initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
             sim_init_done = True
 
         if mode == 'live' and not sim_init_done:
@@ -619,6 +619,7 @@ def main():
 
         db_handler.duration = 5
         data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation', 'sell'] else None
+        pattern_manager = PatternManager()
         engine = TradingEngine(config)
 
         # Use credentials from api.json if available, otherwise config.default.json
@@ -655,7 +656,7 @@ def main():
                 return
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
-            run_benchmark_mode(exchange, config, args, status=status, data_manager=None, engine=engine, device=device)
+            run_benchmark_mode(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
             return
 
         pairs = config.get('pairs', {})
@@ -666,7 +667,7 @@ def main():
         if args.mode in ['live', 'simulation']:
             config['_active_term'] = args.term
             status.update(f"[bold blue]Optimizing strategies for {args.term} term...")
-            opt_map = run_benchmark_mode(exchange, config, args, term_override=args.term, status=status, data_manager=data_manager, engine=engine, device=device)
+            opt_map = run_benchmark_mode(exchange, config, args, term_override=args.term, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             # Store profits for prioritization
             pair_priorities = []
             for sym, data in opt_map.items():
@@ -678,7 +679,7 @@ def main():
 
                         # Store patterns in DataManager if not already there (e.g. from cache)
                         if isinstance(data, list):
-                             data_manager.set_patterns(sym, data)
+                             pattern_manager.set_patterns(sym, data)
 
                         # Score for prioritization (the profit predicted for the term)
                         priority_score = best['profit']
@@ -692,6 +693,9 @@ def main():
                 # Global sort pairs by expected profit for priority execution
                 sorted_pairs = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
                 config['_priority_pairs'] = sorted_pairs
+
+            if args.mode == 'simulation' and data_manager:
+                data_manager.clear_history()
 
         for symbol in pairs:
             # Check if we already have an open position for this symbol
@@ -712,7 +716,7 @@ def main():
             }
 
     threading.Thread(target=input_thread_func, daemon=True).start()
-    threading.Thread(target=trading_thread_func, args=(exchange, data_manager, engine, config, args.mode), daemon=True).start()
+    threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args.mode), daemon=True).start()
 
     play_sound("startup")
     try:
@@ -749,9 +753,9 @@ def play_sound(action, config=None):
             sys.stdout.flush()
     except Exception: pass
 
-def analyze_pair(exchange, data_manager, symbol, pair_config, global_config, engine=None):
+def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, global_config, engine=None):
     # Retrieve patterns for matching
-    patterns = data_manager.get_patterns(symbol)
+    patterns = pattern_manager.get_patterns(symbol)
 
     # Timeframe now comes from the expected_profit_terms based on the bot's term (default short)
     term = global_config.get('_active_term', 'short')
@@ -972,7 +976,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                 return True
     return False
 
-def initialize_simulation(exchange, data_manager, engine, config, bot_state):
+def initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state):
     logging.info("Initializing Simulation positions...")
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
@@ -983,7 +987,7 @@ def initialize_simulation(exchange, data_manager, engine, config, bot_state):
         pair_config = pairs_dict[symbol]
         if not data_manager.get_position(symbol):
             # Pass pair_config to analyze_pair
-            data = analyze_pair(exchange, data_manager, symbol, pair_config, config, engine=engine)
+            data = analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, config, engine=engine)
             if data and data.get('buy'):
                 potential_buys.append((symbol, data))
 
@@ -1562,7 +1566,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
     return symbol, unique_patterns
 
-def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, engine=None, device=None):
+def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
 
     # Respect global overrides if they exist
     global_aggr = config.get('force_agressivity_to_all_pairs')
@@ -1611,7 +1615,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 best['is_cached'] = True
                 optimization_map[symbol] = best
                 if data_manager:
-                    data_manager.set_patterns(symbol, cached_patterns)
+                    pattern_manager.set_patterns(symbol, cached_patterns)
                 continue
         symbols_to_bench.append(symbol)
 
@@ -1703,7 +1707,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
                         # Store patterns in DataManager for real-time matching
                         if data_manager:
-                             data_manager.set_patterns(sym, patterns)
+                             pattern_manager.set_patterns(sym, patterns)
 
                         period_str = f" [dim](From {best_for_symbol.get('start_time')} to {best_for_symbol.get('end_time')})[/]"
                         # Always save patterns to benchmark_cache.json
