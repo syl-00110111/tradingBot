@@ -478,7 +478,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
             # Parallelize pair analysis
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(pair_keys)) as executor:
-                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pair_keys}
+                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pair_keys}
                 for future in concurrent.futures.as_completed(future_to_sym):
                     if shutdown_event.is_set(): break
                     symbol = future_to_sym[future]
