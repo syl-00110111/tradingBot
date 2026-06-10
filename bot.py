@@ -545,7 +545,8 @@ def main():
 
     args = parser.parse_args()
 
-    global device, gpu_enabled
+    global device, gpu_enabled, use_mkldnn
+    use_mkldnn = False
     if args.no_gpu:
         device = torch.device('cpu')
         gpu_enabled = False
@@ -555,7 +556,11 @@ def main():
             gpu_enabled = True
         elif torch.backends.mkldnn.is_available():
             device = torch.device('cpu')
+            use_mkldnn = True
             torch.backends.mkldnn.enabled = True
+            os.environ['OMP_NUM_THREADS'] = '1'
+            os.environ['MKL_NUM_THREADS'] = '1'
+            torch.set_num_threads(1) # Optimized for parallel workers
             gpu_enabled = True
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device('mps')
@@ -587,7 +592,9 @@ def main():
             console.print(f"[bold green]GPU Acceleration enabled using device: {device}[/]")
 
         db_handler.duration = 5
-        data_manager = DataManager(args.mode)
+        data_manager = None
+        if args.mode in ['live', 'simulation', 'sell']:
+            data_manager = DataManager(args.mode)
         engine = TradingEngine(config)
 
         # Use credentials from api.json if available, otherwise config.default.json
@@ -1208,7 +1215,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     console.print(f"[bold green]Backtest plot saved as {filename}[/]")
     plt.close()
 
-def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None):
+def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False):
     """Core backtesting simulation logic."""
 
     fee_rate = 0.001 # Default 0.1%
@@ -1258,10 +1265,17 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     else:
         df = df_in.copy()
-    try:
-        test_config["device"] = device if device is not None else torch.device("cpu")
-        df = get_signals(df, test_config, is_backtest=True)
-    except Exception as e:
+    if "buy_signal" not in df.columns:
+        try:
+            test_config["device"] = device if device is not None else torch.device("cpu")
+            df = get_signals(df, test_config, is_backtest=True)
+        except Exception as e:
+            if exchange is not None:
+                 console.print(f"[red]Error calculating signals for {symbol}: {e}[/]")
+            return None
+    else:
+        # Signals already present in df_in
+        pass
         if exchange is not None:
              console.print(f"[red]Error calculating signals for {symbol}: {e}[/]")
         return None
@@ -1325,8 +1339,11 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         total_profit = equity_curve[-1] - equity_curve[start_idx]
 
     # Monte Carlo Validation
-    mc_score = mc.validate_strategy(df)
-    total_profit *= mc_score # Penalize if MC validation is low
+    if not skip_mc:
+        mc_score = mc.validate_strategy(df)
+        total_profit *= mc_score # Penalize if MC validation is low
+    else:
+        mc_score = 1.0
 
     wins = [t for t in trades if t['profit'] > 0]
     win_rate = len(wins) / len(trades) if trades else 0
@@ -1360,7 +1377,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         'end_time': end_time_dt.strftime("%Y-%m-%d %H:%M"),
         'start_ts': start_time_dt.timestamp(),
         'prices': eval_df['close'].tolist(),
-        'tech_state': tech_state
+        'tech_state': tech_state,
+        'equity_curve': equity_curve if return_full_df else []
     }
 
 def run_backtest_mode(exchange, config, args, engine=None, device=None):
@@ -1398,64 +1416,107 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
 
 def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None):
     """
-    Scans historical data BACKWARDS for the top 4 success patterns (> 0.022 profit).
+    Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
     if df_in is None or len(df_in) < 100: return symbol, []
 
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
     eval_window = term_cfg.get('eval_candles', 60)
-
     patterns = []
     now_ts = time.time()
 
-    for aggr in aggrs:
-        for strategy in strategies:
-            # Slide window BACKWARDS
-            max_offset = len(df_in) - eval_window
-            # THOROUGH FIX: Reduce step to 5 candles for better pattern discovery
-            step = 5
+    from indicators import get_signals
 
-            for offset in range(0, max_offset, step):
-                end_idx = len(df_in) - offset
-                eval_start_idx = end_idx - eval_window
+    # We use 'dynamic' as the default aggr for benchmarking
+    aggr = aggrs[0] if aggrs else 'dynamic'
 
-                # Provide 250 candles of buffer for technical indicator stability
-                # before the evaluation window starts
-                buffer_start_idx = max(0, eval_start_idx - 250)
-                if eval_start_idx < 50: break # Too close to start
+    for strategy in strategies:
+        # Prepare settings
+        if engine:
+            mode_settings = engine.get_dynamic_settings(25.0, 0.001)
+        else:
+            mode_settings = {
+                "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
+            }
+        mode_settings['strategy'] = strategy
+        mode_settings['device'] = device if device is not None else torch.device("cpu")
 
-                window_df = df_in.iloc[buffer_start_idx:end_idx]
+        # 1. Calculate signals once for the entire dataset
+        try:
+            full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
+        except Exception:
+            continue
 
-                # We need to tell run_backtest_logic to only trade in the last 'eval_window' candles
-                res = run_backtest_logic(None, symbol, strategy, aggr, config, term=term_to_test, df_in=window_df, engine=engine, device=device)
-                # RELAXED Threshold: catch high momentum moves
-                if not res or res['profit'] < 0.015: continue
+        # 2. Run a single backtest for the entire dataset
+        # We set eval_candles to the whole length to get a continuous equity curve
+        full_term_config = config.copy()
+        # Create a temporary term that covers the whole DF
+        full_term_name = f"full_{strategy}"
+        full_term_config['expected_profit_terms'][full_term_name] = {
+            'eval_candles': len(full_df),
+            'timeframe': term_cfg.get('timeframe', '5m')
+        }
 
-                # Scoring with Recency Pondering (Instruction 1)
-                age_hours = (now_ts - res['start_ts']) / 3600
-                recency_score = 1.0
-                if term_to_test == 'short':
-                     if age_hours > 24: recency_score = 0.8
-                     if age_hours > 168: recency_score = 0.5
-                     if age_hours > 720: recency_score = 0.2
-                elif term_to_test == 'medium':
-                     if age_hours > 168: recency_score = 0.8
-                     if age_hours > 720: recency_score = 0.5
+        res_full = run_backtest_logic(None, symbol, strategy, aggr, full_term_config,
+                                     term=full_term_name, df_in=full_df, engine=engine,
+                                     device=device, skip_mc=True, return_full_df=True)
 
-                final_score = res['profit'] * recency_score
+        if not res_full or not res_full.get('equity_curve'):
+            continue
 
-                patterns.append({
-                    'profit': res['profit'],
-                    'score': final_score,
-                    'strategy': strategy,
-                    'aggr': aggr,
-                    'symbol': symbol,
-                    'start_time': res['start_time'],
-                    'end_time': res['end_time'],
-                    'start_ts': res['start_ts'],
-                    'prices': res['prices'],
-                    'tech_state': res['tech_state']
-                })
+        equity = res_full['equity_curve']
+
+        # 3. Slide window over the equity curve to find profitable periods
+        # Complexity is now O(N) instead of O(N*W) backtest runs
+        max_offset = len(full_df) - eval_window
+        step = 5
+
+        for offset in range(0, max_offset, step):
+            start_idx = offset
+            end_idx = offset + eval_window
+
+            # Profit in this window
+            win_profit = equity[end_idx-1] - equity[start_idx]
+
+            if win_profit < 0.015:
+                continue
+
+            # Score with Recency Pondering
+            window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
+            age_hours = (now_ts - window_ts) / 3600
+            recency_score = 1.0
+            if term_to_test == 'short':
+                 if age_hours > 24: recency_score = 0.8
+                 if age_hours > 168: recency_score = 0.5
+                 if age_hours > 720: recency_score = 0.2
+            elif term_to_test == 'medium':
+                 if age_hours > 168: recency_score = 0.8
+                 if age_hours > 720: recency_score = 0.5
+
+            final_score = win_profit * recency_score
+
+            # For technical state, we take the values at the end of the window
+            latest_row = full_df.iloc[end_idx-1]
+            tech_state = {
+                'rsi': float(latest_row.get('rsi', 50)),
+                'adx': float(latest_row.get('adx', 0)),
+                'ema_f': float(latest_row.get('ema_f', 0)),
+                'ema_s': float(latest_row.get('ema_s', 0))
+            }
+
+            patterns.append({
+                'profit': win_profit,
+                'score': final_score,
+                'strategy': strategy,
+                'aggr': aggr,
+                'symbol': symbol,
+                'start_time': full_df['timestamp'].iloc[start_idx].strftime("%Y-%m-%d %H:%M"),
+                'end_time': full_df['timestamp'].iloc[end_idx-1].strftime("%Y-%m-%d %H:%M"),
+                'start_ts': window_ts,
+                'prices': full_df['close'].iloc[start_idx:end_idx].tolist(),
+                'tech_state': tech_state
+            })
 
     # Keep top 4 non-overlapping (by time) patterns
     patterns.sort(key=lambda x: x['score'], reverse=True)
@@ -1466,11 +1527,25 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
         if len(unique_patterns) >= 4: break
         is_overlap = False
         for st in seen_times:
-            if abs(p['start_ts'] - st) < (eval_window * 60): # Crude overlap check
-                is_overlap = True; break
+            if abs(p['start_ts'] - st) < (eval_window * 60):
+                is_overlap = True
+                break
         if not is_overlap:
+            # NOW apply Monte Carlo validation to the top patterns only (for speed)
+            # Find the window in df_in
+            # Use searchsorted for O(log N) instead of O(N)
+            p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
+            p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
+
+            if p_start_idx != -1:
+                window_df = df_in.iloc[max(0, p_start_idx-250):p_start_idx+eval_window]
+                mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
+                mc.set_device(device if device is not None else torch.device("cpu"))
+                mc_score = mc.validate_strategy(window_df)
+                p['profit'] *= mc_score
+                p['score'] *= mc_score
+
             unique_patterns.append(p)
-            # p['start_ts'] was added in run_backtest_logic return
             seen_times.append(p.get('start_ts', 0))
 
     return symbol, unique_patterns
@@ -1546,7 +1621,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_limit = 5000
+            target_limit = 10000
             current_since = since_ts
 
             if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching up to {target_limit} candles for {symbol}...")
@@ -1586,7 +1661,10 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
              executor.shutdown(wait=False, cancel_futures=True)
              sys.exit(0)
 
-        with concurrent.futures.ProcessPoolExecutor() as executor:
+        # On CPU with oneDNN, ThreadPoolExecutor might be more efficient for many small torch tasks
+        # than ProcessPoolExecutor which has pickling overhead.
+        executor_class = concurrent.futures.ProcessPoolExecutor
+        with executor_class() as executor:
             # Register signal handler during optimization
             original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:

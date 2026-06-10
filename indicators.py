@@ -114,14 +114,14 @@ def get_signals(df, mode_config, is_backtest=False):
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
         high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float32)
         low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float32)
-        df['ema_f'] = torch_ema(close_t, 8).cpu().numpy()
-        df['ema_s'] = torch_ema(close_t, 18).cpu().numpy()
+        df['ema_f'] = torch_ema(close_t, 8).to('cpu').numpy()
+        df['ema_s'] = torch_ema(close_t, 18).to('cpu').numpy()
         m_val, m_sig, m_hist = torch_macd(close_t)
-        df['macd_val'] = m_val.cpu().numpy()
-        df['macd_sig'] = m_sig.cpu().numpy()
-        df['macd_hist'] = m_hist.cpu().numpy()
-        df['rsi'] = torch_rsi(close_t, 14).cpu().numpy()
-        df['adx'] = torch_adx(high_t, low_t, close_t, 14).cpu().numpy()
+        df['macd_val'] = m_val.to('cpu').numpy()
+        df['macd_sig'] = m_sig.to('cpu').numpy()
+        df['macd_hist'] = m_hist.to('cpu').numpy()
+        df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
+        df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
     else:
         ema_f = ta.ema(df['close'], length=8)
         df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
@@ -775,8 +775,8 @@ def strategy_double_ema(df, config):
     device = config.get('device', torch.device('cpu'))
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
-        df['ema_f'] = torch_ema(close_t, ema_fast).cpu().numpy()
-        df['ema_s'] = torch_ema(close_t, ema_slow).cpu().numpy()
+        df['ema_f'] = torch_ema(close_t, ema_fast).to('cpu').numpy()
+        df['ema_s'] = torch_ema(close_t, ema_slow).to('cpu').numpy()
     else:
         df['ema_f'] = ta.ema(df['close'], length=ema_fast)
         df['ema_s'] = ta.ema(df['close'], length=ema_slow)
@@ -795,12 +795,12 @@ def strategy_double_ema_macd_rsi(df, config):
 
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
-        df['ema_f_strat'] = torch_ema(close_t, ema_fast).cpu().numpy()
-        df['ema_s_strat'] = torch_ema(close_t, ema_slow).cpu().numpy()
+        df['ema_f_strat'] = torch_ema(close_t, ema_fast).to('cpu').numpy()
+        df['ema_s_strat'] = torch_ema(close_t, ema_slow).to('cpu').numpy()
         m_val, m_sig, _ = torch_macd(close_t, fast=macd_f, slow=macd_s, signal=macd_sig)
-        df['macd_val_strat'] = m_val.cpu().numpy()
-        df['macd_sig_strat'] = m_sig.cpu().numpy()
-        df['rsi_strat'] = torch_rsi(close_t, rsi_p).cpu().numpy()
+        df['macd_val_strat'] = m_val.to('cpu').numpy()
+        df['macd_sig_strat'] = m_sig.to('cpu').numpy()
+        df['rsi_strat'] = torch_rsi(close_t, rsi_p).to('cpu').numpy()
     else:
         df['ema_f_strat'] = ta.ema(df['close'], length=ema_fast)
         df['ema_s_strat'] = ta.ema(df['close'], length=ema_slow)
