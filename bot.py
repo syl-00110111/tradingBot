@@ -535,7 +535,6 @@ def main():
     parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/EUR)')
     parser.add_argument('--every-symbol', action='store_true', help='Run benchmark for all configured pairs')
 
-    from indicators import STRATEGIES
     strat_help = f"Strategy for backtest. Available: {', '.join(STRATEGIES)}"
     parser.add_argument('--strategy', help=strat_help)
     parser.add_argument('--aggr', help='Agressivity for backtest')
@@ -554,7 +553,11 @@ def main():
         if torch.cuda.is_available():
             device = torch.device('cuda')
             gpu_enabled = True
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        elif torch.backends.mkldnn.is_available():
+            device = torch.device('cpu')
+            torch.backends.mkldnn.enabled = True
+            gpu_enabled = True
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device('mps')
             gpu_enabled = True
         else:
@@ -620,7 +623,8 @@ def main():
                 console.print("[red]Error: --symbol or --every-symbol required for benchmark[/]")
                 return
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
-            run_benchmark_mode(exchange, config, args, status=status, data_manager=data_manager, engine=engine, device=device)
+            # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
+            run_benchmark_mode(exchange, config, args, status=status, data_manager=None, engine=engine, device=device)
             return
 
         pairs = config.get('pairs', {})
@@ -1206,7 +1210,6 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
 
 def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None):
     """Core backtesting simulation logic."""
-    from indicators import get_signals
 
     fee_rate = 0.001 # Default 0.1%
     if exchange:
@@ -1514,10 +1517,14 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     symbols_to_bench = []
     for symbol in symbols:
         if term_override:
-            cached = cache_mgr.get(symbol, term_override, validity_map.get(term_override, 3600))
-            if cached:
-                cached['is_cached'] = True
-                optimization_map[symbol] = cached
+            cached_patterns = cache_mgr.get(symbol, term_override, validity_map.get(term_override, 3600))
+            if cached_patterns:
+                # cached_patterns is a list of pattern dicts
+                best = cached_patterns[0]
+                best['is_cached'] = True
+                optimization_map[symbol] = best
+                if data_manager:
+                    data_manager.set_patterns(symbol, cached_patterns)
                 continue
         symbols_to_bench.append(symbol)
 

@@ -33,7 +33,7 @@ class ExchangeInterface:
 class BinanceExchange(ExchangeInterface):
     def __init__(self, api_key, api_secret):
         self.exchange = ccxt.binance({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 30},
         })
 
     def load_markets(self):
@@ -105,7 +105,7 @@ class MockExchange(ExchangeInterface):
         self.markets = {}
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                self.real_exchange = ccxt.binance({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
+                self.real_exchange = ccxt.binance({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 30}})
                 logging.info("Mock initialized with real API balance fetching (markets deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")
 
