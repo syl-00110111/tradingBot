@@ -618,9 +618,7 @@ def main():
             console.print(f"[bold green]GPU Acceleration enabled using device: {device}[/]")
 
         db_handler.duration = 5
-        data_manager = None
-        if args.mode in ['live', 'simulation', 'sell']:
-            data_manager = DataManager(args.mode)
+        data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation', 'sell'] else None
         engine = TradingEngine(config)
 
         # Use credentials from api.json if available, otherwise config.default.json
@@ -675,12 +673,6 @@ def main():
                 # data can be a list (patterns) or a single pattern (legacy cache)
                 best = data[0] if isinstance(data, list) else data
                 if sym in config['pairs']:
-                        # Force scientific defaults for specific pairs (Urquhart, 2016; Zhang et al., 2020)
-                        if sym == 'BTC/EUR':
-                            best['strategy'] = 'double_ema_macd_rsi' # Recommends MACD/RSI
-                        elif sym == 'ETH/EUR':
-                            best['strategy'] = 'stochastic_rsi' # Recommends Stochastic
-
                         config['pairs'][sym]['aggr'] = best['aggr']
                         config['pairs'][sym]['strategy'] = best['strategy']
 
@@ -784,7 +776,7 @@ def analyze_pair(exchange, data_manager, symbol, pair_config, global_config, eng
             if len(df) < p_len: continue
 
             buffer_window = df.iloc[-p_len:]
-            sim = calculate_similarity(buffer_window, p)
+            sim = calculate_similarity(buffer_window, p, device=device)
             if sim > 0.70 and sim > best_sim: # Lowered threshold to 70% for better responsiveness
                 best_sim = sim
                 active_pattern = p
@@ -1243,6 +1235,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
 
 def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False):
     """Core backtesting simulation logic."""
+    from indicators import get_signals
 
     fee_rate = 0.001 # Default 0.1%
     if exchange:
@@ -1291,14 +1284,16 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     else:
         df = df_in.copy()
-    if "buy_signal" not in df.columns:
+
+    if 'buy_signal' not in df.columns:
         try:
-            test_config["device"] = device if device is not None else torch.device("cpu")
+            test_config['device'] = device if device is not None else torch.device('cpu')
             df = get_signals(df, test_config, is_backtest=True)
         except Exception as e:
             if exchange is not None:
                  console.print(f"[red]Error calculating signals for {symbol}: {e}[/]")
             return None
+
     if df is None or df.empty:
         if exchange is not None:
              console.print(f"[red]Signal calculation returned empty for {symbol}.[/]")
@@ -1401,10 +1396,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     }
 
 def run_backtest_mode(exchange, config, args, engine=None, device=None):
-    # Scientific defaults for specific pairs (Urquhart, 2016; Zhang et al., 2020)
+    # Default strategy for backtest
     default_strategy = "double_ema_macd_rsi"
-    if args.symbol == 'BTC/EUR': default_strategy = "double_ema_macd_rsi" # MACD/RSI
-    elif args.symbol == 'ETH/EUR': default_strategy = "stochastic_rsi" # Stochastic
 
     strategy = args.strategy or default_strategy
     aggr = args.aggr or config.get('force_agressivity_to_all_pairs', 'normal')
@@ -1678,6 +1671,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                          except Exception: pass
 
                     symbol_data_map[symbol] = df
+                    ohlcv_cache[cache_key] = df
                     if not status: console.print(f"[dim][{symbol}] Successfully fetched {len(df)} candles.[/]")
                 else:
                     if not status: console.print(f"[yellow]No OHLCV returned for {symbol} ({timeframe}) during pre-fetch.[/]")
