@@ -1299,13 +1299,6 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
             if exchange is not None:
                  console.print(f"[red]Error calculating signals for {symbol}: {e}[/]")
             return None
-    else:
-        # Signals already present in df_in
-        pass
-        if exchange is not None:
-             console.print(f"[red]Error calculating signals for {symbol}: {e}[/]")
-        return None
-
     if df is None or df.empty:
         if exchange is not None:
              console.print(f"[red]Signal calculation returned empty for {symbol}.[/]")
