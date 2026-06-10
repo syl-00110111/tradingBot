@@ -1,0 +1,760 @@
+# Binance Trading Bot - Technical Strategies
+# Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+import pandas as pd
+import pandas_ta as ta
+import numpy as np
+from monte_carlo import MonteCarloEngine
+
+STRATEGIES = [
+    'moving_averages', 'ichimoku_cloud', 'parabolic_sar', 'rsi_support_resistance',
+    'bollinger_bands', 'macd_range', 'breakout_volume', 'donchian_channels',
+    'atr_breakout', 'stochastic_rsi', 'williams_r', 'vwap_momentum',
+    'order_flow_proxy', 'renko_proxy', 'tick_proxy', 'ema_rsi_volume',
+    'macd_bollinger_bands', 'double_ema', 'double_ema_macd_rsi',
+    'mc_mean_reversion', 'mc_momentum', 'mc_dynamic_allocation', 'mc_market_making',
+    'mc_stop_loss_eval', 'mc_options_pricing',
+    'whale_detection_proxy', 'pump_dump_proxy', 'market_regime_proxy', 'scientific_ensemble',
+    'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'mvrv_proxy', 'adx_trend_strength',
+    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy'
+]
+
+# Global MC engine for reuse
+_mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
+
+def get_signals(df, mode_config, is_backtest=False):
+    """
+    Dispatcher for multiple trading strategies.
+    Selected strategy is defined in mode_config['strategy'].
+    """
+    strategy = mode_config.get('strategy', 'double_ema_macd_rsi')
+
+    # Common indicators for tendency and background analysis (Expert Mode)
+    if df.empty: return df
+    ema_f = ta.ema(df['close'], length=8)
+    df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
+    ema_s = ta.ema(df['close'], length=18)
+    df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
+
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    if macd is not None:
+        df['macd_val'] = macd.iloc[:, 0].fillna(0)
+        df['macd_sig'] = macd.iloc[:, 1].fillna(0)
+        df['macd_hist'] = macd.iloc[:, 2].fillna(0) # MACDh
+    else:
+        df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
+
+    rsi = ta.rsi(df['close'], length=14)
+    df['rsi'] = rsi.fillna(50) if rsi is not None else 50
+
+    # ADX and Volatility
+    adx_df = ta.adx(df['high'], df['low'], df['close'])
+    if adx_df is not None:
+        df['adx'] = adx_df.iloc[:, 0].fillna(0)
+    else:
+        df['adx'] = 0
+
+    df['returns'] = np.log(df['close'] / df['close'].shift(1))
+    df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+
+    # Whale Detection Proxy (Common)
+    df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
+    df['vol_std_whale'] = df['volume'].rolling(window=20).std()
+    df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
+
+    # Market Regime Proxy (Common)
+    df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
+    df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
+
+    # Calculate tendency (used for UI)
+    def get_tendency(row):
+        ema_diff = row['ema_f'] - row['ema_s']
+        price = row['close']
+        macd_hist = row['macd_hist']
+        if price == 0 or np.isnan(ema_diff) or np.isnan(macd_hist): return "Neutral"
+        if abs(ema_diff) / price < 0.001: return "Range"
+        if ema_diff > 0 and macd_hist > 0: return "Bullish"
+        if ema_diff < 0 and macd_hist < 0: return "Bearish"
+        return "Neutral"
+
+    df['tendency'] = df.apply(get_tendency, axis=1)
+
+    # Strategy Selection
+    if df.empty:
+        return df
+    if strategy == 'double_ema':
+        df = strategy_double_ema(df, mode_config)
+    elif strategy == 'double_ema_macd_rsi':
+        df = strategy_double_ema_macd_rsi(df, mode_config)
+    elif strategy == 'moving_averages':
+        df = strategy_moving_averages(df, mode_config)
+    elif strategy == 'ichimoku_cloud':
+        df = strategy_ichimoku(df, mode_config)
+    elif strategy == 'parabolic_sar':
+        df = strategy_psar(df, mode_config)
+    elif strategy == 'rsi_support_resistance':
+        df = strategy_rsi_sr(df, mode_config)
+    elif strategy == 'bollinger_bands':
+        df = strategy_bollinger(df, mode_config)
+    elif strategy == 'macd_range':
+        df = strategy_macd_range(df, mode_config)
+    elif strategy == 'breakout_volume':
+        df = strategy_breakout_volume(df, mode_config)
+    elif strategy == 'donchian_channels':
+        df = strategy_donchian(df, mode_config)
+    elif strategy == 'atr_breakout':
+        df = strategy_atr_breakout(df, mode_config)
+    elif strategy == 'stochastic_rsi':
+        df = strategy_stoch_rsi(df, mode_config)
+    elif strategy == 'williams_r':
+        df = strategy_williams_r(df, mode_config)
+    elif strategy == 'vwap_momentum':
+        df = strategy_vwap_momentum(df, mode_config)
+    elif strategy == 'order_flow_proxy':
+        df = strategy_order_flow_proxy(df, mode_config)
+    elif strategy == 'renko_proxy':
+        df = strategy_renko_proxy(df, mode_config)
+    elif strategy == 'tick_proxy':
+        df = strategy_tick_proxy(df, mode_config)
+    elif strategy == 'ema_rsi_volume':
+        df = strategy_ema_rsi_volume(df, mode_config)
+    elif strategy == 'macd_bollinger_bands':
+        df = strategy_macd_bollinger(df, mode_config)
+    elif strategy.startswith('mc_'):
+        df = handle_mc_strategies(df, strategy, mode_config, is_backtest)
+    elif strategy == 'whale_detection_proxy':
+        df = strategy_whale_detection(df, mode_config)
+    elif strategy == 'pump_dump_proxy':
+        df = strategy_pump_dump(df, mode_config)
+    elif strategy == 'market_regime_proxy':
+        df = strategy_market_regime(df, mode_config)
+    elif strategy == 'scientific_ensemble':
+        df = strategy_scientific_ensemble(df, mode_config)
+    elif strategy == 'sentiment_momentum_proxy':
+        df = strategy_sentiment_momentum(df, mode_config)
+    elif strategy == 'liquidation_cascade_proxy':
+        df = strategy_liquidation_cascade(df, mode_config)
+    elif strategy == 'mvrv_proxy':
+        df = strategy_mvrv_proxy(df, mode_config)
+    elif strategy == 'adx_trend_strength':
+        df = strategy_adx_trend(df, mode_config)
+    elif strategy == 'pairs_trading_proxy':
+        df = strategy_pairs_trading(df, mode_config)
+    elif strategy == 'halving_cycle_proxy':
+        df = strategy_halving_cycle(df, mode_config)
+    elif strategy == 'listing_surge_proxy':
+        df = strategy_listing_surge(df, mode_config)
+    else:
+        df = strategy_double_ema_macd_rsi(df, mode_config)
+
+    return df
+
+def apply_confirmation(df, window):
+    """Applies rolling max to signals within a confirmation window."""
+    df['buy_signal'] = df['buy_candidate'].rolling(window=window).max() > 0
+    df['sell_signal'] = df['sell_candidate'].rolling(window=window).max() > 0
+    return df
+
+def normalize_series(series):
+    """Min-max normalization to [0, 1]."""
+    if series.empty or series.max() == series.min():
+        return series * 0
+    return (series - series.min()) / (series.max() - series.min())
+
+def calculate_similarity(buffer_df, pattern):
+    """
+    Calculates similarity between current buffer and a success pattern.
+    Combines shape correlation (price) and technical state distance.
+    """
+    if len(buffer_df) != len(pattern['prices']):
+        return 0.0
+
+    # 1. Shape Correlation (Normalized Prices)
+    current_prices = normalize_series(buffer_df['close'])
+    pattern_prices = pd.Series(pattern['prices'])
+    shape_corr = current_prices.corr(pattern_prices)
+    if np.isnan(shape_corr): shape_corr = 0.0
+
+    # 2. Technical State Distance (Euclidean)
+    # We compare RSI and ADX states at the end of the window
+    curr_rsi = buffer_df['rsi'].iloc[-1]
+    curr_adx = buffer_df['adx'].iloc[-1]
+
+    dist_rsi = abs(curr_rsi - pattern['tech_state']['rsi']) / 100.0
+    dist_adx = abs(curr_adx - pattern['tech_state']['adx']) / 100.0
+    tech_sim = 1.0 - (dist_rsi + dist_adx) / 2.0
+
+    # Combined Score (Weight: 70% Shape, 30% Tech)
+    combined = (0.7 * max(0, shape_corr)) + (0.3 * max(0, tech_sim))
+    return combined
+
+def handle_mc_strategies(df, strategy, config, is_backtest):
+    """Helper to run MC strategies only on necessary rows."""
+    df['buy_candidate'] = False
+    df['sell_candidate'] = False
+
+    # Range of indices to calculate (all if backtest, only last if not)
+    # Actually backtest might need a window.
+    start_idx = 0 if is_backtest else len(df) - 1
+
+    if strategy == 'mc_mean_reversion':
+        df['sma_20'] = ta.sma(df['close'], length=20)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std()
+
+        for i in range(start_idx, len(df)):
+            row = df.iloc[i]
+            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
+            prob = _mc_engine.estimate_hit_probability(row['close'], row['sma_20'], row['volatility'], mode='above' if row['close'] < row['sma_20'] else 'below')
+            df.at[df.index[i], 'buy_candidate'] = (row['close'] < row['sma_20']) and (prob > 0.7)
+            df.at[df.index[i], 'sell_candidate'] = (row['close'] > row['sma_20']) and (prob > 0.7)
+
+    elif strategy == 'mc_momentum':
+        df['sma_20'] = ta.sma(df['close'], length=20)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std()
+        df['drift'] = df['returns'].rolling(window=20).mean()
+
+        for i in range(start_idx, len(df)):
+            row = df.iloc[i]
+            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
+            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 1.02, row['volatility'], drift=row['drift'], mode='above')
+            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.98, row['volatility'], drift=row['drift'], mode='below')
+            df.at[df.index[i], 'buy_candidate'] = (row['close'] > row['sma_20']) and (prob_up > 0.6)
+            df.at[df.index[i], 'sell_candidate'] = (row['close'] < row['sma_20']) and (prob_down > 0.6)
+
+    elif strategy == 'mc_dynamic_allocation':
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std()
+        threshold = 0.05 / np.sqrt(365)
+        df['buy_candidate'] = (df['volatility'] < threshold) & (df['volatility'].shift(1) >= threshold)
+        df['sell_candidate'] = (df['volatility'] > threshold) & (df['volatility'].shift(1) <= threshold)
+
+    elif strategy == 'mc_market_making':
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=10).std()
+        for i in range(start_idx, len(df)):
+            row = df.iloc[i]
+            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
+            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 1.001, row['volatility'], mode='above')
+            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.999, row['volatility'], mode='below')
+            df.at[df.index[i], 'buy_candidate'] = prob_up > 0.8
+            df.at[df.index[i], 'sell_candidate'] = prob_down > 0.8
+
+    elif strategy == 'mc_stop_loss_eval':
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std()
+        for i in range(start_idx, len(df)):
+            row = df.iloc[i]
+            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
+            prob_sl = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.95, row['volatility'], mode='below')
+            df.at[df.index[i], 'sell_candidate'] = prob_sl > 0.4
+
+    elif strategy == 'mc_options_pricing':
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std()
+        for i in range(start_idx, len(df)):
+            row = df.iloc[i]
+            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
+            call_p = _mc_engine.price_option(row['close'], row['close'] * 1.05, row['volatility'], option_type='call')
+            put_p = _mc_engine.price_option(row['close'], row['close'] * 0.95, row['volatility'], option_type='put')
+            df.at[df.index[i], 'buy_candidate'] = call_p > put_p * 1.5
+            df.at[df.index[i], 'sell_candidate'] = put_p > call_p * 1.5
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+# --- 1. TREND FOLLOWING ---
+
+def strategy_moving_averages(df, config):
+    df['ma_9'] = ta.ema(df['close'], length=9)
+    df['ma_21'] = ta.ema(df['close'], length=21)
+    df['ma_50'] = ta.ema(df['close'], length=50)
+    df['ma_200'] = ta.ema(df['close'], length=200)
+
+    # Fill NaN to avoid comparison errors
+    df['ma_9'] = df['ma_9'].fillna(0)
+    df['ma_21'] = df['ma_21'].fillna(0)
+    df['ma_50'] = df['ma_50'].fillna(0)
+    df['ma_200'] = df['ma_200'].fillna(0)
+
+    df['buy_candidate'] = (df['ma_9'] > df['ma_21']) & (df['ma_9'].shift(1) <= df['ma_21'].shift(1)) & (df['close'] > df['ma_200'])
+    df['sell_candidate'] = (df['close'] < df['ma_50']) & (df['close'].shift(1) >= df['ma_50'].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_ichimoku(df, config):
+    ichi_result = ta.ichimoku(df['high'], df['low'], df['close'])
+    if ichi_result is not None and len(ichi_result) > 0:
+        ichimoku = ichi_result[0]
+        df['tenkan'] = ichimoku.iloc[:, 0].fillna(df['close'])
+        df['kijun'] = ichimoku.iloc[:, 1].fillna(df['close'])
+        df['span_a'] = ichimoku.iloc[:, 2].fillna(df['close'])
+        df['span_b'] = ichimoku.iloc[:, 3].fillna(df['close'])
+    else:
+        df['tenkan'] = df['kijun'] = df['span_a'] = df['span_b'] = df['close']
+
+    df['buy_candidate'] = (df['tenkan'] > df['kijun']) & (df['close'] > df['span_a']) & (df['close'] > df['span_b'])
+    df['sell_candidate'] = (df['tenkan'] < df['kijun'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_psar(df, config):
+    psar = ta.psar(df['high'], df['low'], df['close'])
+    if psar is not None and not psar.empty:
+        l_col = [c for c in psar.columns if 'PSARl' in c]
+        s_col = [c for c in psar.columns if 'PSARs' in c]
+        df['psar_long'] = psar[l_col[0]] if l_col else np.nan
+        df['psar_short'] = psar[s_col[0]] if s_col else np.nan
+    else:
+        df['psar_long'] = df['psar_short'] = np.nan
+
+    df['buy_candidate'] = df['psar_long'].notna() & df['psar_long'].shift(1).isna()
+    df['sell_candidate'] = df['psar_short'].notna() & df['psar_short'].shift(1).isna()
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+# --- 2. RANGE ---
+
+def strategy_rsi_sr(df, config):
+    df['rsi'] = ta.rsi(df['close'], length=14)
+    df['support'] = df['low'].rolling(window=50).min()
+    df['resistance'] = df['high'].rolling(window=50).max()
+
+    # Fill defaults
+    df['rsi'] = df['rsi'].fillna(50)
+    df['support'] = df['support'].fillna(df['low'])
+    df['resistance'] = df['resistance'].fillna(df['high'])
+
+    df['buy_candidate'] = (df['rsi'] < 30) & (df['close'] <= df['support'] * 1.01)
+    df['sell_candidate'] = (df['rsi'] > 70) & (df['close'] >= df['resistance'] * 0.99)
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_bollinger(df, config):
+    bb = ta.bbands(df['close'], length=20, std=2)
+    if bb is not None and not bb.empty:
+        df['bb_low'] = bb.iloc[:, 0].fillna(df['close'])
+        df['bb_mid'] = bb.iloc[:, 1].fillna(df['close'])
+        df['bb_high'] = bb.iloc[:, 2].fillna(df['close'])
+    else:
+        df['bb_low'] = df['bb_mid'] = df['bb_high'] = df['close']
+
+    df['rsi'] = ta.rsi(df['close'], length=14)
+    df['rsi'] = df['rsi'].fillna(50)
+
+    df['buy_candidate'] = (df['close'] <= df['bb_low']) & (df['rsi'] < 35)
+    df['sell_candidate'] = (df['close'] >= df['bb_mid'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_macd_range(df, config):
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    if macd is not None:
+        df['macd_val'] = macd.iloc[:, 0]
+        df['macd_sig'] = macd.iloc[:, 1]
+    else:
+        df['macd_val'] = df['macd_sig'] = 0
+
+    df['buy_candidate'] = (df['tendency'] == "Range") & (df['macd_val'] > df['macd_sig']) & (df['macd_val'].shift(1) <= df['macd_sig'].shift(1))
+    df['sell_candidate'] = (df['macd_val'] < df['macd_sig']) & (df['macd_val'].shift(1) >= df['macd_sig'].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+# --- 3. BREAKOUT ---
+
+def strategy_breakout_volume(df, config):
+    df['resistance'] = df['high'].rolling(window=20).max().shift(1)
+    df['vol_ma'] = ta.sma(df['volume'], length=20)
+
+    df['buy_candidate'] = (df['close'] > df['resistance']) & (df['volume'] > df['vol_ma'] * 2)
+    df['ma_20'] = ta.sma(df['close'], length=20)
+    df['sell_candidate'] = (df['close'] < df['ma_20'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_donchian(df, config):
+    dc = ta.donchian(df['high'], df['low'], length=20)
+    if dc is not None:
+        df['dc_upper'] = dc.iloc[:, 0]
+        df['dc_lower'] = dc.iloc[:, 2]
+    else:
+        df['dc_upper'] = df['high']
+        df['dc_lower'] = df['low']
+
+    df['buy_candidate'] = (df['close'] >= df['dc_upper'])
+    df['sell_candidate'] = (df['close'] <= df['dc_lower'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_atr_breakout(df, config):
+    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    df['resistance'] = df['high'].rolling(window=30).max().shift(1)
+
+    df['buy_candidate'] = (df['close'] > df['resistance']) & (df['atr'] > df['atr'].shift(1))
+    df['sell_candidate'] = (df['close'] < (df['close'].shift(1) - 2 * df['atr']))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+# --- 4. MOMENTUM ---
+
+def strategy_stoch_rsi(df, config):
+    stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
+    if stoch is not None:
+        df['stoch_k'] = stoch.iloc[:, 0]
+    else:
+        df['stoch_k'] = 50
+
+    df['buy_candidate'] = (df['stoch_k'] < 20) & (df['stoch_k'] > df['stoch_k'].shift(1))
+    df['sell_candidate'] = (df['stoch_k'] > 80) & (df['stoch_k'] < df['stoch_k'].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_williams_r(df, config):
+    df['willr'] = ta.willr(df['high'], df['low'], df['close'], length=14)
+
+    df['buy_candidate'] = (df['willr'] < -80) & (df['willr'] > df['willr'].shift(1))
+    df['sell_candidate'] = (df['willr'] > -20) & (df['willr'] < df['willr'].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_vwap_momentum(df, config):
+    df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
+
+    df['buy_candidate'] = (df['close'] > df['vwap']) & (df['volume'] > df['volume'].shift(1))
+    df['sell_candidate'] = (df['close'] < df['vwap'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+# --- 5. SCALPING (Proxies) ---
+
+def strategy_order_flow_proxy(df, config):
+    df['vol_delta'] = df['volume'] * (df['close'] - df['open']) / (df['high'] - df['low'] + 0.000001)
+    df['vol_delta_ma'] = df['vol_delta'].rolling(window=10).mean()
+
+    df['buy_candidate'] = (df['vol_delta'] > df['vol_delta_ma'] * 1.5) & (df['close'] > df['open'])
+    df['sell_candidate'] = (df['vol_delta'] < 0)
+
+    return apply_confirmation(df, config.get('confirmation_window', 2))
+
+def strategy_renko_proxy(df, config):
+    df['body'] = (df['close'] - df['open']).abs()
+    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+
+    df['buy_candidate'] = (df['body'] > df['atr']) & (df['close'] > df['open'])
+    df['sell_candidate'] = (df['body'] > df['atr']) & (df['close'] < df['open'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 2))
+
+def strategy_tick_proxy(df, config):
+    df['velocity'] = (df['close'] - df['close'].shift(5)) / 5
+
+    df['buy_candidate'] = (df['velocity'] > df['velocity'].rolling(window=20).std() * 2)
+    df['sell_candidate'] = (df['close'] < df['close'].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 2))
+
+# --- 6. HYBRIDS ---
+
+def strategy_ema_rsi_volume(df, config):
+    df['ema_9'] = ta.ema(df['close'], length=9).fillna(df['close'])
+    df['ema_21'] = ta.ema(df['close'], length=21).fillna(df['close'])
+    df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
+    df['vol_ma'] = ta.sma(df['volume'], length=20).fillna(df['volume'])
+
+    df['buy_candidate'] = (df['ema_9'] > df['ema_21']) & (df['rsi'] > 50) & (df['volume'] > df['vol_ma'])
+    df['sell_candidate'] = (df['ema_9'] < df['ema_21'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_macd_bollinger(df, config):
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    if macd is not None:
+        df['macd_val'] = macd.iloc[:, 0]
+        df['macd_sig'] = macd.iloc[:, 1]
+    else:
+        df['macd_val'] = df['macd_sig'] = 0
+
+    bb = ta.bbands(df['close'], length=20, std=2)
+    if bb is not None:
+        df['bb_low'] = bb.iloc[:, 0]
+    else:
+        df['bb_low'] = df['close']
+
+    df['buy_candidate'] = (df['macd_val'] > df['macd_sig']) & (df['close'] <= df['bb_low'] * 1.01)
+    df['sell_candidate'] = (df['macd_val'] < df['macd_sig'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+# --- SCIENTIFIC PROXIES ---
+
+def strategy_whale_detection(df, config):
+    """
+    Proxy for On-Chain metrics (Bartoletti et al., 2017).
+    Detects unusual volume spikes accompanied by price stability/movement
+    to infer big player activity.
+    """
+    df['vol_ma'] = ta.sma(df['volume'], length=20)
+    df['vol_std'] = df['volume'].rolling(window=20).std()
+
+    # Significant volume spike: volume > 3 standard deviations above mean
+    df['whale_spike'] = df['volume'] > (df['vol_ma'] + 3 * df['vol_std'])
+
+    # Buy if volume spike and price moves up
+    df['buy_candidate'] = df['whale_spike'] & (df['close'] > df['close'].shift(1))
+    df['sell_candidate'] = df['whale_spike'] & (df['close'] < df['close'].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 2))
+
+def strategy_pump_dump(df, config):
+    """
+    Proxy for Pump and Dump detection (Kamps et Kleinberg, 2018).
+    Detects extreme price-volume divergence.
+    """
+    df['vol_change'] = df['volume'].pct_change()
+    df['price_change'] = df['close'].pct_change()
+
+    # Pump: Price and Volume both surge suddenly
+    df['pump_detected'] = (df['vol_change'] > 5.0) & (df['price_change'] > 0.05)
+
+    # Dump: After a pump, price stops growing but volume remains high or drops
+    df['buy_candidate'] = False # Don't buy pumps
+    df['sell_candidate'] = df['pump_detected'].shift(1) & (df['close'] < df['close'].shift(1))
+
+    return apply_confirmation(df, 1)
+
+def strategy_market_regime(df, config):
+    """
+    Mean-reversion vs Trend detection based on volatility (Baur et Dimpfl, 2021).
+    """
+    df['returns'] = np.log(df['close'] / df['close'].shift(1))
+    df['volatility'] = df['returns'].rolling(window=20).std()
+    df['vol_ma'] = df['volatility'].rolling(window=50).mean()
+
+    # High volatility regime -> Mean Reversion (Bollinger Bands)
+    bb = ta.bbands(df['close'], length=20, std=2)
+    df['bb_low'] = bb.iloc[:, 0] if bb is not None else df['close']
+    df['bb_high'] = bb.iloc[:, 2] if bb is not None else df['close']
+
+    # Low volatility regime -> Trend Following (EMA)
+    df['ema_9'] = ta.ema(df['close'], length=9).fillna(df['close'])
+    df['ema_21'] = ta.ema(df['close'], length=21).fillna(df['close'])
+
+    # Vectorized market regime switching
+    df['buy_candidate'] = np.where(df['volatility'] > df['vol_ma'],
+                                   df['close'] < df['bb_low'],
+                                   df['ema_9'] > df['ema_21'])
+    df['sell_candidate'] = np.where(df['volatility'] > df['vol_ma'],
+                                    df['close'] > df['bb_high'],
+                                    df['ema_9'] < df['ema_21'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_scientific_ensemble(df, config):
+    """
+    LSTM/Machine Learning Ensemble Proxy (Makarov et al., 2019; Zhang et al., 2020).
+    Weights MACD, RSI, and Bollinger.
+    """
+    # Use existing macd/rsi from get_signals
+    bb = ta.bbands(df['close'], length=20, std=2)
+    df['bb_low'] = bb.iloc[:, 0] if bb is not None else df['close']
+    df['bb_high'] = bb.iloc[:, 2] if bb is not None else df['close']
+
+    # Score-based approach
+    df['score'] = 0
+    df.loc[df['rsi'] < 35, 'score'] += 1
+    df.loc[df['rsi'] > 65, 'score'] -= 1
+    df.loc[df['macd_val'] > df['macd_sig'], 'score'] += 1
+    df.loc[df['macd_val'] < df['macd_sig'], 'score'] -= 1
+    df.loc[df['close'] < df['bb_low'], 'score'] += 1
+    df.loc[df['close'] > df['bb_high'], 'score'] -= 1
+
+    df['buy_candidate'] = df['score'] >= 1
+    df['sell_candidate'] = df['score'] <= -1
+
+    return apply_confirmation(df, config.get('confirmation_window', 2))
+
+def strategy_sentiment_momentum(df, config):
+    """
+    Social Media Sentiment Proxy (Abraham et al., 2018).
+    Uses price acceleration and RSI divergence as a proxy for "FOMO" or "Fear".
+    """
+    df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
+    df['roc'] = ta.roc(df['close'], length=10).fillna(0)
+    df['acceleration'] = df['roc'].diff().fillna(0)
+
+    # Positive sentiment: Price accelerating upwards + RSI not yet overbought
+    df['buy_candidate'] = (df['acceleration'] > 0) & (df['roc'] > 0) & (df['rsi'] < 60)
+    # Negative sentiment: Price decelerating or dropping fast + RSI oversold (panic)
+    df['sell_candidate'] = (df['acceleration'] < 0) & (df['roc'] < 0) & (df['rsi'] > 40)
+
+    return apply_confirmation(df, config.get('confirmation_window', 2))
+
+def strategy_liquidation_cascade(df, config):
+    """
+    Liquidation Cascade Proxy (Makarov et Schoar, 2020).
+    Detects high-volume sharp price drops (long liquidations) as buying opportunities,
+    or sharp rises as selling opportunities.
+    """
+    df['pct_change'] = df['close'].pct_change().fillna(0)
+    df['vol_ma'] = ta.sma(df['volume'], length=20).fillna(df['volume'])
+
+    # Cascade: Price drops > 2% in one candle + Volume > 2x average
+    df['long_liquidation'] = (df['pct_change'] < -0.02) & (df['volume'] > df['vol_ma'] * 2)
+    df['short_liquidation'] = (df['pct_change'] > 0.02) & (df['volume'] > df['vol_ma'] * 2)
+
+    # Buy the blood (after cascade)
+    df['buy_candidate'] = df['long_liquidation'].shift(1) & (df['close'] > df['close'].shift(1))
+    # Sell the squeeze
+    df['sell_candidate'] = df['short_liquidation'].shift(1) & (df['close'] < df['close'].shift(1))
+
+    return apply_confirmation(df, 1)
+
+def strategy_mvrv_proxy(df, config):
+    """
+    MVRV Ratio Proxy (Ciaian et al., 2018).
+    Proxy: Price / 200-day Moving Average (Market Value to 'Realized' Value proxy).
+    """
+    df['realized_proxy'] = ta.sma(df['close'], length=200).fillna(df['close'])
+    df['mvrv_proxy'] = df['close'] / df['realized_proxy']
+
+    # Buy when undervalued (MVRV < 0.8), sell when overvalued (MVRV > 2.0)
+    df['buy_candidate'] = df['mvrv_proxy'] < 0.95
+    df['sell_candidate'] = df['mvrv_proxy'] > 1.05
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_adx_trend(df, config):
+    """
+    ADX Trend Strength (Zhang et al., 2020).
+    Only trade when trend is strong (ADX > 25).
+    """
+    adx = ta.adx(df['high'], df['low'], df['close'])
+    if adx is not None:
+        df['adx'] = adx.iloc[:, 0].fillna(0)
+        df['dmp'] = adx.iloc[:, 1].fillna(0)
+        df['dmn'] = adx.iloc[:, 2].fillna(0)
+    else:
+        df['adx'] = df['dmp'] = df['dmn'] = 0
+
+    df['buy_candidate'] = (df['adx'] > 25) & (df['dmp'] > df['dmn'])
+    df['sell_candidate'] = (df['adx'] > 25) & (df['dmn'] > df['dmp'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 2))
+
+def strategy_pairs_trading(df, config):
+    """
+    Statistical Arbitrage Proxy (Grobys et al., 2020).
+    Proxy: Asset vs moving average of its own price (Self-pairs trading/Mean reversion).
+    """
+    df['ma_50'] = ta.sma(df['close'], length=50).fillna(df['close'])
+    df['z_score'] = (df['close'] - df['ma_50']) / df['close'].rolling(window=50).std()
+
+    df['buy_candidate'] = df['z_score'] < -2.0
+    df['sell_candidate'] = df['z_score'] > 2.0
+
+    return apply_confirmation(df, 1)
+
+def strategy_halving_cycle(df, config):
+    """
+    Bitcoin Halving Cycle Proxy (Bouoiyour & Selmi, 2020).
+    Uses very long term EMA (200) to ensure alignment with major market cycles.
+    """
+    df['ema_200'] = ta.ema(df['close'], length=200).fillna(df['close'])
+    df['ema_50'] = ta.ema(df['close'], length=50).fillna(df['close'])
+
+    # Buy only when above 200 EMA (Bull market cycle)
+    df['buy_candidate'] = (df['close'] > df['ema_200']) & (df['close'] > df['ema_50']) & (df['close'].shift(1) <= df['ema_50'].shift(1))
+    df['sell_candidate'] = (df['close'] < df['ema_50'])
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_listing_surge(df, config):
+    """
+    Exchange Listing Surge Proxy (Hau et al., 2021).
+    Detects extreme volume increase on relatively "flat" price history.
+    """
+    df['vol_ma'] = ta.sma(df['volume'], length=50).fillna(df['volume'])
+    df['price_std'] = df['close'].rolling(window=50).std().fillna(0)
+
+    # Surge: Volume > 10x average + Price breakout
+    df['surge'] = (df['volume'] > df['vol_ma'] * 5) & (df['close'] > df['close'].shift(1) + 2 * df['price_std'])
+
+    df['buy_candidate'] = df['surge']
+    df['sell_candidate'] = df['close'] < df['close'].shift(3) # Exit fast after surge
+
+    return apply_confirmation(df, 1)
+
+# --- LEGACY / ORIGINAL ---
+
+def strategy_double_ema(df, config):
+    ema_fast = config.get('ema_fast', 8)
+    ema_slow = config.get('ema_slow', 18)
+    df['ema_f'] = ta.ema(df['close'], length=ema_fast)
+    df['ema_s'] = ta.ema(df['close'], length=ema_slow)
+    df['buy_candidate'] = (df['ema_f'] > df['ema_s']) & (df['ema_f'].shift(1) <= df['ema_s'].shift(1))
+    df['sell_candidate'] = (df['ema_f'] < df['ema_s']) & (df['ema_f'].shift(1) >= df['ema_s'].shift(1))
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_double_ema_macd_rsi(df, config):
+    ema_fast = config.get('ema_fast', 8)
+    ema_slow = config.get('ema_slow', 18)
+    df['ema_f_strat'] = ta.ema(df['close'], length=ema_fast)
+    df['ema_s_strat'] = ta.ema(df['close'], length=ema_slow)
+    df['ema_up'] = (df['ema_f_strat'] > df['ema_s_strat']) & (df['ema_f_strat'].shift(1) <= df['ema_s_strat'].shift(1))
+    df['ema_down'] = (df['ema_f_strat'] < df['ema_s_strat']) & (df['ema_f_strat'].shift(1) >= df['ema_s_strat'].shift(1))
+
+    # Fill NaNs before rolling logic to avoid empty results in small windows
+    df['ema_up'] = df['ema_up'].fillna(False)
+    df['ema_down'] = df['ema_down'].fillna(False)
+
+    macd_f = config.get('macd_fast', 12)
+    macd_s = config.get('macd_slow', 26)
+    macd_sig = config.get('macd_signal', 9)
+    macd = ta.macd(df['close'], fast=macd_f, slow=macd_s, signal=macd_sig)
+    if macd is not None:
+        df['macd_val_strat'] = macd.iloc[:, 0]
+        df['macd_sig_strat'] = macd.iloc[:, 1]
+    else:
+        df['macd_val_strat'] = df['macd_sig_strat'] = 0
+
+    df['macd_up'] = (df['macd_val_strat'] > df['macd_sig_strat']) & (df['macd_val_strat'].shift(1) <= df['macd_sig_strat'].shift(1))
+    df['macd_down'] = (df['macd_val_strat'] < df['macd_sig_strat']) & (df['macd_val_strat'].shift(1) >= df['macd_sig_strat'].shift(1))
+
+    df['macd_up'] = df['macd_up'].fillna(False)
+    df['macd_down'] = df['macd_down'].fillna(False)
+
+    rsi_p = config.get('rsi_period', 14)
+    df['rsi_strat'] = ta.rsi(df['close'], length=rsi_p)
+    rsi_b = config.get('rsi_buy', 30)
+    rsi_s = config.get('rsi_sell', 70)
+    df['rsi_up'] = (df['rsi_strat'] < rsi_b) & (df['rsi_strat'] > df['rsi_strat'].shift(1))
+    df['rsi_down'] = (df['rsi_strat'] > rsi_s) & (df['rsi_strat'] < df['rsi_strat'].shift(1))
+
+    df['rsi_up'] = df['rsi_up'].fillna(False)
+    df['rsi_down'] = df['rsi_down'].fillna(False)
+
+    window = config.get('confirmation_window', 3)
+    df['ema_up_win'] = df['ema_up'].rolling(window=window, min_periods=1).max() > 0
+    df['macd_up_win'] = df['macd_up'].rolling(window=window, min_periods=1).max() > 0
+    df['rsi_up_win'] = df['rsi_up'].rolling(window=window, min_periods=1).max() > 0
+    df['ema_down_win'] = df['ema_down'].rolling(window=window, min_periods=1).max() > 0
+    df['macd_down_win'] = df['macd_down'].rolling(window=window, min_periods=1).max() > 0
+    df['rsi_down_win'] = df['rsi_down'].rolling(window=window, min_periods=1).max() > 0
+
+    df['buy_candidate'] = df['ema_up_win'] & df['macd_up_win'] & df['rsi_up_win']
+    df['sell_candidate'] = df['ema_down_win'] & df['macd_down_win'] & df['rsi_down_win']
+
+    return apply_confirmation(df, 1)
