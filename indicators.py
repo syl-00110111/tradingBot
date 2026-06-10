@@ -17,8 +17,70 @@
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
+import torch
 from monte_carlo import MonteCarloEngine
 
+@torch.jit.script
+def torch_ema_kernel(series: torch.Tensor, alpha: float):
+    n = series.size(0)
+    ema = torch.empty_like(series)
+    if n == 0: return ema
+    ema[0] = series[0]
+    one_minus_alpha = 1.0 - alpha
+    for i in range(1, n):
+        ema[i] = series[i] * alpha + ema[i-1] * one_minus_alpha
+    return ema
+
+def torch_ema(series, length):
+    """High-performance EMA implementation in PyTorch using JIT compilation."""
+    alpha = 2.0 / (length + 1)
+    return torch_ema_kernel(series, float(alpha))
+
+def torch_rsi(series, length):
+    """Vectorized RSI implementation in PyTorch."""
+    if series.size(0) <= length:
+        return torch.full_like(series, 50.0)
+    delta = series[1:] - series[:-1]
+    gain = torch.clamp(delta, min=0)
+    loss = torch.clamp(-delta, min=0)
+    gain = torch.cat([torch.tensor([0.0], device=series.device), gain])
+    loss = torch.cat([torch.tensor([0.0], device=series.device), loss])
+    alpha_wilder = 1.0 / length
+    avg_gain = torch_ema_kernel(gain, float(alpha_wilder))
+    avg_loss = torch_ema_kernel(loss, float(alpha_wilder))
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def torch_macd(series, fast=12, slow=26, signal=9):
+    ema_f = torch_ema(series, fast)
+    ema_s = torch_ema(series, slow)
+    macd = ema_f - ema_s
+    signal_line = torch_ema(macd, signal)
+    hist = macd - signal_line
+    return macd, signal_line, hist
+
+def torch_adx(high, low, close, length=14):
+    """High-performance ADX implementation in PyTorch."""
+    if close.size(0) <= length:
+        return torch.zeros_like(close)
+    up = high[1:] - high[:-1]
+    down = low[:-1] - low[1:]
+    up = torch.cat([torch.tensor([0.0], device=high.device), up])
+    down = torch.cat([torch.tensor([0.0], device=low.device), down])
+    plus_dm = torch.where((up > down) & (up > 0), up, torch.tensor(0.0, device=high.device))
+    minus_dm = torch.where((down > up) & (down > 0), down, torch.tensor(0.0, device=high.device))
+    tr1 = high[1:] - low[1:]
+    tr2 = torch.abs(high[1:] - close[:-1])
+    tr3 = torch.abs(low[1:] - close[:-1])
+    tr = torch.maximum(torch.maximum(tr1, tr2), tr3)
+    tr = torch.cat([torch.tensor([0.0], device=high.device), tr])
+    atr = torch_ema(tr, 2 * length - 1)
+    plus_di = 100 * torch_ema(plus_dm, 2 * length - 1) / (atr + 1e-10)
+    minus_di = 100 * torch_ema(minus_dm, 2 * length - 1) / (atr + 1e-10)
+    dx = 100 * torch.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = torch_ema(dx, 2 * length - 1)
+    return adx
 STRATEGIES = [
     'moving_averages', 'ichimoku_cloud', 'parabolic_sar', 'rsi_support_resistance',
     'bollinger_bands', 'macd_range', 'breakout_volume', 'donchian_channels',
@@ -41,31 +103,38 @@ def get_signals(df, mode_config, is_backtest=False):
     Selected strategy is defined in mode_config['strategy'].
     """
     strategy = mode_config.get('strategy', 'double_ema_macd_rsi')
+    device = mode_config.get('device', torch.device('cpu'))
+    _mc_engine.set_device(device)
 
     # Common indicators for tendency and background analysis (Expert Mode)
     if df.empty: return df
-    ema_f = ta.ema(df['close'], length=8)
-    df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
-    ema_s = ta.ema(df['close'], length=18)
-    df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
-
-    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    if macd is not None:
-        df['macd_val'] = macd.iloc[:, 0].fillna(0)
-        df['macd_sig'] = macd.iloc[:, 1].fillna(0)
-        df['macd_hist'] = macd.iloc[:, 2].fillna(0) # MACDh
+    use_gpu = device.type != 'cpu'
+    if use_gpu:
+        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
+        high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float32)
+        low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float32)
+        df['ema_f'] = torch_ema(close_t, 8).cpu().numpy()
+        df['ema_s'] = torch_ema(close_t, 18).cpu().numpy()
+        m_val, m_sig, m_hist = torch_macd(close_t)
+        df['macd_val'] = m_val.cpu().numpy()
+        df['macd_sig'] = m_sig.cpu().numpy()
+        df['macd_hist'] = m_hist.cpu().numpy()
+        df['rsi'] = torch_rsi(close_t, 14).cpu().numpy()
+        df['adx'] = torch_adx(high_t, low_t, close_t, 14).cpu().numpy()
     else:
-        df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
-
-    rsi = ta.rsi(df['close'], length=14)
-    df['rsi'] = rsi.fillna(50) if rsi is not None else 50
-
-    # ADX and Volatility
-    adx_df = ta.adx(df['high'], df['low'], df['close'])
-    if adx_df is not None:
-        df['adx'] = adx_df.iloc[:, 0].fillna(0)
-    else:
-        df['adx'] = 0
+        ema_f = ta.ema(df['close'], length=8)
+        df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
+        ema_s = ta.ema(df['close'], length=18)
+        df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
+        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+        if macd is not None:
+            df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
+        else:
+            df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
+        rsi = ta.rsi(df['close'], length=14)
+        df['rsi'] = rsi.fillna(50) if rsi is not None else 50
+        adx_df = ta.adx(df['high'], df['low'], df['close'])
+        df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
 
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
@@ -702,8 +771,14 @@ def strategy_listing_surge(df, config):
 def strategy_double_ema(df, config):
     ema_fast = config.get('ema_fast', 8)
     ema_slow = config.get('ema_slow', 18)
-    df['ema_f'] = ta.ema(df['close'], length=ema_fast)
-    df['ema_s'] = ta.ema(df['close'], length=ema_slow)
+    device = config.get('device', torch.device('cpu'))
+    if device.type != 'cpu':
+        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
+        df['ema_f'] = torch_ema(close_t, ema_fast).cpu().numpy()
+        df['ema_s'] = torch_ema(close_t, ema_slow).cpu().numpy()
+    else:
+        df['ema_f'] = ta.ema(df['close'], length=ema_fast)
+        df['ema_s'] = ta.ema(df['close'], length=ema_slow)
     df['buy_candidate'] = (df['ema_f'] > df['ema_s']) & (df['ema_f'].shift(1) <= df['ema_s'].shift(1))
     df['sell_candidate'] = (df['ema_f'] < df['ema_s']) & (df['ema_f'].shift(1) >= df['ema_s'].shift(1))
     return apply_confirmation(df, config.get('confirmation_window', 3))
@@ -711,50 +786,46 @@ def strategy_double_ema(df, config):
 def strategy_double_ema_macd_rsi(df, config):
     ema_fast = config.get('ema_fast', 8)
     ema_slow = config.get('ema_slow', 18)
-    df['ema_f_strat'] = ta.ema(df['close'], length=ema_fast)
-    df['ema_s_strat'] = ta.ema(df['close'], length=ema_slow)
-    df['ema_up'] = (df['ema_f_strat'] > df['ema_s_strat']) & (df['ema_f_strat'].shift(1) <= df['ema_s_strat'].shift(1))
-    df['ema_down'] = (df['ema_f_strat'] < df['ema_s_strat']) & (df['ema_f_strat'].shift(1) >= df['ema_s_strat'].shift(1))
-
-    # Fill NaNs before rolling logic to avoid empty results in small windows
-    df['ema_up'] = df['ema_up'].fillna(False)
-    df['ema_down'] = df['ema_down'].fillna(False)
-
     macd_f = config.get('macd_fast', 12)
     macd_s = config.get('macd_slow', 26)
     macd_sig = config.get('macd_signal', 9)
-    macd = ta.macd(df['close'], fast=macd_f, slow=macd_s, signal=macd_sig)
-    if macd is not None:
-        df['macd_val_strat'] = macd.iloc[:, 0]
-        df['macd_sig_strat'] = macd.iloc[:, 1]
+    rsi_p = config.get('rsi_period', 14)
+    device = config.get('device', torch.device('cpu'))
+
+    if device.type != 'cpu':
+        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
+        df['ema_f_strat'] = torch_ema(close_t, ema_fast).cpu().numpy()
+        df['ema_s_strat'] = torch_ema(close_t, ema_slow).cpu().numpy()
+        m_val, m_sig, _ = torch_macd(close_t, fast=macd_f, slow=macd_s, signal=macd_sig)
+        df['macd_val_strat'] = m_val.cpu().numpy()
+        df['macd_sig_strat'] = m_sig.cpu().numpy()
+        df['rsi_strat'] = torch_rsi(close_t, rsi_p).cpu().numpy()
     else:
-        df['macd_val_strat'] = df['macd_sig_strat'] = 0
+        df['ema_f_strat'] = ta.ema(df['close'], length=ema_fast)
+        df['ema_s_strat'] = ta.ema(df['close'], length=ema_slow)
+        macd = ta.macd(df['close'], fast=macd_f, slow=macd_s, signal=macd_sig)
+        if macd is not None:
+            df['macd_val_strat'] = macd.iloc[:, 0]
+            df['macd_sig_strat'] = macd.iloc[:, 1]
+        else:
+            df['macd_val_strat'] = df['macd_sig_strat'] = 0
+        df['rsi_strat'] = ta.rsi(df['close'], length=rsi_p)
+
+    df['ema_up'] = (df['ema_f_strat'] > df['ema_s_strat']) & (df['ema_f_strat'].shift(1) <= df['ema_s_strat'].shift(1))
+    df['ema_down'] = (df['ema_f_strat'] < df['ema_s_strat']) & (df['ema_f_strat'].shift(1) >= df['ema_s_strat'].shift(1))
+    df['ema_up'] = df['ema_up'].fillna(False); df['ema_down'] = df['ema_down'].fillna(False)
 
     df['macd_up'] = (df['macd_val_strat'] > df['macd_sig_strat']) & (df['macd_val_strat'].shift(1) <= df['macd_sig_strat'].shift(1))
     df['macd_down'] = (df['macd_val_strat'] < df['macd_sig_strat']) & (df['macd_val_strat'].shift(1) >= df['macd_sig_strat'].shift(1))
+    df['macd_up'] = df['macd_up'].fillna(False); df['macd_down'] = df['macd_down'].fillna(False)
 
-    df['macd_up'] = df['macd_up'].fillna(False)
-    df['macd_down'] = df['macd_down'].fillna(False)
-
-    rsi_p = config.get('rsi_period', 14)
-    df['rsi_strat'] = ta.rsi(df['close'], length=rsi_p)
     rsi_b = config.get('rsi_buy', 30)
     rsi_s = config.get('rsi_sell', 70)
     df['rsi_up'] = (df['rsi_strat'] < rsi_b) & (df['rsi_strat'] > df['rsi_strat'].shift(1))
     df['rsi_down'] = (df['rsi_strat'] > rsi_s) & (df['rsi_strat'] < df['rsi_strat'].shift(1))
-
-    df['rsi_up'] = df['rsi_up'].fillna(False)
-    df['rsi_down'] = df['rsi_down'].fillna(False)
+    df['rsi_up'] = df['rsi_up'].fillna(False); df['rsi_down'] = df['rsi_down'].fillna(False)
 
     window = config.get('confirmation_window', 3)
-    df['ema_up_win'] = df['ema_up'].rolling(window=window, min_periods=1).max() > 0
-    df['macd_up_win'] = df['macd_up'].rolling(window=window, min_periods=1).max() > 0
-    df['rsi_up_win'] = df['rsi_up'].rolling(window=window, min_periods=1).max() > 0
-    df['ema_down_win'] = df['ema_down'].rolling(window=window, min_periods=1).max() > 0
-    df['macd_down_win'] = df['macd_down'].rolling(window=window, min_periods=1).max() > 0
-    df['rsi_down_win'] = df['rsi_down'].rolling(window=window, min_periods=1).max() > 0
-
-    df['buy_candidate'] = df['ema_up_win'] & df['macd_up_win'] & df['rsi_up_win']
-    df['sell_candidate'] = df['ema_down_win'] & df['macd_down_win'] & df['rsi_down_win']
-
+    df['buy_candidate'] = (df['ema_up'].rolling(window=window, min_periods=1).max() > 0) &                           (df['macd_up'].rolling(window=window, min_periods=1).max() > 0) &                           (df['rsi_up'].rolling(window=window, min_periods=1).max() > 0)
+    df['sell_candidate'] = (df['ema_down'].rolling(window=window, min_periods=1).max() > 0) &                            (df['macd_down'].rolling(window=window, min_periods=1).max() > 0) &                            (df['rsi_down'].rolling(window=window, min_periods=1).max() > 0)
     return apply_confirmation(df, 1)

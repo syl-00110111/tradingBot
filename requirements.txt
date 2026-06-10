@@ -4,3 +4,4 @@ pandas-ta
 rich
 readchar
 matplotlib
+torch
