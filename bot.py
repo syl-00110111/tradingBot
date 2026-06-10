@@ -27,6 +27,7 @@ import signal
 import random
 import concurrent.futures
 import matplotlib.pyplot as plt
+import torch
 from datetime import datetime, timedelta
 
 from rich.live import Live
@@ -41,7 +42,7 @@ from rich.text import Text
 import readchar
 
 from exchange_handler import BinanceExchange, MockExchange
-from indicators import get_signals, calculate_similarity
+from indicators import get_signals, calculate_similarity, STRATEGIES
 from persistence import DataManager, CacheManager
 from trading_engine import TradingEngine
 from monte_carlo import MonteCarloEngine
@@ -528,6 +529,7 @@ def trading_thread_func(exchange, data_manager, engine, config, mode):
 
 def main():
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
+    parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
     parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/EUR)')
@@ -541,7 +543,23 @@ def main():
     parser.add_argument('--term', choices=['short', 'medium', 'long'], default='short', help='Time term for strategy optimization (default: short)')
     parser.add_argument('--since', help='Start date for backtest/benchmark (YYYY-MM-DD HH:MM)')
     parser.add_argument('--until', help='End date for backtest/benchmark (YYYY-MM-DD HH:MM)')
+
     args = parser.parse_args()
+
+    global device, gpu_enabled
+    if args.no_gpu:
+        device = torch.device('cpu')
+        gpu_enabled = False
+    else:
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+            gpu_enabled = True
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = torch.device('mps')
+            gpu_enabled = True
+        else:
+            device = torch.device('cpu')
+            gpu_enabled = False
 
     if args.config:
         config = load_config_from_path(args.config)
@@ -558,6 +576,13 @@ def main():
             console.print(f"[bold red]Error parsing api.json: {e}[/]")
 
     with console.status("[bold green]Initializing Binance Trading Bot...", spinner="dots") as status:
+        if not gpu_enabled:
+            console.print("[bold yellow]Warning: GPU acceleration is disabled or no compatible GPU found.[/]")
+            console.print("[yellow]Computations will run on CPU, which can be significantly slower (minutes to hours) for the first benchmarks.[/]")
+            console.print("[yellow]Please ensure benchmark_cache.json remains intact once finished to avoid re-running slow benchmarks.[/]")
+        else:
+            console.print(f"[bold green]GPU Acceleration enabled using device: {device}[/]")
+
         db_handler.duration = 5
         data_manager = DataManager(args.mode)
         engine = TradingEngine(config)
@@ -588,14 +613,14 @@ def main():
                 console.print("[red]Error: --symbol required for backtest[/]")
                 return
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
-            run_backtest_mode(exchange, config, args, engine=engine)
+            run_backtest_mode(exchange, config, args, engine=engine, device=device)
             return
         elif args.mode == 'benchmark':
             if not args.symbol and not args.every_symbol:
                 console.print("[red]Error: --symbol or --every-symbol required for benchmark[/]")
                 return
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
-            run_benchmark_mode(exchange, config, args, status=status, data_manager=data_manager, engine=engine)
+            run_benchmark_mode(exchange, config, args, status=status, data_manager=data_manager, engine=engine, device=device)
             return
 
         pairs = config.get('pairs', {})
@@ -606,7 +631,7 @@ def main():
         if args.mode in ['live', 'simulation']:
             config['_active_term'] = args.term
             status.update(f"[bold blue]Optimizing strategies for {args.term} term...")
-            opt_map = run_benchmark_mode(exchange, config, args, term_override=args.term, status=status, data_manager=data_manager, engine=engine)
+            opt_map = run_benchmark_mode(exchange, config, args, term_override=args.term, status=status, data_manager=data_manager, engine=engine, device=device)
             # Store profits for prioritization
             pair_priorities = []
             for sym, data in opt_map.items():
@@ -710,7 +735,7 @@ def analyze_pair(exchange, data_manager, symbol, pair_config, global_config, eng
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
     # Pre-calculate common indicators for regime detection
-    df = get_signals(df, {}, is_backtest=False)
+    df = get_signals(df, {"device": device}, is_backtest=False)
     latest_row_base = df.iloc[-1]
 
     # 1. Pattern Matching logic
@@ -743,6 +768,7 @@ def analyze_pair(exchange, data_manager, symbol, pair_config, global_config, eng
             }
 
         mode_settings['strategy'] = strategy_name
+        mode_settings['device'] = device
         df = get_signals(df, mode_settings, is_backtest=False)
         latest_row = df.iloc[-1]
     else:
@@ -1178,7 +1204,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     console.print(f"[bold green]Backtest plot saved as {filename}[/]")
     plt.close()
 
-def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None):
+def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None):
     """Core backtesting simulation logic."""
     from indicators import get_signals
 
@@ -1192,7 +1218,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     # Use Dynamic Risk Engine if available, otherwise balanced defaults
     if engine and df_in is not None and not df_in.empty:
          # Use the technical state from the end of the data to get dynamic settings
-         base_df = get_signals(df_in.copy(), {}, is_backtest=True)
+         base_df = get_signals(df_in.copy(), {"device": device if device is not None else torch.device("cpu")}, is_backtest=True)
          latest = base_df.iloc[-1]
          aggr_settings = engine.get_dynamic_settings(latest.get('adx', 0), latest.get('volatility', 0))
     else:
@@ -1202,6 +1228,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
          }
 
     mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
+    mc.set_device(device if device is not None else torch.device("cpu"))
 
     term_settings = config.get('expected_profit_terms', {}).get(term, {})
     if not term_settings:
@@ -1229,6 +1256,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     else:
         df = df_in.copy()
     try:
+        test_config["device"] = device if device is not None else torch.device("cpu")
         df = get_signals(df, test_config, is_backtest=True)
     except Exception as e:
         if exchange is not None:
@@ -1332,7 +1360,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         'tech_state': tech_state
     }
 
-def run_backtest_mode(exchange, config, args, engine=None):
+def run_backtest_mode(exchange, config, args, engine=None, device=None):
     # Scientific defaults for specific pairs (Urquhart, 2016; Zhang et al., 2020)
     default_strategy = "double_ema_macd_rsi"
     if args.symbol == 'BTC/EUR': default_strategy = "double_ema_macd_rsi" # MACD/RSI
@@ -1342,7 +1370,6 @@ def run_backtest_mode(exchange, config, args, engine=None):
     aggr = args.aggr or config.get('force_agressivity_to_all_pairs', 'normal')
     term = getattr(args, 'term', 'short')
 
-    from indicators import STRATEGIES
     if strategy not in STRATEGIES:
         console.print(f"[bold red]Error: Strategy '{strategy}' not found.[/]")
         console.print(f"Available strategies: {', '.join(STRATEGIES)}")
@@ -1350,7 +1377,7 @@ def run_backtest_mode(exchange, config, args, engine=None):
         return
 
     console.print(f"[bold blue]Running Backtest for {args.symbol} | Strategy: {strategy} | Aggr: {aggr} | Term: {term}...[/]")
-    results = run_backtest_logic(exchange, args.symbol, strategy, aggr, config, term=term, engine=engine)
+    results = run_backtest_logic(exchange, args.symbol, strategy, aggr, config, term=term, engine=engine, device=device)
 
     if results:
         if results['trades_count'] > 0:
@@ -1366,7 +1393,7 @@ def run_backtest_mode(exchange, config, args, engine=None):
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None):
+def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None):
     """
     Scans historical data BACKWARDS for the top 4 success patterns (> 0.022 profit).
     """
@@ -1397,7 +1424,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
                 window_df = df_in.iloc[buffer_start_idx:end_idx]
 
                 # We need to tell run_backtest_logic to only trade in the last 'eval_window' candles
-                res = run_backtest_logic(None, symbol, strategy, aggr, config, term=term_to_test, df_in=window_df, engine=engine)
+                res = run_backtest_logic(None, symbol, strategy, aggr, config, term=term_to_test, df_in=window_df, engine=engine, device=device)
                 # RELAXED Threshold: catch high momentum moves
                 if not res or res['profit'] < 0.015: continue
 
@@ -1445,8 +1472,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
     return symbol, unique_patterns
 
-def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, engine=None):
-    from indicators import STRATEGIES
+def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, engine=None, device=None):
 
     # Respect global overrides if they exist
     global_aggr = config.get('force_agressivity_to_all_pairs')
@@ -1557,7 +1583,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             # Register signal handler during optimization
             original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
-                futures = [executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine)
+                futures = [executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device)
                            for sym in symbol_data_map]
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
