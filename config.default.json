@@ -28,36 +28,5 @@
         "multiplier": 1.2
     },
     "secure_sell": false,
-    "global_risk_multiplier": 1.0,
-    "pairs": {
-        "ADA/EUR": {},
-        "APT/EUR": {},
-        "ATOM/EUR": {},
-        "AVAX/EUR": {},
-        "BCH/EUR": {},
-        "BNB/EUR": {},
-        "BTC/EUR": {},
-        "DOGE/EUR": {},
-        "DOT/EUR": {},
-        "EGLD/EUR": {},
-        "ETH/EUR": {},
-        "ICP/EUR": {},
-        "LINK/EUR": {},
-        "LTC/EUR": {},
-        "NEAR/EUR": {},
-        "PEPE/EUR": {},
-        "POL/EUR": {},
-        "RENDER/EUR": {},
-        "S/EUR": {},
-        "SHIB/EUR": {},
-        "SOL/EUR": {},
-        "SUI/EUR": {},
-        "TRX/EUR": {},
-        "VET/EUR": {},
-        "WIN/EUR": {},
-        "WLD/EUR": {},
-        "WLFI/EUR": {},
-        "XLM/EUR": {},
-        "XRP/EUR": {}
-    }
+    "global_risk_multiplier": 1.0
 }

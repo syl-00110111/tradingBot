@@ -17,6 +17,33 @@
 import ccxt
 import time
 import logging
+import threading
+from collections import deque
+
+
+class ThrottledExchange:
+    def __init__(self, exchange, delay_ms=42):
+        self.exchange = exchange
+        self.delay_s = delay_ms / 1000.0
+        self.lock = threading.Lock()
+        self.last_request_time = 0
+
+    def _wait(self):
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_request_time
+            if elapsed < self.delay_s:
+                time.sleep(self.delay_s - elapsed)
+            self.last_request_time = time.time()
+
+    def __getattr__(self, name):
+        attr = getattr(self.exchange, name)
+        if callable(attr):
+            def throttled_wrapper(*args, **kwargs):
+                self._wait()
+                return attr(*args, **kwargs)
+            return throttled_wrapper
+        return attr
 
 class ExchangeInterface:
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
@@ -32,9 +59,9 @@ class ExchangeInterface:
 
 class BinanceExchange(ExchangeInterface):
     def __init__(self, api_key, api_secret):
-        self.exchange = ccxt.binance({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 30},
-        })
+        self.exchange = ThrottledExchange(ccxt.binance({
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 50},
+        }))
 
     def load_markets(self):
         try: return self.exchange.load_markets()
@@ -105,7 +132,7 @@ class MockExchange(ExchangeInterface):
         self.markets = {}
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                self.real_exchange = ccxt.binance({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 30}})
+                self.real_exchange = ThrottledExchange(ccxt.binance({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'poolSize': 50}}))
                 logging.info("Mock initialized with real API balance fetching (markets deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")
 
