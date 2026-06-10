@@ -108,8 +108,9 @@ def get_signals(df, mode_config, is_backtest=False):
 
     # Common indicators for tendency and background analysis (Expert Mode)
     if df.empty: return df
-    use_gpu = device.type != 'cpu'
-    if use_gpu:
+    # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
+    use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
+    if use_acceleration:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
         high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float32)
         low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float32)
@@ -772,7 +773,7 @@ def strategy_double_ema(df, config):
     ema_fast = config.get('ema_fast', 8)
     ema_slow = config.get('ema_slow', 18)
     device = config.get('device', torch.device('cpu'))
-    if device.type != 'cpu':
+    if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
         df['ema_f'] = torch_ema(close_t, ema_fast).cpu().numpy()
         df['ema_s'] = torch_ema(close_t, ema_slow).cpu().numpy()
@@ -792,7 +793,7 @@ def strategy_double_ema_macd_rsi(df, config):
     rsi_p = config.get('rsi_period', 14)
     device = config.get('device', torch.device('cpu'))
 
-    if device.type != 'cpu':
+    if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
         df['ema_f_strat'] = torch_ema(close_t, ema_fast).cpu().numpy()
         df['ema_s_strat'] = torch_ema(close_t, ema_slow).cpu().numpy()
