@@ -244,19 +244,45 @@ def normalize_series(series):
         return series * 0
     return (series - series.min()) / (series.max() - series.min())
 
-def calculate_similarity(buffer_df, pattern):
+def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     """
     Calculates similarity between current buffer and a success pattern.
     Combines shape correlation (price) and technical state distance.
+    Uses GPU acceleration via PyTorch if available.
     """
     if len(buffer_df) != len(pattern['prices']):
         return 0.0
 
-    # 1. Shape Correlation (Normalized Prices)
-    current_prices = normalize_series(buffer_df['close'])
-    pattern_prices = pd.Series(pattern['prices'])
-    shape_corr = current_prices.corr(pattern_prices)
-    if np.isnan(shape_corr): shape_corr = 0.0
+    # GPU-accelerated Shape Correlation
+    try:
+        # Convert to tensors for fast computation
+        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float32)
+        p_vals = torch.tensor(pattern['prices'], device=device, dtype=torch.float32)
+
+        # Min-max normalization on GPU
+        c_min, c_max = c_vals.min(), c_vals.max()
+        if c_max > c_min:
+            c_norm = (c_vals - c_min) / (c_max - c_min)
+        else:
+            c_norm = c_vals * 0
+
+        p_min, p_max = p_vals.min(), p_vals.max()
+        if p_max > p_min:
+            p_norm = (p_vals - p_min) / (p_max - p_min)
+        else:
+            p_norm = p_vals * 0
+
+        # Pearson Correlation using torch.corrcoef
+        stacked = torch.stack([c_norm, p_norm])
+        corr_mat = torch.corrcoef(stacked)
+        shape_corr = float(corr_mat[0, 1].item())
+        if np.isnan(shape_corr): shape_corr = 0.0
+    except Exception:
+        # Fallback to CPU/Pandas if torch fails
+        current_prices = normalize_series(buffer_df['close'])
+        pattern_prices = pd.Series(pattern['prices'])
+        shape_corr = current_prices.corr(pattern_prices)
+        if np.isnan(shape_corr): shape_corr = 0.0
 
     # 2. Technical State Distance (Euclidean)
     # We compare RSI and ADX states at the end of the window
