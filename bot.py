@@ -19,6 +19,9 @@ import time
 import logging
 import argparse
 import os
+import gzip
+import copy
+import pickle
 import pandas as pd
 import sys
 import threading
@@ -527,6 +530,19 @@ def trading_thread_func(exchange, data_manager, engine, config, mode):
             logging.error(f"Error in trading thread: {e}")
             time.sleep(5)
 
+
+def load_ohlcv_cache():
+    if os.path.exists('ohlcv_cache.pkl.gz'):
+        try:
+            with gzip.open('ohlcv_cache.pkl.gz', 'rb') as f:
+                return pickle.load(f)
+        except Exception: return {}
+    return {}
+
+def save_ohlcv_cache(cache):
+    with gzip.open('ohlcv_cache.pkl.gz', 'wb') as f:
+        pickle.dump(cache, f)
+
 def main():
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
@@ -573,6 +589,16 @@ def main():
         config = load_config_from_path(args.config)
     else:
         config = load_config()
+
+    # Load pairs from pairs.txt if available
+    if os.path.exists('pairs.txt'):
+        with open('pairs.txt', 'r') as f:
+            pairs = [line.strip() for line in f if line.strip()]
+    else:
+        # Final fallbacks or empty list if no pairs.txt
+        pairs = []
+
+    config['pairs'] = {p: {} for p in pairs}
 
     # Load API credentials from api.json if available
     api_creds = {}
@@ -1450,7 +1476,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
         # 2. Run a single backtest for the entire dataset
         # We set eval_candles to the whole length to get a continuous equity curve
-        full_term_config = config.copy()
+        full_term_config = copy.deepcopy(config)
         # Create a temporary term that covers the whole DF
         full_term_name = f"full_{strategy}"
         full_term_config['expected_profit_terms'][full_term_name] = {
@@ -1609,6 +1635,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         else: console.print(f"[bold blue]{msg}")
 
         # Pre-fetch historical data for all symbols in the process
+        ohlcv_cache = load_ohlcv_cache()
         symbol_data_map = {}
         term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
         timeframe = term_cfg.get('timeframe', '5m')
@@ -1627,6 +1654,14 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching up to {target_limit} candles for {symbol}...")
 
             try:
+                # Check cache first
+                cache_key = f"{symbol}_{timeframe}_{target_limit}"
+                if cache_key in ohlcv_cache:
+                    df = ohlcv_cache[cache_key]
+                    symbol_data_map[symbol] = df
+                    if not status: console.print(f"[dim][{symbol}] Loaded {len(df)} candles from cache.")
+                    continue
+
                 # Paginate fetch to bypass API limits
                 while len(all_ohlcv) < target_limit:
                     fetch_limit = min(1000, target_limit - len(all_ohlcv))
@@ -1661,6 +1696,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
              executor.shutdown(wait=False, cancel_futures=True)
              sys.exit(0)
 
+        if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
         # On CPU with oneDNN, ThreadPoolExecutor might be more efficient for many small torch tasks
         # than ProcessPoolExecutor which has pickling overhead.
         executor_class = concurrent.futures.ProcessPoolExecutor
@@ -1683,12 +1719,15 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                              data_manager.set_patterns(sym, patterns)
 
                         period_str = f" [dim](From {best_for_symbol.get('start_time')} to {best_for_symbol.get('end_time')})[/]"
+                        # Always save patterns to benchmark_cache.json
+                        cache_mgr.set(sym, term_to_test, patterns)
+
+                        msg_target = status.console if status else console
                         if term_override:
                             optimization_map[sym] = best_for_symbol
-                            cache_mgr.set(sym, term_override, patterns) # Cache all patterns
-                            console.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
+                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
                         else:
-                            console.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
+                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
 
                         if best_overall.get(term_to_test) and best_for_symbol['profit'] > best_overall[term_to_test]['profit']:
                             best_overall[term_to_test] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
@@ -1697,10 +1736,14 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         if best_for_symbol['profit'] > best_overall['total']['profit']:
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
+                save_ohlcv_cache(ohlcv_cache)
                 signal.signal(signal.SIGINT, original_handler)
 
     # If we are in optimization mode for live/sim, return the map
     if term_override:
+        if status: status.update('[bold green]Optimization complete.')
+        if best_per_symbol:
+            time.sleep(3)
         return optimization_map
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
