@@ -65,9 +65,25 @@ Store your credentials and preferred exchange:
 }
 ```
 
+## Performance & Reliability (GPU)
+This bot is designed for high-performance trading. It leverages **GPU acceleration** via PyTorch for:
+- Technical indicator calculations (EMA, MACD, RSI, ADX)
+- Monte Carlo simulations
+- Success Pattern Matching (Pearson Correlation)
+
+Supported backends include **CUDA** (NVIDIA), **MPS** (Apple Silicon), and **oneDNN** (Intel Optimized CPU). Maybe some **Vulkan** support sonn.
+
+**Crucial:** Ensure you keep your dependencies up to date regularly, especially CCXT, in order to maintain API compatibility:
+```bash
+pip install --upgrade ccxt
+```
+
+## Data Persistence
+The bot maintains a consolidated archive `bot_data_backup.zip` containing all runtime state (trades, patterns, cache). This acts as a database and provides a safety net against accidental file deletion.
+
 ---
 
-## 🚀 Getting Started
+## 🚀 Setup
 
 1. **Install PyTorch & CCXT**:
    ```bash
