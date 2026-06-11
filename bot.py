@@ -306,7 +306,7 @@ def make_dashboard(global_mode, config):
                       f"{data.get('volatility', 0):.4f}/{data.get('adx', 0):.1f}",
                       f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
                       f"{data.get('score', 0)}",
-                      format_price(data.get('expected_profit', 0)),
+                      format_price(data.get('expected_profit', 0)) if has_position else '0.00',
                       data.get('aggr', 'N/A'),
                       data.get('strategy', 'N/A')
                  ]
@@ -315,7 +315,7 @@ def make_dashboard(global_mode, config):
                       symbol,
                       format_price(data.get('price', 0)),
                       amt_str, entry_str, fee_str,
-                      format_price(data.get('expected_profit', 0)),
+                      format_price(data.get('expected_profit', 0)) if has_position else '0.00',
                       f"[{tend_style}]{tendency}[/]",
                       f"[{last_order_style}]{last_order}[/]",
                       f"[{signal_style}]{current_signal}[/]",
@@ -833,12 +833,12 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         sell_hist = df['sell_signal'].tolist()
 
         c_buys = 0
-        for s in reversed(buy_hist):
+        for s in reversed(buy_hist[-10:]):
             if s: c_buys += 1
             else: break
 
         c_sells = 0
-        for s in reversed(sell_hist):
+        for s in reversed(sell_hist[-10:]):
             if s: c_sells += 1
             else: break
 
@@ -885,7 +885,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'consecutive_buys': consecutive_buys,
         'consecutive_sells': consecutive_sells,
         '_last_candle_ts': candle_ts,
-        'sell_triggered': consecutive_sells >= 3 and data_manager.get_position(symbol),
+        'sell_triggered': consecutive_sells >= 3 and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
         'position': data_manager.get_position(symbol),
         'expected_profit': float(pair_config.get('expected_profit', 0)),
         'trigger_data': trigger_data
@@ -966,6 +966,10 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
 
         if is_simulation or free_balance >= position['amount']:
             order = exchange.create_order(symbol, 'sell', position['amount'])
+            if isinstance(order, dict) and order.get('error') == 'dust_limit':
+                logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
+                data_manager.flag_ignore_sell(symbol)
+                return False
             if order:
                 fee = order.get('calculated_fee', 0)
                 amount = position['amount']
@@ -1034,6 +1038,18 @@ def sync_live_positions(exchange, data_manager, config):
                 entry_price = buy_trades[-1]['price']
 
         if entry_price > 0:
+            # Check if it's dust before adding
+            try:
+                markets = exchange.load_markets()
+                if symbol in markets:
+                    m = markets[symbol]
+                    min_amt = m['limits']['amount']['min']
+                    min_cost = m['limits']['cost']['min'] or 10
+                    ticker = exchange.fetch_ticker(symbol)
+                    if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
+                        logging.info(f"[{symbol}] Skipping sync: Position is dust ({amount} < {min_amt})")
+                        continue
+            except Exception: pass
             data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time())
 
 def get_sellable_assets_sim(data_manager):
