@@ -7,7 +7,7 @@ An industrial-grade trading bot implemented in Python, leveraging multi-core pro
 ## 🔬 Scientific Foundations
 This bot implements strategies and logic recommended by leading empirical studies in the cryptocurrency markets:
 
-- **Success Pattern Matching (SPM)**: The bot scans up to 5000 historical candles backwards to identify the top 4 success patterns that would have yielded significant profit. It then uses normalized shape correlation and technical state similarity (RSI/ADX) to activate trading only when current market conditions match these proven windows.
+- **Pearson Correlation**: The bot scans up to 5000 historical candles backwards to identify the top 4 success patterns that would have yielded significant profit. It then uses normalized shape correlation and technical state similarity (RSI/ADX) to activate trading only when current market conditions match these proven windows.
 - **BTC Strategy (MACD/RSI)**: As identified by *Urquhart (2016)* and *Zhang et al. (2020)*, MACD and RSI provide the most reliable signals for Bitcoin's price action.
 - **ETH Strategy (Stochastic RSI)**: Optimized for Ethereum's volatility, following the findings of *Zhang et al. (2020)*.
 - **Market Regime Detection**: Utilizes volatility-based switching between Mean-Reversion (Bollinger Bands) and Trend-Following (EMA), a methodology supported by *Baur & Dimpfl (2021)*.
@@ -26,8 +26,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 
 ### 🛡 Risk Management
 - **Confirmation Logic**: Requires consecutive identical signals (dynamically adjusted by term, e.g., 3 for short-term) within a confirmation window to filter out noise.
-- **Secure Sell Toggle**: When enabled, ensures trades are only closed at a profit.
-- **2nd Signal Stop-Loss**: If `secure_sell` is enabled, unprofitable positions are only liquidated after a 2nd distinct sell signal, providing a safety net while avoiding premature exits.
+- **Secure Sell Toggle**: When enabled, ensures trades are only closed at a profit after a 2nd distinct sell signal, providing a safety net while avoiding premature exits.
 - **Dynamic Position Sizing**: Governed by a fixed `base_trade_amount` with optional `win_streak_bonus` multipliers and a global risk engine that adjusts parameters based on ADX and Volatility.
 
 ### 📊 Real-Time Dashboard
@@ -42,34 +41,40 @@ The bot features 19+ distinct trading strategies, including:
 
 ---
 
-## ⚙️ Configuration (`config.json`)
+## ⚙️ Configuration
 
-The bot prioritizes `config.json` and falls back to `config.default.json`. Users are encouraged to copy `config.default.json` to `config.json` as a starting point.
+The most important thing is the trading pairs, which you can enter in the pre-filled pairs.txt file with examples. Position sizing is now percentage-based (e.g., a `base_trade_amount` of `10.0` means 10% of your available base currency). Base currencies are dynamically identified from your pairs.
+
+Regarding the configuration, the bot uses the default `config.default.json` file. Please have a look at it. You can customize this configuration by inserting a file named `config.json`. To obtain this file, you can copy config.default.json to the same location which make a file duplicated by the system, rename the duplicate to `config.json`, and then remove any unnecessary elements so you can insert the desired values.
+
+Say i want bigger trades and more risk:
 
 ```json
 {
-    "base_currency": "EUR",
-    "max_open_positions": 8,
     "base_trade_amount": 20.0,
-    "secure_sell": false,
-    "expected_profit_terms": {
-        "short": { "duration_hours": 1, "timeframe": "1m", "eval_candles": 60 }
-    },
-    "win_streak_bonus": {
-        "enabled": true,
-        "threshold": 2,
-        "multiplier": 1.2
-    },
-    "pairs": {
-        "BTC/EUR": {},
-        "ETH/EUR": {}
-    }
+    "global_risk_multiplier": 1.5
 }
 ```
 
+## Performance & Reliability (GPU)
+This bot is designed for high-performance trading. It leverages **GPU acceleration** via PyTorch for:
+- Technical indicator calculations (EMA, MACD, RSI, ADX)
+- Monte Carlo simulations
+- Success Pattern Matching (Pearson Correlation)
+
+Supported backends include **CUDA** (NVIDIA), **MPS** (Apple Silicon), and **oneDNN** (Intel Optimized CPU). Maybe some **Vulkan** support sonn.
+
+**Crucial:** Ensure you keep your dependencies up to date regularly, especially CCXT, in order to maintain API compatibility:
+```bash
+pip install --upgrade ccxt
+```
+
+## Data Persistence
+The bot maintains a consolidated archive `bot_data_backup.zip` containing all runtime state (trades, patterns, cache). This acts as a database and provides a safety net against accidental file deletion.
+
 ---
 
-## 🚀 Getting Started
+## 🚀 Setup
 
 ### Installation
 
@@ -92,6 +97,7 @@ Copy `api.json.example` to `api.json` and enter your `api_key` and `api_secret`.
 - **Benchmark**: `python bot.py --mode benchmark --every-symbol`
 - **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
+- **Close every asset!**: `python bot.py --mode sell`
 
 ---
 
@@ -104,24 +110,3 @@ Licensed under the **GNU General Public License (GPL)**.
 
 ## 🤝 Contributing
 Contributors are welcome! Feel free to submit pull requests or report issues.
-
-## Performance & Reliability (GPU)
-This bot is designed for high-performance trading. It leverages **GPU acceleration** via PyTorch for:
-- Technical indicator calculations (EMA, MACD, RSI, ADX)
-- Monte Carlo simulations
-- Success Pattern Matching (Pearson Correlation)
-
-Supported backends include **CUDA** (NVIDIA), **MPS** (Apple Silicon), and **oneDNN** (Intel Optimized CPU).
-
-**Crucial:** Ensure you keep your dependencies up to date, especially CCXT, to maintain API compatibility:
-```bash
-pip install --upgrade ccxt
-```
-
-## Configuration
-The bot now uses a `pairs.txt` file in the root directory to define trading pairs. This simplifies multi-currency support. Each line should contain a pair in `BASE/QUOTE` format (e.g., `BTC/EUR`).
-
-Base currencies are dynamically identified from your `pairs.txt`. Position sizing is now percentage-based (e.g., a `base_trade_amount` of `10.0` means 10% of your available base currency).
-
-## Data Persistence
-The bot maintains a consolidated archive `bot_data_backup.zip` containing all runtime state (trades, patterns, cache). This acts as a database and provides a safety net against accidental file deletion.
