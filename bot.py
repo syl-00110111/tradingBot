@@ -928,7 +928,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
     base_currency = symbol.split('/')[1]
     if amount > 0:
         # Check if balance is sufficient before attempting order
-        cost = amount * data['price']
+        cost = amount * current_price
         base_asset = base_currency
         free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
 
@@ -948,7 +948,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         if order:
             fee = order.get('calculated_fee', 0)
             total_paid = (amount * current_price) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {current_price}, final price paid: {total_paid:.2f} {base_currency}")
+            logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {current_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
             data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
             return True
         else:
@@ -1007,7 +1007,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                 fee = order.get('calculated_fee', 0)
                 amount = position['amount']
                 total_received = (amount * data['price']) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {data['price']}, final price received: {total_received:.2f} {base_currency}")
+                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {data['price']}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
                 profit = total_received - position.get('entry_total_base', 0)
                 data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
                 return True
@@ -1058,41 +1058,53 @@ def sync_live_positions(exchange, data_manager, config):
 
     # We clear local cache for Live mode as requested
     data_manager.data['open_positions'] = {}
+    sellable_found = False
 
     for asset, amount in free_balances.items():
         if asset in base_currencies or amount <= 0: continue
-        # Find which base currency this asset belongs to (first one found in pairs)
-        possible_symbols = [f"{asset}/{bc}" for bc in base_currencies]
+
+        # Find which base currency this asset belongs to
         symbol = None
-        for ps in possible_symbols:
-            if ps in config.get('pairs', {}):
-                symbol = ps
+        for bc in base_currencies:
+            candidate = f"{asset}/{bc}"
+            if candidate in config.get('pairs', {}):
+                symbol = candidate
                 break
         if not symbol: continue
 
-        # Try to find entry price from last trades
-        trades = exchange.fetch_my_trades(symbol, limit=5)
+        # Check if it's dust
+        is_dust = False
+        try:
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            if symbol in markets:
+                m = markets[symbol]
+                min_amt = m['limits']['amount']['min']
+                min_cost = m['limits']['cost']['min'] or 10
+                ticker = exchange.fetch_ticker(symbol)
+                if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
+                    is_dust = True
+            elif amount <= 0.000001: is_dust = True
+        except: pass
+
+        if is_dust: continue
+        sellable_found = True
+
+        # Try to find purchase price
         entry_price = 0
+        trades = exchange.fetch_my_trades(symbol, limit=20)
         if trades:
-            # Find last buy
             buy_trades = [t for t in trades if t['side'] == 'buy']
             if buy_trades:
                 entry_price = buy_trades[-1]['price']
 
         if entry_price > 0:
-            # Check if it's dust before adding
-            try:
-                markets = exchange.load_markets()
-                if symbol in markets:
-                    m = markets[symbol]
-                    min_amt = m['limits']['amount']['min']
-                    min_cost = m['limits']['cost']['min'] or 10
-                    ticker = exchange.fetch_ticker(symbol)
-                    if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
-                        logging.info(f"[{symbol}] Skipping sync: Position is dust ({amount} < {min_amt})")
-                        continue
-            except Exception: pass
+            logging.info(f"[{symbol}] Found purchase price: {entry_price}. Adding to tracking.")
             data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time())
+        else:
+            logging.warning(f"[{symbol}] Asset found in wallet but no purchase record found via API. Please connect to exchange and sell manually or manage this asset.")
+
+    if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
+        logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
 
 def get_sellable_assets_sim(data_manager):
     positions = data_manager.get_open_positions()
@@ -1177,17 +1189,17 @@ def interactive_sell(exchange, data_manager, engine, config):
             continue
 
         sellable_found = True
-        console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {amount:.6f} | [bold cyan]Value:[/] {format_price(cost)} {base_currency}")
+        console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {amount:.6f} | [bold cyan]Value:[/] {format_price(cost)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
 
         confirm = input(f"Confirm sell of entire {asset} balance? (y/n): ").lower()
         if confirm == 'y':
-            console.print(f"[yellow]Selling {amount} {asset} at ~{format_price(price)} {base_currency}...[/]")
+            console.print(f"[yellow]Selling {amount} {asset} at ~{format_price(price)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}...[/]")
             order = exchange.create_order(symbol, 'sell', amount)
             if order:
                 fee = order.get('calculated_fee', 0)
                 total_received = (amount * price) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {base_currency}")
-                console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {base_currency}[/]")
+                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}[/]")
                 play_sound("sell", None)
                 # Also close position in data manager if it exists
                 if data_manager.get_position(symbol):
