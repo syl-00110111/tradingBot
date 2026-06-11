@@ -1,3 +1,4 @@
+SOON RELEASE BUT NOT TOTALLY FUNCTIONNAL STAY TUNED
 # 🛸 Cryptocurrencies Trading Bot: Advanced Quantitative & Scientific Suite
 
 An industrial-grade trading bot implemented in Python, leveraging multi-core processing, real-time market data, and evidence-based strategies derived from top cryptocurrency financial literature. While currently optimized for Binance via the CCXT library, the architecture is designed to support multiple exchanges in the future. Please note that the focus remains primarily on cryptocurrencies.
