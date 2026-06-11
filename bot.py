@@ -44,7 +44,7 @@ from rich.text import Text
 
 import readchar
 
-from exchange_handler import BinanceExchange, MockExchange
+from exchange_handler import BinanceExchange, MockExchange, KrakenExchange, BitvavoExchange
 from indicators import get_signals, calculate_similarity, STRATEGIES
 from persistence import DataManager, CacheManager, PatternManager
 from trading_engine import TradingEngine
@@ -424,7 +424,7 @@ def input_thread_func():
             break
         except Exception: pass
 
-def update_available_assets_live(exchange):
+def update_available_assets_live(exchange, config):
     global available_assets, pending_asset_update
     # Randomized delay between 3 and 10 seconds
     delay = random.uniform(3.0, 10.0)
@@ -498,7 +498,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                           data['position'] = None
                                           if mode == 'live' and not pending_asset_update:
                                               pending_asset_update = True
-                                              threading.Thread(target=update_available_assets_live, args=(exchange,), daemon=True).start()
+                                              threading.Thread(target=update_available_assets_live, args=(exchange, config), daemon=True).start()
                                       play_sound("sell", config)
 
                             if data.get('buy') and not data.get('position'):
@@ -546,8 +546,11 @@ def save_ohlcv_cache(cache):
         pickle.dump(cache, f)
 
 def main():
+    from persistence import load_from_archive
+    load_from_archive()
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
+    parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
     parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/EUR)')
@@ -631,11 +634,18 @@ def main():
         api_secret = api_creds.get('api_secret') or config.get('api_secret')
 
         if args.mode == 'live':
-            exchange = BinanceExchange(api_key, api_secret)
-            logging.info("Starting bot in LIVE mode")
+            if args.exchange == 'binance':
+                exchange = BinanceExchange(api_key, api_secret)
+            elif args.exchange == 'kraken':
+
+                exchange = KrakenExchange(api_key, api_secret)
+            elif args.exchange == 'bitvavo':
+
+                exchange = BitvavoExchange(api_key, api_secret)
+            logging.info(f"Starting bot in LIVE mode on {args.exchange}")
         elif args.mode == 'simulation':
-            exchange = MockExchange(api_key, api_secret)
-            logging.info("Starting bot in SIMULATION mode")
+            exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange)
+            logging.info(f"Starting bot in SIMULATION mode ({args.exchange} discovery)")
         elif args.mode == 'sell':
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             exchange.load_markets()
@@ -930,8 +940,8 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             return False
         if order:
             fee = order.get('calculated_fee', 0)
-            total_paid = (amount * data['price']) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {data['price']}, final price paid: {total_paid:.2f} {base_currency}")
+            total_paid = (amount * current_price) + fee
+            logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {current_price}, final price paid: {total_paid:.2f} {base_currency}")
             data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
             return True
         else:
@@ -1095,7 +1105,13 @@ def get_sellable_assets(exchange, config=None):
         if asset in base_currencies or asset == 'USDT':
             continue
 
-        symbol = f"{asset}/{base_currency}"
+        symbol = None
+        for bc in base_currencies:
+            candidate = f"{asset}/{bc}"
+            if config and candidate in config.get('pairs', {}):
+                symbol = candidate
+                break
+        if not symbol: continue
         try:
             # Handle markets access for both BinanceExchange and MockExchange
             markets = {}

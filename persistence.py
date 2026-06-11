@@ -7,6 +7,17 @@ import time
 import zipfile
 import logging
 
+
+def load_from_archive():
+    import zipfile
+    if os.path.exists('bot_data_backup.zip'):
+        try:
+            with zipfile.ZipFile('bot_data_backup.zip', 'r') as zipf:
+                zipf.extractall()
+                return True
+        except: pass
+    return False
+
 def create_consolidated_archive():
     """
     Creates a compressed archive of all runtime data files.
@@ -24,6 +35,8 @@ def create_consolidated_archive():
             for file in files_to_archive:
                 if os.path.exists(file):
                     zipf.write(file)
+                    # We keep them for now during runtime to avoid constant extraction
+                    # but ensure they are bundled.
     except Exception as e:
         logging.error(f"Failed to create consolidated archive: {e}")
 

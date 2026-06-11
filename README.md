@@ -104,3 +104,24 @@ Licensed under the **GNU General Public License (GPL)**.
 
 ## 🤝 Contributing
 Contributors are welcome! Feel free to submit pull requests or report issues.
+
+## Performance & Reliability (GPU)
+This bot is designed for high-performance trading. It leverages **GPU acceleration** via PyTorch for:
+- Technical indicator calculations (EMA, MACD, RSI, ADX)
+- Monte Carlo simulations
+- Success Pattern Matching (Pearson Correlation)
+
+Supported backends include **CUDA** (NVIDIA), **MPS** (Apple Silicon), and **oneDNN** (Intel Optimized CPU).
+
+**Crucial:** Ensure you keep your dependencies up to date, especially CCXT, to maintain API compatibility:
+```bash
+pip install --upgrade ccxt
+```
+
+## Configuration
+The bot now uses a `pairs.txt` file in the root directory to define trading pairs. This simplifies multi-currency support. Each line should contain a pair in `BASE/QUOTE` format (e.g., `BTC/EUR`).
+
+Base currencies are dynamically identified from your `pairs.txt`. Position sizing is now percentage-based (e.g., a `base_trade_amount` of `10.0` means 10% of your available base currency).
+
+## Data Persistence
+The bot maintains a consolidated archive `bot_data_backup.zip` containing all runtime state (trades, patterns, cache). This acts as a database and provides a safety net against accidental file deletion.

@@ -112,7 +112,7 @@ class BinanceExchange(ExchangeInterface):
             logging.error(f"Error during {side} order on {symbol}: {e}"); return None
 
 class MockExchange(ExchangeInterface):
-    def __init__(self, api_key=None, api_secret=None):
+    def __init__(self, api_key=None, api_secret=None, exchange_type='binance'):
         self.balance = {'EUR': 1000.0, 'USDC': 1000.0, 'USDT': 1000.0}
         self.ohlcv_data = {}
         self.real_exchange = None
@@ -121,7 +121,8 @@ class MockExchange(ExchangeInterface):
         self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                self.real_exchange = ThrottledExchange(ccxt.binance({
+                ex_class = ccxt.binance if exchange_type == 'binance' else (ccxt.kraken if exchange_type == 'kraken' else ccxt.bitvavo)
+                self.real_exchange = ThrottledExchange(ex_class({
                     'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
                     'options': {'defaultType': 'spot', 'poolSize': 50},
                     'session': create_ccxt_session()
@@ -225,3 +226,18 @@ class MockExchange(ExchangeInterface):
                 self.balance[quote] = free_quote + cost - fee
                 return {'id': 'mock_sell_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
         return None
+
+class KrakenExchange(BinanceExchange):
+    def __init__(self, api_key, api_secret):
+        self.exchange = ThrottledExchange(ccxt.kraken({
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'session': create_ccxt_session()
+        }))
+
+class BitvavoExchange(BinanceExchange):
+    def __init__(self, api_key, api_secret):
+        self.exchange = ThrottledExchange(ccxt.bitvavo({
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'options': {'poolSize': 50},
+            'session': create_ccxt_session()
+        }))
