@@ -108,6 +108,11 @@ class DataManager:
     def get_open_positions(self): return self.data["open_positions"]
     def get_position(self, symbol): return self.data["open_positions"].get(symbol)
 
+    def flag_ignore_sell(self, symbol):
+        if symbol in self.data["open_positions"]:
+            self.data["open_positions"][symbol]["ignore_sell"] = True
+            self._save_data()
+
     def get_win_streak(self, symbol):
         streak = 0
         history = [t for t in self.data.get("trade_history", []) if t.get("symbol") == symbol]

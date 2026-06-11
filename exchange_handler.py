@@ -105,7 +105,11 @@ class BinanceExchange(ExchangeInterface):
                  fee_rate = self.fetch_trading_fee(symbol)
                  order['calculated_fee'] = amount * ticker['last'] * fee_rate
             return order
-        except Exception as e: logging.error(f"Error during {side} order on {symbol}: {e}"); return None
+        except Exception as e:
+            err_msg = str(e)
+            if 'minimum amount precision' in err_msg or 'dust' in err_msg.lower():
+                return {'error': 'dust_limit', 'message': err_msg}
+            logging.error(f"Error during {side} order on {symbol}: {e}"); return None
 
 class MockExchange(ExchangeInterface):
     def __init__(self, api_key=None, api_secret=None):
