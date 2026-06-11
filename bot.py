@@ -60,6 +60,7 @@ expert_mode = False
 show_help = False
 marquee_enabled = True
 shutdown_event = threading.Event()
+suspended_pairs = set()
 
 # Marquee Timing Control
 last_marquee_update = 0
@@ -228,7 +229,7 @@ def make_dashboard(global_mode, config):
             table.add_column("Price", style="magenta", no_wrap=True)
             table.add_column("Amt", style="cyan", no_wrap=True)
             table.add_column("Entry", style="magenta", no_wrap=True)
-            table.add_column(f"Fee ({config.get('base_currency', 'EUR')})", style="red", no_wrap=True)
+            table.add_column("Fee", style="red", no_wrap=True)
             table.add_column("B.Prof", style="bold green", no_wrap=True)
             table.add_column("Tendency", style="bold white", no_wrap=True)
             table.add_column("Last Order", style="bold", no_wrap=True)
@@ -434,7 +435,7 @@ def update_available_assets_live(exchange):
     # The 'pending_asset_update' flag in the main loop ensures we don't spawn too many.
 
     try:
-        new_assets = get_sellable_assets(exchange)
+        new_assets = get_sellable_assets(exchange, config)
         with bot_lock:
             available_assets[:] = new_assets
             pending_asset_update = False
@@ -462,7 +463,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
         if mode == 'live' and not sim_init_done:
             # First time load for live
             sync_live_positions(exchange, data_manager, config)
-            new_assets = get_sellable_assets(exchange)
+            new_assets = get_sellable_assets(exchange, config)
             with bot_lock:
                 available_assets[:] = new_assets
             sim_init_done = True
@@ -482,6 +483,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                 for future in concurrent.futures.as_completed(future_to_sym):
                     if shutdown_event.is_set(): break
                     symbol = future_to_sym[future]
+                    if symbol in suspended_pairs: continue
                     try:
                         data = future.result()
                         if data:
@@ -599,6 +601,8 @@ def main():
         pairs = []
 
     config['pairs'] = {p: {} for p in pairs}
+    base_currencies = sorted(list(set([p.split('/')[1] for p in pairs if '/' in p])))
+    config['base_currencies'] = base_currencies
 
     # Load API credentials from api.json if available
     api_creds = {}
@@ -636,7 +640,7 @@ def main():
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             exchange.load_markets()
             if hasattr(exchange, 'balance'): exchange.balance['TEST'] = True
-            interactive_sell(exchange, data_manager, engine)
+            interactive_sell(exchange, data_manager, engine, config)
             return
         elif args.mode == 'balance':
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
@@ -896,11 +900,15 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         balance = exchange.fetch_balance()
     win_streak = data_manager.get_win_streak(symbol)
 
+    # Refresh price for Spot market accuracy (prevent NOTIONAL filters)
+    fresh_ticker = exchange.fetch_ticker(symbol)
+    current_price = fresh_ticker['last'] if fresh_ticker else data['price']
+
+    base_curr = symbol.split('/')[1]
     amount = engine.calculate_position_size(
-        balance, data['price'],
-        win_streak=win_streak
+        balance, current_price, base_curr, win_streak=win_streak
     )
-    base_currency = global_config.get('base_currency', 'EUR')
+    base_currency = symbol.split('/')[1]
     if amount > 0:
         # Check if balance is sufficient before attempting order
         cost = amount * data['price']
@@ -912,11 +920,19 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             return False
 
         order = exchange.create_order(symbol, 'buy', amount)
+        if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
+            logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
+            suspended_pairs.add(symbol)
+            return False
+        if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
+            logging.error(f"[{symbol}] Buy failed: Filter failure NOTIONAL. Suspending pair.")
+            suspended_pairs.add(symbol)
+            return False
         if order:
             fee = order.get('calculated_fee', 0)
             total_paid = (amount * data['price']) + fee
             logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {data['price']}, final price paid: {total_paid:.2f} {base_currency}")
-            data_manager.add_position(symbol, data['price'], amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
+            data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
             return True
         else:
             logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}")
@@ -962,7 +978,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
 
         balance = exchange.fetch_balance()
         free_balance = balance.get(base_asset, {}).get('free', 0) if 'free' in balance else balance.get(base_asset, 0)
-        base_currency = engine.base_currency
+        base_currency = symbol.split('/')[1]
 
         if is_simulation or free_balance >= position['amount']:
             order = exchange.create_order(symbol, 'sell', position['amount'])
@@ -981,7 +997,9 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
     return False
 
 def initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state):
-    logging.info("Initializing Simulation positions...")
+    logging.info("Initializing Simulation positions (Discovery phase)...")
+    sync_live_positions(exchange, data_manager, config)
+    # Then proceed with virtual buy signals...
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
     pair_keys = priority_order if priority_order else list(pairs_dict.keys())
@@ -1019,14 +1037,21 @@ def sync_live_positions(exchange, data_manager, config):
     logging.info("Syncing positions from Binance API...")
     balance = exchange.fetch_balance()
     free_balances = balance.get('free', balance)
-    base_currency = config.get('base_currency', 'EUR')
+    base_currencies = config.get('base_currencies', ['EUR'])
 
     # We clear local cache for Live mode as requested
     data_manager.data['open_positions'] = {}
 
     for asset, amount in free_balances.items():
-        if asset == base_currency or amount <= 0: continue
-        symbol = f"{asset}/{base_currency}"
+        if asset in base_currencies or amount <= 0: continue
+        # Find which base currency this asset belongs to (first one found in pairs)
+        possible_symbols = [f"{asset}/{bc}" for bc in base_currencies]
+        symbol = None
+        for ps in possible_symbols:
+            if ps in config.get('pairs', {}):
+                symbol = ps
+                break
+        if not symbol: continue
 
         # Try to find entry price from last trades
         trades = exchange.fetch_my_trades(symbol, limit=5)
@@ -1056,10 +1081,10 @@ def get_sellable_assets_sim(data_manager):
     positions = data_manager.get_open_positions()
     return sorted([s.split('/')[0] for s in positions.keys()])
 
-def get_sellable_assets(exchange):
+def get_sellable_assets(exchange, config=None):
     balance = exchange.fetch_balance()
     assets = []
-    base_currency = 'EUR'
+    base_currencies = config.get('base_currencies', ['EUR']) if config else ['EUR']
 
     # Access free balance
     free_balances = balance.get('free', balance)
@@ -1067,7 +1092,7 @@ def get_sellable_assets(exchange):
     for asset, amount in free_balances.items():
         if not isinstance(amount, (int, float)) or amount <= 0:
             continue
-        if asset in [base_currency, 'USDT']:
+        if asset in base_currencies or asset == 'USDT':
             continue
 
         symbol = f"{asset}/{base_currency}"
@@ -1103,18 +1128,25 @@ def get_sellable_assets(exchange):
 
     return sorted(assets)
 
-def interactive_sell(exchange, data_manager, engine):
+def interactive_sell(exchange, data_manager, engine, config):
     console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
     balance = exchange.fetch_balance()
     free_balances = balance.get('free', balance)
-    base_currency = 'EUR'
+    base_currencies = config.get('base_currencies', ['EUR'])
 
     sellable_found = False
     for asset, amount in free_balances.items():
-        if asset in [base_currency, 'USDT'] or not isinstance(amount, (int, float)) or amount <= 0:
+        if asset in base_currencies or asset == 'USDT' or not isinstance(amount, (float, int)) or amount <= 0:
             continue
 
-        symbol = f"{asset}/{base_currency}"
+        # Find pair
+        symbol = None
+        for bc in base_currencies:
+            candidate = f"{asset}/{bc}"
+            if candidate in config.get('pairs', {}):
+                symbol = candidate
+                break
+        if not symbol: continue
 
         # Handle markets access for both BinanceExchange and MockExchange
         markets = {}
@@ -1195,10 +1227,18 @@ def show_balance(exchange):
         used = used_balances.get(asset, 0)
 
         eur_val = 0
-        if asset == 'EUR':
-            eur_val = total
+        if asset in ['EUR', 'USDT', 'USDC']:
+            eur_val = total # Simplified valuation for base currencies
         else:
-            ticker = exchange.fetch_ticker(f"{asset}/EUR")
+            # Try finding any valid pair with this asset as base
+            symbol = None
+            for bc in ['EUR', 'USDT', 'USDC']:
+                candidate = f"{asset}/{bc}"
+                # We don't have config here but we can try common ones
+                ticker = exchange.fetch_ticker(candidate)
+                if ticker and ticker.get('last', 0) > 0:
+                     eur_val = total * ticker['last']
+                     break
             if ticker:
                 eur_val = total * ticker['last']
             else:
@@ -1355,7 +1395,9 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
             position = None
 
         # Buy logic
-        trade_amount = float(config.get('base_trade_amount', 20.0))
+        raw_val = float(config.get('base_trade_amount', 10.0))
+        base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
+        trade_amount = balance * base_percentage
         if not position and row['buy_signal'] and balance >= trade_amount:
             fee = trade_amount * fee_rate
             cost_total = trade_amount + fee
@@ -1744,6 +1786,8 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
                 save_ohlcv_cache(ohlcv_cache)
+                from persistence import create_consolidated_archive
+                create_consolidated_archive()
                 signal.signal(signal.SIGINT, original_handler)
 
     # If we are in optimization mode for live/sim, return the map

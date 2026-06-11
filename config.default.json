@@ -1,7 +1,6 @@
 {
-    "base_currency": "EUR",
     "max_open_positions": 8,
-    "base_trade_amount": 20.0,
+    "base_trade_amount": 10.0,
     "expected_profit_terms": {
         "short": {
             "label": "Short Term (1h)",

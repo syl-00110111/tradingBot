@@ -4,6 +4,28 @@
 import json
 import os
 import time
+import zipfile
+import logging
+
+def create_consolidated_archive():
+    """
+    Creates a compressed archive of all runtime data files.
+    """
+    files_to_archive = [
+        'success_patterns.json',
+        'benchmark_cache.json',
+        'ohlcv_cache.pkl.gz',
+        'trades_history_live.json',
+        'trades_history_simulation.json',
+        'trades_history_sell.json'
+    ]
+    try:
+        with zipfile.ZipFile('bot_data_backup.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file in files_to_archive:
+                if os.path.exists(file):
+                    zipf.write(file)
+    except Exception as e:
+        logging.error(f"Failed to create consolidated archive: {e}")
 
 class PatternManager:
     def __init__(self, filename='success_patterns.json'):
@@ -21,6 +43,7 @@ class PatternManager:
     def save(self):
         with open(self.filename, 'w') as f:
             json.dump(self.data, f, indent=4)
+        create_consolidated_archive()
 
     def set_patterns(self, symbol, patterns):
         self.data[symbol] = patterns[:4]
@@ -56,15 +79,18 @@ class DataManager:
         if not self.data["open_positions"] and not self.data["trade_history"]:
             if os.path.exists(self.filepath):
                 os.remove(self.filepath)
+                create_consolidated_archive()
             return
 
         with open(self.filepath, 'w') as f:
             json.dump(self.data, f, indent=4)
+        create_consolidated_archive()
 
     def clear_history(self):
         self.data = {"open_positions": {}, "trade_history": []}
         if os.path.exists(self.filepath):
             os.remove(self.filepath)
+        create_consolidated_archive()
 
     def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
         self.data["open_positions"][symbol] = {
@@ -89,6 +115,11 @@ class DataManager:
                 return True
         return False
 
+    def flag_ignore_sell(self, symbol):
+        if symbol in self.data["open_positions"]:
+            self.data["open_positions"][symbol]["ignore_sell"] = True
+            self._save_data()
+
     def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0):
         if symbol in self.data["open_positions"]:
             position = self.data["open_positions"].pop(symbol)
@@ -107,11 +138,6 @@ class DataManager:
 
     def get_open_positions(self): return self.data["open_positions"]
     def get_position(self, symbol): return self.data["open_positions"].get(symbol)
-
-    def flag_ignore_sell(self, symbol):
-        if symbol in self.data["open_positions"]:
-            self.data["open_positions"][symbol]["ignore_sell"] = True
-            self._save_data()
 
     def get_win_streak(self, symbol):
         streak = 0
@@ -135,6 +161,7 @@ class CacheManager:
 
     def save(self):
         with open(self.filename, 'w') as f: json.dump(self.cache, f, indent=4)
+        create_consolidated_archive()
 
     def get(self, symbol, term, max_age_seconds):
         key = f"{symbol}_{term}"
