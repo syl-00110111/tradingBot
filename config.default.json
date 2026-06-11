@@ -27,5 +27,6 @@
         "multiplier": 1.2
     },
     "secure_sell": false,
-    "global_risk_multiplier": 1.0
+    "global_risk_multiplier": 1.0,
+    "exchange": "binance"
 }

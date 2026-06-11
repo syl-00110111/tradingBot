@@ -54,6 +54,7 @@ from monte_carlo import MonteCarloEngine
 pairs_scroll_offset = 0
 logs_scroll_offset = 0
 focused_panel = "pairs"
+ohlcv_cache = {}
 all_logs = []
 status_scroll_index = 0
 expert_mode = False
@@ -534,15 +535,15 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
 
 def load_ohlcv_cache():
-    if os.path.exists('ohlcv_cache.pkl.gz'):
+    if os.path.exists('ohlcv_cache.pkl'):
         try:
-            with gzip.open('ohlcv_cache.pkl.gz', 'rb') as f:
+            with open('ohlcv_cache.pkl', 'rb') as f:
                 return pickle.load(f)
         except Exception: return {}
     return {}
 
 def save_ohlcv_cache(cache):
-    with gzip.open('ohlcv_cache.pkl.gz', 'wb') as f:
+    with open('ohlcv_cache.pkl', 'wb') as f:
         pickle.dump(cache, f)
 
 def main():
@@ -582,6 +583,9 @@ def main():
             os.environ['OMP_NUM_THREADS'] = '1'
             os.environ['MKL_NUM_THREADS'] = '1'
             torch.set_num_threads(1) # Optimized for parallel workers
+            gpu_enabled = True
+        elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
+            device = torch.device('vulkan')
             gpu_enabled = True
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device('mps')
@@ -740,6 +744,9 @@ def main():
                 time.sleep(0.1)
     except KeyboardInterrupt:
         shutdown_event.set()
+        from persistence import create_consolidated_archive
+        save_ohlcv_cache(ohlcv_cache)
+        create_consolidated_archive()
 
     logging.info("Bot stopped gracefully.")
 
@@ -1095,16 +1102,13 @@ def get_sellable_assets(exchange, config=None):
     balance = exchange.fetch_balance()
     assets = []
     base_currencies = config.get('base_currencies', ['EUR']) if config else ['EUR']
-
-    # Access free balance
     free_balances = balance.get('free', balance)
 
     for asset, amount in free_balances.items():
-        if not isinstance(amount, (int, float)) or amount <= 0:
-            continue
-        if asset in base_currencies or asset == 'USDT':
-            continue
+        if not isinstance(amount, (int, float)) or amount <= 0: continue
+        if asset in base_currencies or asset == 'USDT': continue
 
+        # Find pair
         symbol = None
         for bc in base_currencies:
             candidate = f"{asset}/{bc}"
@@ -1112,36 +1116,19 @@ def get_sellable_assets(exchange, config=None):
                 symbol = candidate
                 break
         if not symbol: continue
-        try:
-            # Handle markets access for both BinanceExchange and MockExchange
-            markets = {}
-            if hasattr(exchange, 'exchange') and exchange.exchange.markets:
-                markets = exchange.exchange.markets
-            elif hasattr(exchange, 'markets'):
-                markets = exchange.markets
 
-            # Check limits if markets are loaded
+        try:
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
             if symbol in markets:
                 market = markets[symbol]
                 min_amount = market['limits']['amount']['min']
                 min_cost = market['limits']['cost']['min'] or 10
-
-                # Check minimum amount
-                if min_amount and amount < min_amount:
-                    continue
-
-                # Check minimum cost (10 EUR typically)
                 ticker = exchange.fetch_ticker(symbol)
-                if ticker and (amount * ticker['last']) < min_cost:
-                    continue
-            elif amount <= 0.000001: # Fallback for unknown markets
-                continue
-
+                if ticker and (amount < min_amount or (amount * ticker['last']) < min_cost): continue
+            elif amount <= 0.000001: continue
             assets.append(asset)
         except Exception:
-            if amount > 0.000001:
-                assets.append(asset)
-
+            if amount > 0.000001: assets.append(asset)
     return sorted(assets)
 
 def interactive_sell(exchange, data_manager, engine, config):
