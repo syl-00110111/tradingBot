@@ -33,9 +33,9 @@ class MonteCarloEngine:
         Vectorized with PyTorch for GPU acceleration.
         """
         # Ensure inputs are tensors and moved to device
-        curr_p = torch.tensor(current_price, device=self.device, dtype=torch.float32)
-        vol = torch.tensor(volatility, device=self.device, dtype=torch.float32)
-        drft = torch.tensor(drift, device=self.device, dtype=torch.float32)
+        curr_p = torch.tensor(current_price, device=self.device, dtype=torch.float64)
+        vol = torch.tensor(volatility, device=self.device, dtype=torch.float64)
+        drft = torch.tensor(drift, device=self.device, dtype=torch.float64)
 
         # random.normal_ equivalent in torch
         returns = torch.randn((self.num_simulations, self.timeframe_candles), device=self.device) * vol + drft
@@ -62,7 +62,7 @@ class MonteCarloEngine:
         else:
             hits = torch.any(paths <= target_price, dim=1)
 
-        return torch.mean(hits.float()).item()
+        return torch.mean(hits.double()).item()
 
     def validate_strategy(self, df):
         """
@@ -92,7 +92,7 @@ class MonteCarloEngine:
 
         # Validation: check how many paths end with profit > expected fees (0.15%)
         final_prices = paths[:, -1]
-        profit_prob = torch.mean((final_prices > current_price * 1.0015).float()).item()
+        profit_prob = torch.mean((final_prices > current_price * 1.0015).double()).item()
 
         # Transform probability into a scaling factor [0.5, 1.5]
         score = 0.5 + profit_prob

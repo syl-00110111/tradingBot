@@ -1,6 +1,14 @@
 {
-    "max_open_positions": 8,
-    "base_trade_amount": 10.0,
+    "exchange": "binance",
+    "max_open_positions": 5,
+    "base_trade_amount": 17.0,
+    "secure_sell": true,
+    "global_risk_multiplier": 1.2,
+    "win_streak_bonus": {
+        "enabled": true,
+        "threshold": 2,
+        "multiplier": 1.3
+    },
     "expected_profit_terms": {
         "short": {
             "label": "Short Term (1h)",
@@ -20,13 +28,5 @@
             "timeframe": "1h",
             "eval_candles": 168
         }
-    },
-    "win_streak_bonus": {
-        "enabled": true,
-        "threshold": 2,
-        "multiplier": 1.2
-    },
-    "secure_sell": false,
-    "global_risk_multiplier": 1.0,
-    "exchange": "binance"
+    }
 }

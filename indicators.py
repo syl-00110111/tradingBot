@@ -111,9 +111,9 @@ def get_signals(df, mode_config, is_backtest=False):
     # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
     use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
     if use_acceleration:
-        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
-        high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float32)
-        low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float32)
+        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+        high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
+        low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
         df['ema_f'] = torch_ema(close_t, 8).to('cpu').numpy()
         df['ema_s'] = torch_ema(close_t, 18).to('cpu').numpy()
         m_val, m_sig, m_hist = torch_macd(close_t)
@@ -256,8 +256,8 @@ def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     # GPU-accelerated Shape Correlation
     try:
         # Convert to tensors for fast computation
-        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float32)
-        p_vals = torch.tensor(pattern['prices'], device=device, dtype=torch.float32)
+        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
+        p_vals = torch.tensor(pattern['prices'], device=device, dtype=torch.float64)
 
         # Min-max normalization on GPU
         c_min, c_max = c_vals.min(), c_vals.max()
@@ -800,7 +800,7 @@ def strategy_double_ema(df, config):
     ema_slow = config.get('ema_slow', 18)
     device = config.get('device', torch.device('cpu'))
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
-        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
+        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
         df['ema_f'] = torch_ema(close_t, ema_fast).to('cpu').numpy()
         df['ema_s'] = torch_ema(close_t, ema_slow).to('cpu').numpy()
     else:
@@ -820,7 +820,7 @@ def strategy_double_ema_macd_rsi(df, config):
     device = config.get('device', torch.device('cpu'))
 
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
-        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float32)
+        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
         df['ema_f_strat'] = torch_ema(close_t, ema_fast).to('cpu').numpy()
         df['ema_s_strat'] = torch_ema(close_t, ema_slow).to('cpu').numpy()
         m_val, m_sig, _ = torch_macd(close_t, fast=macd_f, slow=macd_s, signal=macd_sig)
