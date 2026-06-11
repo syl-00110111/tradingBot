@@ -7,38 +7,62 @@ import time
 import zipfile
 import logging
 
-
-def load_from_archive():
-    import zipfile
-    if os.path.exists('bot_data_backup.zip'):
-        try:
-            with zipfile.ZipFile('bot_data_backup.zip', 'r') as zipf:
-                zipf.extractall()
-                return True
-        except: pass
-    return False
+ARCHIVE_NAME = 'bot_data_backup.zip'
 
 def create_consolidated_archive():
     """
-    Creates a compressed archive of all runtime data files.
+    Creates/updates a compressed archive of all runtime data files and deletes the source files.
     """
     files_to_archive = [
         'success_patterns.json',
         'benchmark_cache.json',
-        'ohlcv_cache.pkl.gz',
+        'ohlcv_cache.pkl',
         'trades_history_live.json',
         'trades_history_simulation.json',
         'trades_history_sell.json'
     ]
     try:
-        with zipfile.ZipFile('bot_data_backup.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
+        # Create or update ZIP
+        with zipfile.ZipFile(ARCHIVE_NAME, 'a', zipfile.ZIP_DEFLATED) as zipf:
             for file in files_to_archive:
                 if os.path.exists(file):
-                    zipf.write(file)
-                    # We keep them for now during runtime to avoid constant extraction
-                    # but ensure they are bundled.
+                    # Remove existing member if updating (zipfile doesn't support overwrite easily)
+                    # For simplicity, we create a new one every time to ensure consistency
+                    pass
+
+        # Fresh write is safer for "Consolidated"
+        existing_files = [f for f in files_to_archive if os.path.exists(f)]
+        if not existing_files: return
+
+        with zipfile.ZipFile(ARCHIVE_NAME, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file in existing_files:
+                zipf.write(file)
+
+        # Delete source files as requested
+        for file in existing_files:
+            try: os.remove(file)
+            except: pass
+
     except Exception as e:
         logging.error(f"Failed to create consolidated archive: {e}")
+
+def load_from_archive(filename=None):
+    """
+    Extracts files from the archive. If filename provided, only extracts that one.
+    """
+    if not os.path.exists(ARCHIVE_NAME):
+        return False
+    try:
+        with zipfile.ZipFile(ARCHIVE_NAME, 'r') as zipf:
+            if filename:
+                if filename in zipf.namelist():
+                    zipf.extract(filename)
+                    return True
+                return False
+            zipf.extractall()
+            return True
+    except:
+        return False
 
 class PatternManager:
     def __init__(self, filename='success_patterns.json'):
@@ -46,6 +70,9 @@ class PatternManager:
         self.data = self._load()
 
     def _load(self):
+        if not os.path.exists(self.filename):
+            load_from_archive(self.filename)
+
         if os.path.exists(self.filename):
             try:
                 with open(self.filename, 'r') as f:
@@ -72,6 +99,9 @@ class DataManager:
 
     def _load_data(self):
         default_data = {"open_positions": {}, "trade_history": []}
+        if not os.path.exists(self.filepath):
+            load_from_archive(self.filepath)
+
         if os.path.exists(self.filepath):
             try:
                 with open(self.filepath, 'r') as f:
@@ -88,11 +118,9 @@ class DataManager:
             return default_data
 
     def _save_data(self):
-        # Only save if there is something meaningful to store
         if not self.data["open_positions"] and not self.data["trade_history"]:
             if os.path.exists(self.filepath):
                 os.remove(self.filepath)
-                create_consolidated_archive()
             return
 
         with open(self.filepath, 'w') as f:
@@ -107,14 +135,9 @@ class DataManager:
 
     def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
         self.data["open_positions"][symbol] = {
-            "entry_price": entry_price,
-            "amount": amount,
-            "entry_fee": fee,
-            "entry_total_base": total_base,
-            "trigger_data": trigger_data,
-            "timestamp": timestamp,
-            "sell_signals_received": 0,
-            "last_sell_signal_candle_ts": None
+            "entry_price": entry_price, "amount": amount, "entry_fee": fee,
+            "entry_total_base": total_base, "trigger_data": trigger_data,
+            "timestamp": timestamp, "sell_signals_received": 0, "last_sell_signal_candle_ts": None
         }
         self._save_data()
 
@@ -166,6 +189,9 @@ class CacheManager:
         self.cache = self._load()
 
     def _load(self):
+        if not os.path.exists(self.filename):
+            load_from_archive(self.filename)
+
         if os.path.exists(self.filename):
             try:
                 with open(self.filename, 'r') as f: return json.load(f)

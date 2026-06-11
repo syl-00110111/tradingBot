@@ -49,7 +49,7 @@ class ExchangeInterface:
 class BinanceExchange(ExchangeInterface):
     def __init__(self, api_key, api_secret):
         self.exchange = ThrottledExchange(ccxt.binance({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
             'options': {'defaultType': 'spot', 'poolSize': 50},
             'session': create_ccxt_session()
         }))
@@ -123,7 +123,7 @@ class MockExchange(ExchangeInterface):
             try:
                 ex_class = ccxt.binance if exchange_type == 'binance' else (ccxt.kraken if exchange_type == 'kraken' else ccxt.bitvavo)
                 self.real_exchange = ThrottledExchange(ex_class({
-                    'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+                    'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
                     'options': {'defaultType': 'spot', 'poolSize': 50},
                     'session': create_ccxt_session()
                 }))
@@ -230,14 +230,14 @@ class MockExchange(ExchangeInterface):
 class KrakenExchange(BinanceExchange):
     def __init__(self, api_key, api_secret):
         self.exchange = ThrottledExchange(ccxt.kraken({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
             'session': create_ccxt_session()
         }))
 
 class BitvavoExchange(BinanceExchange):
     def __init__(self, api_key, api_secret):
         self.exchange = ThrottledExchange(ccxt.bitvavo({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
             'options': {'poolSize': 50},
             'session': create_ccxt_session()
         }))
