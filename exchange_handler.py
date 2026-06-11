@@ -113,8 +113,12 @@ class BinanceExchange(ExchangeInterface):
 
 class MockExchange(ExchangeInterface):
     def __init__(self, api_key=None, api_secret=None):
-        self.balance = {'EUR': 1000.0}; self.ohlcv_data = {}; self.real_exchange = None; self.fee_rate = 0.001
+        self.balance = {'EUR': 1000.0, 'USDC': 1000.0, 'USDT': 1000.0}
+        self.ohlcv_data = {}
+        self.real_exchange = None
+        self.fee_rate = 0.001
         self.markets = {}
+        self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
                 self.real_exchange = ThrottledExchange(ccxt.binance({
@@ -122,8 +126,31 @@ class MockExchange(ExchangeInterface):
                     'options': {'defaultType': 'spot', 'poolSize': 50},
                     'session': create_ccxt_session()
                 }))
-                logging.info("Mock initialized with real API balance fetching (markets deferred)")
+                logging.info("Mock initialized with real API balance discovery (deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")
+
+    def _init_balance(self):
+        if self._balance_initialized: return
+        if self.real_exchange:
+            try:
+                real_bal = self.real_exchange.fetch_balance()
+                total = real_bal.get('total', {})
+                for asset, amt in total.items():
+                    if amt <= 0: continue
+                    # Ignore dust: value must be > 1.0 in base currency
+                    is_dust = False
+                    if asset not in ['EUR', 'USDT', 'USDC']:
+                        try:
+                            ticker = self.fetch_ticker(f"{asset}/EUR")
+                            if ticker and (amt * ticker['last']) < 1.0:
+                                is_dust = True
+                        except: pass
+                    if not is_dust:
+                        self.balance[asset] = amt
+                logging.info("Mock virtual balance initialized from real wallet (dust ignored).")
+            except Exception as e:
+                logging.error(f"Failed to sync virtual balance from real API: {e}")
+        self._balance_initialized = True
 
     def load_markets(self):
         if self.real_exchange:
@@ -156,9 +183,7 @@ class MockExchange(ExchangeInterface):
         except Exception: return {'last': 0.0}
 
     def fetch_balance(self):
-        if self.real_exchange:
-            try: return self.real_exchange.fetch_balance()
-            except Exception: pass
+        self._init_balance()
         return {'total': self.balance, 'free': self.balance}
 
     def fetch_my_trades(self, symbol, limit=10):
@@ -176,21 +201,27 @@ class MockExchange(ExchangeInterface):
         return self.fee_rate
 
     def create_order(self, symbol, side, amount, price=None):
-        ticker = self.fetch_ticker(symbol); price = ticker['last']; cost = amount * price;
+        self._init_balance()
+        ticker = self.fetch_ticker(symbol)
+        price = ticker['last']
+        if price <= 0: return None
+
+        cost = amount * price
         fee_rate = self.fetch_trading_fee(symbol)
         fee = cost * fee_rate
-        base, quote = symbol.split('/'); current_balance = self.fetch_balance()
-        if 'free' in current_balance:
-             free_quote = current_balance['free'].get(quote, self.balance.get(quote, 0))
-             free_base = current_balance['free'].get(base, self.balance.get(base, 0))
-        else:
-             free_quote = self.balance.get(quote, 0); free_base = self.balance.get(base, 0)
+        base, quote = symbol.split('/')
+
+        free_quote = self.balance.get(quote, 0.0)
+        free_base = self.balance.get(base, 0.0)
+
         if side == 'buy':
             if free_quote >= (cost + fee):
-                self.balance[quote] = free_quote - (cost + fee); self.balance[base] = free_base + amount
+                self.balance[quote] = free_quote - (cost + fee)
+                self.balance[base] = free_base + amount
                 return {'id': 'mock_buy_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
         else:
-            if self.real_exchange or free_base >= amount:
-                self.balance[base] = free_base - amount; self.balance[quote] = free_quote + cost - fee
+            if free_base >= amount:
+                self.balance[base] = free_base - amount
+                self.balance[quote] = free_quote + cost - fee
                 return {'id': 'mock_sell_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
         return None
