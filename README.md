@@ -77,7 +77,8 @@ Store your credentials and preferred exchange:
 1. Create a virtual environment: `python -m venv venv`
 2. Activate it: `.\venv\Scripts\activate`
 3. Install dependencies: `pip install -r requirements.txt`
-*Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific dependency requirements.*
+
+*Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific llvmlite dependency requirements on this platform.*
 
 **Regular maintenance:**
 
