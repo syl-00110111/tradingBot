@@ -1,0 +1,84 @@
+===============================================================================
+                     EXPLICATIONS TECHNIQUES APPROFONDIES
+===============================================================================
+
+Ce document apporte des précisions techniques sur les mécanismes de décision,
+de simulation et de gestion des risques du bot.
+
+1. MULTIPLICATEUR DE RISQUE GLOBAL (Par défaut : 1.2)
+----------------------------------------------------
+Le multiplicateur (`global_risk_multiplier`) agit sur deux leviers :
+- TAILLE DE POSITION : Le montant investi par trade est multiplié par ce
+  chiffre. À 1.2, le bot investit 20% de plus que le montant de base.
+- AGRESSIVITÉ DES SIGNAUX : Le bot réduit la "fenêtre de confirmation"
+  (le nombre de signaux identiques successifs nécessaires) en divisant cette
+  fenêtre par le multiplicateur.
+  Exemple : Si 3 signaux sont normalement requis, avec un multiplicateur de 1.5,
+  le bot n'en demandera plus que 2 (3 / 1.5 = 2).
+
+2. TENDANCE FORTE (Seuil ADX > 25)
+----------------------------------
+Qu'entend-on par "Tendance Forte" ?
+C'est un état de marché où le prix se déplace de manière directionnelle et
+soutenue (hausse ou baisse claire), sans faire de surplace.
+- RÉGLAGES : Le bot raccourcit ses moyennes mobiles (EMA 10/30 au lieu de 20/50)
+  et élargit les seuils RSI.
+- BUT : Entrer plus vite dans le mouvement pour profiter de la force du flux
+  avant qu'il ne s'essouffle.
+
+3. HAUTE VOLATILITÉ (Seuil Volatilité > 0.015)
+----------------------------------------------
+Qu'entend-on par "Haute Volatilité" ?
+C'est un état de marché nerveux où le prix fait des bonds rapides et
+imprévisibles dans les deux sens (souvent appelé "bruit" ou "hachage").
+- RÉGLAGES : Le bot allonge ses moyennes mobiles (EMA 30/100) et augmente la
+  fenêtre de confirmation.
+- BUT : "Lisser" le prix pour éviter les "faux signaux" (whipsaws) causés par
+  des mèches de prix temporaires. Le bot devient plus prudent et attend une
+  confirmation plus longue.
+
+4. GÉNÉRATION DES "UNIVERS PARALLÈLES" MONTE CARLO
+--------------------------------------------------
+Le bot utilise un modèle mathématique appelé "Mouvement Brownien Géométrique".
+Processus :
+1. ANALYSE : Le bot mesure la volatilité réelle (écart-type des retours) et la
+   tendance (drift) sur les 20 dernières bougies.
+2. SIMULATION : Il génère 100 à 1000 chemins de prix aléatoires en utilisant
+   ces statistiques.
+3. CALCUL : Chaque chemin est créé en ajoutant une variation aléatoire (basée
+   sur une loi normale) à chaque nouvelle bougie simulée.
+Résultat : On obtient une nuée de courbes de prix possibles. Si la stratégie
+est rentable dans la majorité de ces univers, elle est validée.
+
+5. IDENTIFICATION DES "SUCCESS PATTERNS"
+----------------------------------------
+Lors du Benchmark, le bot ne se contente pas de tester une stratégie sur toute
+la durée. Il cherche des "pépites" temporelles :
+1. Il calcule la courbe de profit totale.
+2. Il fait glisser une fenêtre (ex: 60 bougies) sur cette courbe.
+3. Il enregistre les segments où le profit est maximal.
+4. Il ne garde que les 4 meilleurs segments qui ne se chevauchent pas dans le
+   temps.
+Chaque segment conservé devient un "Success Pattern" : une photo du prix et de
+l'état technique à un moment où la stratégie a été extrêmement efficace.
+
+6. PONDÉRATION DE SIMILARITÉ (70% PRIX / 30% TECHNIQUE)
+-------------------------------------------------------
+Pour décider si le marché actuel ressemble à un "Success Pattern", le bot
+combine deux analyses :
+
+A. PRIX (70% - La Forme)
+   Le bot compare la "silhouette" de la courbe des prix actuelle avec celle du
+   pattern. Il utilise la corrélation de Pearson.
+   - C'est une analyse purement visuelle/géométrique : "Est-ce que les hauts
+     et les bas se suivent de la même manière ?".
+
+B. TECHNIQUE (30% - Le Contexte)
+   Le bot compare les indicateurs internes (RSI et ADX) à la fin de la période.
+   - On mesure la distance mathématique (Euclidienne) entre les indicateurs :
+     "Est-ce que le marché est aussi essoufflé (RSI) ou aussi tendu (ADX) que
+     lorsque le pattern a réussi par le passé ?".
+
+SYNTHÈSE : Si la forme ressemble à 90% mais que les indicateurs sont totalement
+différents, le score chute, car le contexte de marché n'est pas le même.
+===============================================================================
