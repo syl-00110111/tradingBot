@@ -46,7 +46,7 @@ import readchar
 
 from exchange_handler import BinanceExchange, MockExchange, KrakenExchange, BitvavoExchange
 from indicators import get_signals, calculate_similarity, STRATEGIES
-from persistence import DataManager, CacheManager, PatternManager
+from persistence import DataManager, CacheManager, PatternManager, MonteCarloCacheManager
 from trading_engine import TradingEngine
 from monte_carlo import MonteCarloEngine
 
@@ -967,7 +967,14 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         df = get_signals(df, mode_settings, is_backtest=False); latest_row = df.iloc[-1]
 
         # Instruction 2b: New Monte Carlo tests pondering with pattern score
-        mc = MonteCarloEngine(num_simulations=1000, timeframe_candles=20); mc.set_device(device); mc_score = mc.validate_strategy(df)
+        mc_cache = MonteCarloCacheManager()
+        candle_ts = int(df.iloc[-1]['timestamp']) if not isinstance(df.iloc[-1]['timestamp'], (pd.Timestamp, datetime)) else int(df.iloc[-1]['timestamp'].timestamp())
+        mc_score = mc_cache.get(symbol, timeframe, candle_ts)
+
+        if mc_score is None:
+            mc = MonteCarloEngine(num_simulations=1000, timeframe_candles=20); mc.set_device(device); mc_score = mc.validate_strategy(df)
+            mc_cache.set(symbol, timeframe, candle_ts, mc_score)
+
         pattern_score = active_pattern.get('score', 1.0); combined_mc_score = mc_score * (1 + pattern_score)
         if combined_mc_score < 0.5: latest_row['buy_signal'] = False; latest_row['sell_signal'] = False
     else:
@@ -1786,14 +1793,32 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     # Otherwise we scan just the requested term.
     # Actually, to fulfill Instruction 3, we should ensure we scan what is requested.
     term_to_test = term_override if term_override else getattr(args, 'term', 'short')
+    term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
+    timeframe = term_cfg.get('timeframe', '5m')
 
     symbols_to_bench = []
     for symbol in symbols:
         if term_override:
             cached_patterns = cache_mgr.get(symbol, term_override, validity_map.get(term_override, 3600))
             if cached_patterns:
-                # cached_patterns is a list of pattern dicts
+                # Context-based invalidation: check if market context evolved too much
                 best = cached_patterns[0]
+                try:
+                    # Small limit to minimize bandwidth and rate-limit risk
+                    ohlcv_now = exchange.fetch_ohlcv(symbol, timeframe, limit=20)
+                    if ohlcv_now:
+                        df_now = pd.DataFrame(ohlcv_now, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df_now = get_signals(df_now, {"device": device}, is_backtest=False)
+                        # Reuse similarity logic for invalidation
+                        sim = calculate_similarity(df_now.iloc[-len(best['prices']):] if len(df_now) >= len(best['prices']) else df_now, best, device=device)
+                        if sim < 0.70:
+                             logging.info(f"[{symbol}] Cache invalidated: Market context evolved too much (sim: {sim:.2f})")
+                             cache_mgr.delete(symbol, term_override)
+                             symbols_to_bench.append(symbol)
+                             continue
+                except Exception as e:
+                    logging.warning(f"[{symbol}] Failed to verify cache context: {e}")
+
                 best['is_cached'] = True
                 optimization_map[symbol] = best
                 if data_manager:

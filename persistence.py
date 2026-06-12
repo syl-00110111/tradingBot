@@ -6,12 +6,15 @@ import os
 import time
 import zipfile
 import logging
+import shutil
 
 ARCHIVE_NAME = 'bot_data_backup.zip'
+CACHE_DIR = 'cache'
 
 def create_consolidated_archive():
     """
     Creates/updates a compressed archive of all runtime data files and deletes the source files.
+    Includes the cache/ directory and its contents.
     """
     files_to_archive = [
         'success_patterns.json',
@@ -22,25 +25,28 @@ def create_consolidated_archive():
         'trades_history_sell.json'
     ]
     try:
-        # Create or update ZIP
-        with zipfile.ZipFile(ARCHIVE_NAME, 'a', zipfile.ZIP_DEFLATED) as zipf:
+        # We perform a fresh write to ensure consistency as per "Consolidated"
+        with zipfile.ZipFile(ARCHIVE_NAME, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Archive individual files
             for file in files_to_archive:
                 if os.path.exists(file):
-                    # Remove existing member if updating (zipfile doesn't support overwrite easily)
-                    # For simplicity, we create a new one every time to ensure consistency
-                    pass
+                    zipf.write(file)
 
-        # Fresh write is safer for "Consolidated"
-        existing_files = [f for f in files_to_archive if os.path.exists(f)]
-        if not existing_files: return
+            # Archive cache directory
+            if os.path.exists(CACHE_DIR):
+                for root, dirs, files in os.walk(CACHE_DIR):
+                    for file in files:
+                        filepath = os.path.join(root, file)
+                        zipf.write(filepath)
 
-        with zipfile.ZipFile(ARCHIVE_NAME, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file in existing_files:
-                zipf.write(file)
+        # Delete source files and cache as requested (bot design pattern)
+        for file in files_to_archive:
+            if os.path.exists(file):
+                try: os.remove(file)
+                except: pass
 
-        # Delete source files as requested
-        for file in existing_files:
-            try: os.remove(file)
+        if os.path.exists(CACHE_DIR):
+            try: shutil.rmtree(CACHE_DIR)
             except: pass
 
     except Exception as e:
@@ -49,16 +55,20 @@ def create_consolidated_archive():
 def load_from_archive(filename=None):
     """
     Extracts files from the archive. If filename provided, only extracts that one.
+    If filename is None, extracts everything including the cache/ directory.
     """
     if not os.path.exists(ARCHIVE_NAME):
         return False
     try:
         with zipfile.ZipFile(ARCHIVE_NAME, 'r') as zipf:
             if filename:
+                # Handle filename being a path inside the zip
                 if filename in zipf.namelist():
                     zipf.extract(filename)
                     return True
                 return False
+
+            # Extract everything
             zipf.extractall()
             return True
     except:
@@ -84,6 +94,7 @@ class PatternManager:
         with open(self.filename, 'w') as f:
             json.dump(self.data, f, indent=4)
         create_consolidated_archive()
+        load_from_archive() # Keep files on disk for runtime
 
     def set_patterns(self, symbol, patterns):
         self.data[symbol] = patterns[:10]
@@ -126,12 +137,14 @@ class DataManager:
         with open(self.filepath, 'w') as f:
             json.dump(self.data, f, indent=4)
         create_consolidated_archive()
+        load_from_archive() # Keep files on disk for runtime
 
     def clear_history(self):
         self.data = {"open_positions": {}, "trade_history": []}
         if os.path.exists(self.filepath):
             os.remove(self.filepath)
         create_consolidated_archive()
+        load_from_archive()
 
     def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
         self.data["open_positions"][symbol] = {
@@ -184,32 +197,96 @@ class DataManager:
         return streak
 
 class CacheManager:
-    def __init__(self, filename='benchmark_cache.json'):
-        self.filename = filename
-        self.cache = self._load()
+    """
+    Manages benchmark results using individual files for each symbol/term context.
+    """
+    def __init__(self):
+        if not os.path.exists(CACHE_DIR):
+            if not load_from_archive():
+                os.makedirs(CACHE_DIR, exist_ok=True)
 
-    def _load(self):
-        if not os.path.exists(self.filename):
-            load_from_archive(self.filename)
-
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f: return json.load(f)
-            except Exception: return {}
-        return {}
-
-    def save(self):
-        with open(self.filename, 'w') as f: json.dump(self.cache, f, indent=4)
-        create_consolidated_archive()
+    def _get_path(self, symbol, term):
+        safe_symbol = symbol.replace('/', '_')
+        return os.path.join(CACHE_DIR, f"bench_{safe_symbol}_{term}.json")
 
     def get(self, symbol, term, max_age_seconds):
-        key = f"{symbol}_{term}"
-        if key in self.cache:
-            entry = self.cache[key]
-            if time.time() - entry['timestamp'] < max_age_seconds: return entry['data']
+        path = self._get_path(symbol, term)
+        if not os.path.exists(path):
+            load_from_archive(path)
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    entry = json.load(f)
+                    if time.time() - entry['timestamp'] < max_age_seconds:
+                        return entry['data']
+            except Exception: pass
         return None
 
     def set(self, symbol, term, data):
-        key = f"{symbol}_{term}"
-        self.cache[key] = {'timestamp': time.time(), 'data': data}
-        self.save()
+        path = self._get_path(symbol, term)
+        try:
+            with open(path, 'w') as f:
+                json.dump({'timestamp': time.time(), 'data': data}, f, indent=4)
+            # Just write to disk. Archiving will happen on bot exit or PatternManager save.
+        except Exception as e:
+            logging.error(f"Failed to set cache for {symbol}/{term}: {e}")
+
+    def delete(self, symbol, term):
+        path = self._get_path(symbol, term)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                # No immediate archive here to save I/O; exit will handle it.
+            except: pass
+
+class MonteCarloCacheManager:
+    """
+    Manages Monte Carlo validation results using individual files.
+    """
+    def __init__(self):
+        if not os.path.exists(CACHE_DIR):
+            if not load_from_archive():
+                os.makedirs(CACHE_DIR, exist_ok=True)
+
+    def _get_path(self, symbol, timeframe, timestamp):
+        safe_symbol = symbol.replace('/', '_')
+        return os.path.join(CACHE_DIR, f"mc_{safe_symbol}_{timeframe}_{timestamp}.json")
+
+    def get(self, symbol, timeframe, timestamp):
+        path = self._get_path(symbol, timeframe, timestamp)
+        if not os.path.exists(path):
+            load_from_archive(path)
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    return json.load(f).get('score')
+            except Exception: pass
+        return None
+
+    def set(self, symbol, timeframe, timestamp, score):
+        path = self._get_path(symbol, timeframe, timestamp)
+        try:
+            with open(path, 'w') as f:
+                json.dump({'score': score, 'timestamp': time.time()}, f)
+            self.cleanup_old_cache(symbol, timeframe)
+        except Exception: pass
+
+    def cleanup_old_cache(self, symbol, timeframe, keep=5):
+        """
+        Keeps only the most recent 'keep' MC cache files for a given symbol and timeframe.
+        """
+        try:
+            safe_symbol = symbol.replace('/', '_')
+            prefix = f"mc_{safe_symbol}_{timeframe}_"
+            files = [f for f in os.listdir(CACHE_DIR) if f.startswith(prefix) and f.endswith(".json")]
+            if len(files) <= keep:
+                return
+
+            # Sort by modification time which is safer
+            full_paths = [os.path.join(CACHE_DIR, f) for f in files]
+            full_paths.sort(key=os.path.getmtime, reverse=True)
+
+            for old_file in full_paths[keep:]:
+                try: os.remove(old_file)
+                except: pass
+        except Exception: pass
