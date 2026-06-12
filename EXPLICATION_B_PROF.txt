@@ -1,0 +1,80 @@
+===============================================================================
+                    EXPLICATION DE LA COLONNE B.PROF
+===============================================================================
+
+La colonne "B.Prof" (Benchmark Profit) est un indicateur crucial utilisé par le
+bot pour évaluer et prioriser les opportunités de trading. Voici une analyse
+détaillée de son fonctionnement, de sa nature et de son calcul.
+
+1. SIGNIFICATION ET RÔLE
+------------------------
+B.Prof signifie "Benchmark Profit" (Profit de Référence).
+
+Cette valeur représente le profit théorique (exprimé en unités de devise de base,
+par exemple EUR) qu'une stratégie spécifique aurait généré sur une paire donnée
+pendant une période passée, après validation statistique.
+
+Son rôle principal est la PRIORISATION :
+Si le bot détecte plusieurs signaux d'achat simultanés mais que le nombre de
+positions ouvertes maximal (`max_open_positions`) est atteint ou presque, il
+utilisera le B.Prof pour choisir les paires ayant le plus fort potentiel de gain
+selon les données historiques récentes.
+
+2. NATURE DE LA VALEUR
+----------------------
+- STATIQUE : Contrairement au profit en temps réel (unrealized profit), le B.Prof
+  est calculé UNE SEULE FOIS lors de la phase d'auto-optimisation au démarrage
+  du bot.
+- LIÉE AU TERME : La valeur dépend du terme choisi au lancement (--term short,
+  medium, ou long). Par exemple, en mode "short", elle reflète une performance
+  optimisée pour un horizon d'environ 1 heure à 1 jour.
+
+3. ALGORITHME DE CALCUL DÉTAILLÉ
+--------------------------------
+Le calcul se déroule dans la fonction `run_benchmark_for_symbol` et suit ces
+étapes mathématiques :
+
+Étape A : Récupération des données (OHLCV)
+   Le bot télécharge jusqu'à 10 000 bougies historiques pour la paire traitée.
+
+Étape B : Simulation de performance (Single-pass Equity Curve)
+   Pour chacune des 36 stratégies disponibles :
+   1. Le bot calcule tous les indicateurs techniques sur l'ensemble du jeu de
+      données.
+   2. Il génère une "courbe d'équité" (Equity Curve) en simulant des trades en
+      une seule passe (complexité O(N)). Cela permet de savoir exactement quel
+      serait le capital à chaque instant T.
+
+Étape C : Analyse par fenêtre glissante (Sliding Window)
+   Le bot fait glisser une fenêtre d'évaluation (dont la taille dépend du terme)
+   sur la courbe d'équité pour identifier les périodes les plus profitables.
+   Profit_Fenêtre = Équité_Fin - Équité_Début
+
+Étape D : Pondération par récence (Recency Pondering)
+   Pour s'assurer que le bot ne se base pas sur des succès trop anciens, un
+   multiplicateur de récence est appliqué :
+   - Score_Final = Profit_Fenêtre * Coefficient_Récence
+   - Plus le succès est ancien, plus le coefficient diminue (ex: 0.8, 0.5, 0.2).
+
+Étape E : Validation de Monte Carlo
+   C'est l'étape de robustesse statistique. Le bot lance 100 simulations de
+   chemins de prix aléatoires (mouvement brownien géométrique) basées sur la
+   volatilité et le "drift" historiques de la fenêtre :
+   1. Si la stratégie gagne aussi sur des chemins aléatoires similaires, elle
+      est jugée robuste.
+   2. Un score Monte Carlo (entre 0.5 et 1.5) est généré.
+   3. B.Prof_Final = Profit_Pondéré * Score_Monte_Carlo
+
+Étape F : Sélection des "Success Patterns"
+   Les 4 meilleurs modèles non-chevauchants sont conservés. La valeur affichée
+   dans la colonne B.Prof correspond au profit attendu du meilleur modèle
+   sélectionné.
+
+4. RÉSUMÉ DU CALCUL (Formule simplifiée)
+----------------------------------------
+B.Prof = [Profit Historique] x [Poids Récence] x [Score de Robustesse Monte Carlo]
+
+En résumé, la colonne B.Prof n'est pas une garantie de gain futur, mais une
+mesure de la "qualité historique et statistique" de la configuration actuelle
+(Stratégie + Agressivité) pour chaque paire.
+===============================================================================
