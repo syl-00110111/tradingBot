@@ -68,13 +68,27 @@ Store your credentials and preferred exchange:
 
 ## 🚀 Getting Started
 
-1. **Install PyTorch & CCXT**:
-   ```bash
-   pip install torch ccxt pandas pandas-ta rich readchar matplotlib
-   pip install --upgrade ccxt
-   ```
-2. **Setup**: Create `api.json` and `pairs.txt`.
-3. **Run**: `python bot.py --mode simulation --exchange binance`
+### Installation
+
+**Linux/macOS:**
+1. Create a virtual environment: `python -m venv venv && source venv/bin/activate`
+2. Install dependencies: `pip install -r requirements.txt`
+
+**Windows:**
+1. Create a virtual environment: `python -m venv venv`
+2. Activate it: `.\venv\Scripts\activate`
+3. Install dependencies: `pip install -r requirements.txt`
+*Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific dependency requirements.*
+
+### Setup Credentials
+Copy `api.json.example` to `api.json` and enter your `api_key` and `api_secret`.
+
+### Execution Modes
+- **Simulation**: `python bot.py --mode simulation --term short`
+- **Live**: `python bot.py --mode live --term medium`
+- **Benchmark**: `python bot.py --mode benchmark --every-symbol`
+- **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
+- **Balance**: `python bot.py --mode balance`
 
 ---
 

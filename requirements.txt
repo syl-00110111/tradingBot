@@ -5,4 +5,4 @@ rich
 readchar
 matplotlib
 torch
-pycpuinfo
+py-cpuinfo
