@@ -80,9 +80,6 @@ Store your credentials and preferred exchange:
 3. Install dependencies: `pip install -r requirements.txt`
 *Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific dependency requirements.*
 
-### Setup Credentials
-Copy `api.json.example` to `api.json` and enter your `api_key` and `api_secret`.
-
 ### Execution Modes
 - **Simulation**: `python bot.py --mode simulation --term short`
 - **Live**: `python bot.py --mode live --term medium`
