@@ -1,8 +1,6 @@
 {
-    "exchange": "binance",
     "max_open_positions": 5,
     "base_trade_amount": 17.0,
-    "secure_sell": true,
     "global_risk_multiplier": 1.2,
     "win_streak_bonus": {
         "enabled": true,

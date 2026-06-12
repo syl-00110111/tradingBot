@@ -60,7 +60,6 @@ Store your credentials and preferred exchange:
 {
     "max_open_positions": 8,
     "base_trade_amount": 10.0,
-    "secure_sell": false,
     "global_risk_multiplier": 1.0
 }
 ```

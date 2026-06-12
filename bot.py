@@ -582,17 +582,27 @@ def main():
             torch.backends.mkldnn.enabled = True
             os.environ['OMP_NUM_THREADS'] = '1'
             os.environ['MKL_NUM_THREADS'] = '1'
-            torch.set_num_threads(1) # Optimized for parallel workers
+            torch.set_num_threads(1)
             gpu_enabled = True
         elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
             device = torch.device('vulkan')
+            gpu_enabled = True
+        elif torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip:
+            device = torch.device('cuda')
             gpu_enabled = True
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device('mps')
             gpu_enabled = True
         else:
-            device = torch.device('cpu')
-            gpu_enabled = False
+            try:
+                import intel_extension_for_pytorch as ipex
+                if torch.xpu.is_available():
+                    device = torch.device('xpu')
+                    gpu_enabled = True
+                else: raise Exception()
+            except:
+                device = torch.device('cpu')
+                gpu_enabled = False
 
     if args.config:
         config = load_config_from_path(args.config)
@@ -621,6 +631,21 @@ def main():
             console.print(f"[bold red]Error parsing api.json: {e}[/]")
 
     with console.status("[bold green]Initializing Binance Trading Bot...", spinner="dots") as status:
+
+        # MMX, SSE, AVX Gradation Check (Instruction 6)
+        try:
+            import cpuinfo
+            info = cpuinfo.get_cpu_info()
+            flags = info.get('flags', [])
+            best_simd = "None"
+            if 'mmx' in flags: best_simd = "MMX"
+            if 'sse' in flags: best_simd = "SSE"
+            if 'avx' in flags or 'avx2' in flags: best_simd = "AVX"
+            if 'avx512' in flags: best_simd = "AVX512"
+            console.print(f"[bold green]Hardware optimization level detected: {best_simd}[/]")
+        except Exception:
+            console.print("[yellow]SIMD detection skipped. Ensure CPU instructions are optimized in your environment.[/]")
+
         if not gpu_enabled:
             console.print("[bold yellow]Warning: GPU acceleration is disabled or no compatible GPU found.[/]")
             console.print("[yellow]Computations will run on CPU, which can be significantly slower (minutes to hours) for the first benchmarks.[/]")
@@ -654,6 +679,7 @@ def main():
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             exchange.load_markets()
             if hasattr(exchange, 'balance'): exchange.balance['TEST'] = True
+            status.stop()  # Stop status before interactive input
             interactive_sell(exchange, data_manager, engine, config)
             return
         elif args.mode == 'balance':
@@ -883,9 +909,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
     # Dynamic confirmation window based on term (Instruction 2)
     # Short: 3, Medium: 2, Long: 1
-    buy_threshold = 3
+    buy_threshold = 1
     if term == 'medium': buy_threshold = 2
-    elif term == 'long': buy_threshold = 1
+    elif term == 'long': buy_threshold = 3
 
     return {
         'price': latest_row['close'],
@@ -959,32 +985,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
 
 def execute_sell(exchange, data_manager, engine, symbol, data):
     position = data['position']
-    fee_rate = exchange.fetch_trading_fee(symbol)
-
-    is_profitable = engine.is_profitable(data['price'], position['entry_price'], fee_rate=fee_rate)
-
-    should_execute = False
-    if is_profitable:
-        should_execute = True
-    else:
-        # Not profitable
-        if engine.config.get('secure_sell', False):
-            candle_ts = data.get('trigger_data', {}).get('candle_ts')
-            if data_manager.increment_sell_signals(symbol, candle_ts):
-                pos_updated = data_manager.get_position(symbol)
-                count = pos_updated.get('sell_signals_received', 0)
-                if count >= 2:
-                    logging.info(f"[{symbol}] Stop-loss triggered: {count}nd SELL signal received at non-profitable price.")
-                    should_execute = True
-                else:
-                    logging.info(f"[{symbol}] Sell signal ignored (secure_sell=True and not profitable), count: {count}")
-                    return False
-            else:
-                # Already counted this candle
-                return False
-        else:
-            # secure_sell is False: sell even if not profitable on 1st signal
-            should_execute = True
+    should_execute = True
 
     if should_execute:
         base_asset = symbol.split('/')[0]
@@ -1375,7 +1376,9 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         return None
 
     # Evaluation window (how many candles we actually trade on)
-    eval_window = term_settings.get('eval_candles', 60)
+    eval_window_base = term_settings.get('eval_candles', 60)
+    max_rand = max(1, int(eval_window_base * 0.1))
+    eval_window = eval_window_base + random.randint(-max_rand, max_rand)
     # We always trade on the LAST eval_window candles of df
     start_idx = max(0, len(df) - eval_window)
 
@@ -1510,7 +1513,9 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     if df_in is None or len(df_in) < 100: return symbol, []
 
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
-    eval_window = term_cfg.get('eval_candles', 60)
+    eval_window_base = term_cfg.get('eval_candles', 60)
+    max_rand = max(1, int(eval_window_base * 0.1))
+    eval_window = eval_window_base + random.randint(-max_rand, max_rand)
     patterns = []
     now_ts = time.time()
 
