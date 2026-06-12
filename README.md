@@ -18,17 +18,16 @@ This bot implements strategies and logic recommended by leading empirical studie
 ## 🛠 Core Features
 
 ### ⚡ Performance & Reliability
-- **GPU Acceleration**: Calculations are offloaded to the graphics chip via PyTorch. Supported backends: **CUDA**, **MPS**, **Vulkan**, and **oneDNN** (Intel).
+- **GPU Acceleration**: Calculations are offloaded to the graphics chip via PyTorch. Supported backends: **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** and **ROCm**.
 - **Multi-Processing Benchmark**: Strategy optimization is parallelized across all CPU cores.
 - **Fresh Ticker Price**: Fetches a fresh price from the exchange immediately before placing a Buy order to ensure compliance with Spot market NOTIONAL limits and reduce "Filter failure" errors.
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
 
 ### 🛡 Risk Management
 - **Confirmation Logic**: Requires consecutive identical signals dynamically adjusted by term duration:
-  - **Short Term (1h)**: 3 signals
+  - **Short Term (1h)**: 1 signal
   - **Medium Term (1d)**: 2 signals
-  - **Long Term (1w)**: 1 signal
-- **Secure Sell Toggle**: When enabled, ensures trades are only closed at a profit.
+  - **Long Term (1w)**: 3 signals
 - **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 10.0 = 10%).
 
 ---
