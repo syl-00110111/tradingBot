@@ -99,11 +99,22 @@ class BinanceExchange(ExchangeInterface):
                         return None
             if side == 'buy': order = self.exchange.create_market_buy_order(symbol, amount)
             else: order = self.exchange.create_market_sell_order(symbol, amount)
-            if order and 'fee' in order and order['fee']: order['calculated_fee'] = order['fee'].get('cost', 0)
+            if order and 'fee' in order and order['fee']:
+                fee_cost = order['fee'].get('cost', 0)
+                fee_currency = order['fee'].get('currency', '')
+                _, quote = symbol.split('/')
+
+                # If fee is in base currency, convert it to quote currency
+                if fee_currency != quote and fee_cost > 0:
+                    ticker = self.fetch_ticker(symbol)
+                    if ticker and ticker.get('last'):
+                        fee_cost = fee_cost * ticker['last']
+
+                order['calculated_fee'] = fee_cost
             else:
                  ticker = self.fetch_ticker(symbol)
                  fee_rate = self.fetch_trading_fee(symbol)
-                 order['calculated_fee'] = amount * ticker['last'] * fee_rate
+                 order['calculated_fee'] = amount * (ticker['last'] if ticker else 0) * fee_rate
             return order
         except Exception as e:
             err_msg = str(e)

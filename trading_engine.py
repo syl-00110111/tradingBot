@@ -10,24 +10,20 @@ class TradingEngine:
 
     def get_dynamic_settings(self, adx, volatility):
         settings = {
-            "ema_fast": 20, "ema_slow": 50,
+            "ema_fast": 9, "ema_slow": 21,
             "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
-            "confirmation_window": 3
         }
         if adx > 25:
             settings.update({
                 "ema_fast": 10, "ema_slow": 30,
                 "rsi_buy": 40, "rsi_sell": 60,
-                "confirmation_window": 2
             })
-        elif volatility > 0.015:
+        elif volatility > self.config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015):
             settings.update({
                 "ema_fast": 30, "ema_slow": 100,
                 "rsi_buy": 20, "rsi_sell": 80,
-                "confirmation_window": 4
             })
-        settings["confirmation_window"] = max(1, int(settings["confirmation_window"] / self.risk_multiplier))
         return settings
 
     def is_profitable(self, current_price, entry_price, fee_rate=0.001):
@@ -37,14 +33,25 @@ class TradingEngine:
     def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
         return self.is_profitable(current_price, entry_price, fee_rate)
 
-    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0):
+    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, exchange=None):
         base_balance = 0
         if isinstance(balance, dict):
             if 'free' in balance: base_balance = balance['free'].get(base_currency, 0)
             else: base_balance = balance.get(base_currency, 0)
         else: base_balance = balance.get(base_currency, 0)
 
-        raw_val = float(self.config.get('base_trade_amount', 17.0))
+        base_trade_cfg = self.config.get('base_trade_amount', '20.0 EUR')
+        if isinstance(base_trade_cfg, str):
+            val_part, curr_part = base_trade_cfg.split(' ')
+            raw_val = float(val_part)
+            if curr_part != base_currency and exchange:
+                try:
+                    ticker = exchange.fetch_ticker(f"{curr_part}/{base_currency}")
+                    if ticker and ticker.get("last"): raw_val *= ticker["last"]
+                    # For now we'll rely on the caller to have handled conversion or handle it if we can pass exchange
+                    pass
+                except: pass
+        else: raw_val = float(base_trade_cfg)
         base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
         trade_amount_base = base_balance * base_percentage
         trade_amount_base *= self.risk_multiplier

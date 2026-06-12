@@ -86,7 +86,7 @@ class PatternManager:
         create_consolidated_archive()
 
     def set_patterns(self, symbol, patterns):
-        self.data[symbol] = patterns[:4]
+        self.data[symbol] = patterns[:10]
         self.save()
 
     def get_patterns(self, symbol):

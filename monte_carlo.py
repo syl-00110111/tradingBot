@@ -92,7 +92,7 @@ class MonteCarloEngine:
 
         # Validation: check how many paths end with profit > expected fees (0.15%)
         final_prices = paths[:, -1]
-        profit_prob = torch.mean((final_prices > current_price * 1.0015).double()).item()
+        hurdle = getattr(self, 'mc_hurdle', 0.0015); profit_prob = torch.mean((final_prices > current_price * (1 + hurdle)).double()).item()
 
         # Transform probability into a scaling factor [0.5, 1.5]
         score = 0.5 + profit_prob
