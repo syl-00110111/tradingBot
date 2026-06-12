@@ -82,6 +82,7 @@ def torch_adx(high, low, close, length=14):
     adx = torch_ema(dx, 2 * length - 1)
     return adx
 STRATEGIES = [
+    'simple_ema', 'simple_sma',
     'moving_averages', 'ichimoku_cloud', 'parabolic_sar', 'rsi_support_resistance',
     'bollinger_bands', 'macd_range', 'breakout_volume', 'donchian_channels',
     'atr_breakout', 'stochastic_rsi', 'williams_r', 'vwap_momentum',
@@ -102,20 +103,20 @@ def get_signals(df, mode_config, is_backtest=False):
     Dispatcher for multiple trading strategies.
     Selected strategy is defined in mode_config['strategy'].
     """
-    strategy = mode_config.get('strategy', 'double_ema_macd_rsi')
+    strategy = mode_config.get('strategy', 'simple_ema')
     device = mode_config.get('device', torch.device('cpu'))
     _mc_engine.set_device(device)
 
     # Common indicators for tendency and background analysis (Expert Mode)
-    if df.empty: return df
+    if df.empty: return finalize_signals(df)
     # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
     use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
     if use_acceleration:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
         high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
         low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
-        df['ema_f'] = torch_ema(close_t, 8).to('cpu').numpy()
-        df['ema_s'] = torch_ema(close_t, 18).to('cpu').numpy()
+        df['ema_f'] = torch_ema(close_t, 9).to('cpu').numpy()
+        df['ema_s'] = torch_ema(close_t, 21).to('cpu').numpy()
         m_val, m_sig, m_hist = torch_macd(close_t)
         df['macd_val'] = m_val.to('cpu').numpy()
         df['macd_sig'] = m_sig.to('cpu').numpy()
@@ -123,9 +124,9 @@ def get_signals(df, mode_config, is_backtest=False):
         df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
         df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
     else:
-        ema_f = ta.ema(df['close'], length=8)
+        ema_f = ta.ema(df['close'], length=9)
         df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
-        ema_s = ta.ema(df['close'], length=18)
+        ema_s = ta.ema(df['close'], length=21)
         df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
         macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
         if macd is not None:
@@ -164,8 +165,12 @@ def get_signals(df, mode_config, is_backtest=False):
 
     # Strategy Selection
     if df.empty:
-        return df
-    if strategy == 'double_ema':
+        return finalize_signals(df)
+    if strategy == 'simple_ema':
+        df = strategy_simple_ema(df, mode_config)
+    elif strategy == 'simple_sma':
+        df = strategy_simple_sma(df, mode_config)
+    elif strategy == 'double_ema':
         df = strategy_double_ema(df, mode_config)
     elif strategy == 'double_ema_macd_rsi':
         df = strategy_double_ema_macd_rsi(df, mode_config)
@@ -228,15 +233,17 @@ def get_signals(df, mode_config, is_backtest=False):
     elif strategy == 'listing_surge_proxy':
         df = strategy_listing_surge(df, mode_config)
     else:
-        df = strategy_double_ema_macd_rsi(df, mode_config)
+        df = strategy_simple_ema(df, mode_config)
 
+    return finalize_signals(df)
+
+
+def finalize_signals(df):
+    """Signals are used directly without any confirmation window."""
+    df['buy_signal'] = df['buy_candidate']
+    df['sell_signal'] = df['sell_candidate']
     return df
 
-def apply_confirmation(df, window):
-    """Applies rolling max to signals within a confirmation window."""
-    df['buy_signal'] = df['buy_candidate'].rolling(window=window).max() > 0
-    df['sell_signal'] = df['sell_candidate'].rolling(window=window).max() > 0
-    return df
 
 def normalize_series(series):
     """Min-max normalization to [0, 1]."""
@@ -370,7 +377,7 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
             df.at[df.index[i], 'buy_candidate'] = call_p > put_p * 1.5
             df.at[df.index[i], 'sell_candidate'] = put_p > call_p * 1.5
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 # --- 1. TREND FOLLOWING ---
 
@@ -389,7 +396,7 @@ def strategy_moving_averages(df, config):
     df['buy_candidate'] = (df['ma_9'] > df['ma_21']) & (df['ma_9'].shift(1) <= df['ma_21'].shift(1)) & (df['close'] > df['ma_200'])
     df['sell_candidate'] = (df['close'] < df['ma_50']) & (df['close'].shift(1) >= df['ma_50'].shift(1))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_ichimoku(df, config):
     ichi_result = ta.ichimoku(df['high'], df['low'], df['close'])
@@ -405,7 +412,7 @@ def strategy_ichimoku(df, config):
     df['buy_candidate'] = (df['tenkan'] > df['kijun']) & (df['close'] > df['span_a']) & (df['close'] > df['span_b'])
     df['sell_candidate'] = (df['tenkan'] < df['kijun'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_psar(df, config):
     psar = ta.psar(df['high'], df['low'], df['close'])
@@ -420,7 +427,7 @@ def strategy_psar(df, config):
     df['buy_candidate'] = df['psar_long'].notna() & df['psar_long'].shift(1).isna()
     df['sell_candidate'] = df['psar_short'].notna() & df['psar_short'].shift(1).isna()
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 # --- 2. RANGE ---
 
@@ -437,7 +444,7 @@ def strategy_rsi_sr(df, config):
     df['buy_candidate'] = (df['rsi'] < 30) & (df['close'] <= df['support'] * 1.01)
     df['sell_candidate'] = (df['rsi'] > 70) & (df['close'] >= df['resistance'] * 0.99)
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_bollinger(df, config):
     bb = ta.bbands(df['close'], length=20, std=2)
@@ -454,7 +461,7 @@ def strategy_bollinger(df, config):
     df['buy_candidate'] = (df['close'] <= df['bb_low']) & (df['rsi'] < 35)
     df['sell_candidate'] = (df['close'] >= df['bb_mid'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_macd_range(df, config):
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
@@ -467,7 +474,7 @@ def strategy_macd_range(df, config):
     df['buy_candidate'] = (df['tendency'] == "Range") & (df['macd_val'] > df['macd_sig']) & (df['macd_val'].shift(1) <= df['macd_sig'].shift(1))
     df['sell_candidate'] = (df['macd_val'] < df['macd_sig']) & (df['macd_val'].shift(1) >= df['macd_sig'].shift(1))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 # --- 3. BREAKOUT ---
 
@@ -479,7 +486,7 @@ def strategy_breakout_volume(df, config):
     df['ma_20'] = ta.sma(df['close'], length=20)
     df['sell_candidate'] = (df['close'] < df['ma_20'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_donchian(df, config):
     dc = ta.donchian(df['high'], df['low'], length=20)
@@ -493,7 +500,7 @@ def strategy_donchian(df, config):
     df['buy_candidate'] = (df['close'] >= df['dc_upper'])
     df['sell_candidate'] = (df['close'] <= df['dc_lower'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_atr_breakout(df, config):
     df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -502,7 +509,7 @@ def strategy_atr_breakout(df, config):
     df['buy_candidate'] = (df['close'] > df['resistance']) & (df['atr'] > df['atr'].shift(1))
     df['sell_candidate'] = (df['close'] < (df['close'].shift(1) - 2 * df['atr']))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 # --- 4. MOMENTUM ---
 
@@ -516,7 +523,7 @@ def strategy_stoch_rsi(df, config):
     df['buy_candidate'] = (df['stoch_k'] < 20) & (df['stoch_k'] > df['stoch_k'].shift(1))
     df['sell_candidate'] = (df['stoch_k'] > 80) & (df['stoch_k'] < df['stoch_k'].shift(1))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_williams_r(df, config):
     df['willr'] = ta.willr(df['high'], df['low'], df['close'], length=14)
@@ -524,7 +531,7 @@ def strategy_williams_r(df, config):
     df['buy_candidate'] = (df['willr'] < -80) & (df['willr'] > df['willr'].shift(1))
     df['sell_candidate'] = (df['willr'] > -20) & (df['willr'] < df['willr'].shift(1))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_vwap_momentum(df, config):
     df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
@@ -532,7 +539,7 @@ def strategy_vwap_momentum(df, config):
     df['buy_candidate'] = (df['close'] > df['vwap']) & (df['volume'] > df['volume'].shift(1))
     df['sell_candidate'] = (df['close'] < df['vwap'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 # --- 5. SCALPING (Proxies) ---
 
@@ -543,7 +550,7 @@ def strategy_order_flow_proxy(df, config):
     df['buy_candidate'] = (df['vol_delta'] > df['vol_delta_ma'] * 1.5) & (df['close'] > df['open'])
     df['sell_candidate'] = (df['vol_delta'] < 0)
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return finalize_signals(df)
 
 def strategy_renko_proxy(df, config):
     df['body'] = (df['close'] - df['open']).abs()
@@ -552,7 +559,7 @@ def strategy_renko_proxy(df, config):
     df['buy_candidate'] = (df['body'] > df['atr']) & (df['close'] > df['open'])
     df['sell_candidate'] = (df['body'] > df['atr']) & (df['close'] < df['open'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return finalize_signals(df)
 
 def strategy_tick_proxy(df, config):
     df['velocity'] = (df['close'] - df['close'].shift(5)) / 5
@@ -560,7 +567,7 @@ def strategy_tick_proxy(df, config):
     df['buy_candidate'] = (df['velocity'] > df['velocity'].rolling(window=20).std() * 2)
     df['sell_candidate'] = (df['close'] < df['close'].shift(1))
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return finalize_signals(df)
 
 # --- 6. HYBRIDS ---
 
@@ -573,7 +580,7 @@ def strategy_ema_rsi_volume(df, config):
     df['buy_candidate'] = (df['ema_9'] > df['ema_21']) & (df['rsi'] > 50) & (df['volume'] > df['vol_ma'])
     df['sell_candidate'] = (df['ema_9'] < df['ema_21'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_macd_bollinger(df, config):
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
@@ -592,7 +599,7 @@ def strategy_macd_bollinger(df, config):
     df['buy_candidate'] = (df['macd_val'] > df['macd_sig']) & (df['close'] <= df['bb_low'] * 1.01)
     df['sell_candidate'] = (df['macd_val'] < df['macd_sig'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 # --- SCIENTIFIC PROXIES ---
 
@@ -612,7 +619,7 @@ def strategy_whale_detection(df, config):
     df['buy_candidate'] = df['whale_spike'] & (df['close'] > df['close'].shift(1))
     df['sell_candidate'] = df['whale_spike'] & (df['close'] < df['close'].shift(1))
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return finalize_signals(df)
 
 def strategy_pump_dump(df, config):
     """
@@ -629,7 +636,7 @@ def strategy_pump_dump(df, config):
     df['buy_candidate'] = False # Don't buy pumps
     df['sell_candidate'] = df['pump_detected'].shift(1) & (df['close'] < df['close'].shift(1))
 
-    return apply_confirmation(df, 1)
+    return df
 
 def strategy_market_regime(df, config):
     """
@@ -656,7 +663,7 @@ def strategy_market_regime(df, config):
                                     df['close'] > df['bb_high'],
                                     df['ema_9'] < df['ema_21'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_scientific_ensemble(df, config):
     """
@@ -680,7 +687,7 @@ def strategy_scientific_ensemble(df, config):
     df['buy_candidate'] = df['score'] >= 1
     df['sell_candidate'] = df['score'] <= -1
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return finalize_signals(df)
 
 def strategy_sentiment_momentum(df, config):
     """
@@ -696,7 +703,7 @@ def strategy_sentiment_momentum(df, config):
     # Negative sentiment: Price decelerating or dropping fast + RSI oversold (panic)
     df['sell_candidate'] = (df['acceleration'] < 0) & (df['roc'] < 0) & (df['rsi'] > 40)
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return finalize_signals(df)
 
 def strategy_liquidation_cascade(df, config):
     """
@@ -716,7 +723,7 @@ def strategy_liquidation_cascade(df, config):
     # Sell the squeeze
     df['sell_candidate'] = df['short_liquidation'].shift(1) & (df['close'] < df['close'].shift(1))
 
-    return apply_confirmation(df, 1)
+    return df
 
 def strategy_mvrv_proxy(df, config):
     """
@@ -730,7 +737,7 @@ def strategy_mvrv_proxy(df, config):
     df['buy_candidate'] = df['mvrv_proxy'] < 0.95
     df['sell_candidate'] = df['mvrv_proxy'] > 1.05
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_adx_trend(df, config):
     """
@@ -748,7 +755,7 @@ def strategy_adx_trend(df, config):
     df['buy_candidate'] = (df['adx'] > 25) & (df['dmp'] > df['dmn'])
     df['sell_candidate'] = (df['adx'] > 25) & (df['dmn'] > df['dmp'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return finalize_signals(df)
 
 def strategy_pairs_trading(df, config):
     """
@@ -761,7 +768,7 @@ def strategy_pairs_trading(df, config):
     df['buy_candidate'] = df['z_score'] < -2.0
     df['sell_candidate'] = df['z_score'] > 2.0
 
-    return apply_confirmation(df, 1)
+    return df
 
 def strategy_halving_cycle(df, config):
     """
@@ -775,7 +782,7 @@ def strategy_halving_cycle(df, config):
     df['buy_candidate'] = (df['close'] > df['ema_200']) & (df['close'] > df['ema_50']) & (df['close'].shift(1) <= df['ema_50'].shift(1))
     df['sell_candidate'] = (df['close'] < df['ema_50'])
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_listing_surge(df, config):
     """
@@ -791,9 +798,27 @@ def strategy_listing_surge(df, config):
     df['buy_candidate'] = df['surge']
     df['sell_candidate'] = df['close'] < df['close'].shift(3) # Exit fast after surge
 
-    return apply_confirmation(df, 1)
+    return df
 
 # --- LEGACY / ORIGINAL ---
+
+def strategy_simple_ema(df, config):
+    ema_fast = config.get('ema_fast', 9)
+    ema_slow = config.get('ema_slow', 21)
+    df['ema_f_strat'] = ta.ema(df['close'], length=ema_fast)
+    df['ema_s_strat'] = ta.ema(df['close'], length=ema_slow)
+    df['buy_candidate'] = (df['ema_f_strat'] > df['ema_s_strat']) & (df['ema_f_strat'].shift(1) <= df['ema_s_strat'].shift(1))
+    df['sell_candidate'] = (df['ema_f_strat'] < df['ema_s_strat']) & (df['ema_f_strat'].shift(1) >= df['ema_s_strat'].shift(1))
+    return finalize_signals(df)
+
+def strategy_simple_sma(df, config):
+    sma_fast = config.get('ema_fast', 9)
+    sma_slow = config.get('ema_slow', 21)
+    df['sma_f_strat'] = ta.sma(df['close'], length=sma_fast)
+    df['sma_s_strat'] = ta.sma(df['close'], length=sma_slow)
+    df['buy_candidate'] = (df['sma_f_strat'] > df['sma_s_strat']) & (df['sma_f_strat'].shift(1) <= df['sma_s_strat'].shift(1))
+    df['sell_candidate'] = (df['sma_f_strat'] < df['sma_s_strat']) & (df['sma_f_strat'].shift(1) >= df['sma_s_strat'].shift(1))
+    return finalize_signals(df)
 
 def strategy_double_ema(df, config):
     ema_fast = config.get('ema_fast', 8)
@@ -808,7 +833,7 @@ def strategy_double_ema(df, config):
         df['ema_s'] = ta.ema(df['close'], length=ema_slow)
     df['buy_candidate'] = (df['ema_f'] > df['ema_s']) & (df['ema_f'].shift(1) <= df['ema_s'].shift(1))
     df['sell_candidate'] = (df['ema_f'] < df['ema_s']) & (df['ema_f'].shift(1) >= df['ema_s'].shift(1))
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return finalize_signals(df)
 
 def strategy_double_ema_macd_rsi(df, config):
     ema_fast = config.get('ema_fast', 8)
@@ -852,7 +877,6 @@ def strategy_double_ema_macd_rsi(df, config):
     df['rsi_down'] = (df['rsi_strat'] > rsi_s) & (df['rsi_strat'] < df['rsi_strat'].shift(1))
     df['rsi_up'] = df['rsi_up'].fillna(False); df['rsi_down'] = df['rsi_down'].fillna(False)
 
-    window = config.get('confirmation_window', 3)
-    df['buy_candidate'] = (df['ema_up'].rolling(window=window, min_periods=1).max() > 0) &                           (df['macd_up'].rolling(window=window, min_periods=1).max() > 0) &                           (df['rsi_up'].rolling(window=window, min_periods=1).max() > 0)
-    df['sell_candidate'] = (df['ema_down'].rolling(window=window, min_periods=1).max() > 0) &                            (df['macd_down'].rolling(window=window, min_periods=1).max() > 0) &                            (df['rsi_down'].rolling(window=window, min_periods=1).max() > 0)
-    return apply_confirmation(df, 1)
+    df['buy_candidate'] = df['ema_up'] & df['macd_up'] & df['rsi_up']
+    df['sell_candidate'] = df['ema_down'] & df['macd_down'] & df['rsi_down']
+    return df

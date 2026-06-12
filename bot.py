@@ -62,9 +62,18 @@ show_help = False
 marquee_enabled = True
 shutdown_event = threading.Event()
 suspended_pairs = set()
+signal_arrival_times = {}
+global_pattern_pool = []
+selected_pair_index = 0
+show_candles_for_pair = None
+sell_proposal_pair = None
+sell_proposal_profit = 0
+sell_proposal_time = 0
+last_sell_proposal_check = 0
 
 # Marquee Timing Control
 last_marquee_update = 0
+bot_start_time = time.time()
 pairs_marquee_dir = 1
 logs_marquee_dir = 1
 status_marquee_dir = 1
@@ -171,6 +180,7 @@ def make_dashboard(global_mode, config):
     now_ts = time.time()
     global status_scroll_index, pairs_scroll_offset, logs_scroll_offset
     global pairs_marquee_dir, logs_marquee_dir, status_marquee_dir, pairs_pause_until, logs_pause_until, status_pause_until, last_marquee_update
+    global selected_pair_index, show_candles_for_pair, sell_proposal_pair, sell_proposal_profit, sell_proposal_time
 
     # Slow down marquee (e.g., 2 steps per second)
     should_step = False
@@ -222,7 +232,7 @@ def make_dashboard(global_mode, config):
             table.add_column("Vol/ADX", style="dim white", no_wrap=True)
             table.add_column("Flags", style="bold white", no_wrap=True)
             table.add_column("Scr", style="bold white", no_wrap=True)
-            table.add_column("B.Prof", style="bold green", no_wrap=True)
+            # table.add_column("Bench", style="bold green", no_wrap=True) # Hide in Expert Mode
             table.add_column("Agressivity", style="white", no_wrap=True)
             table.add_column("Strategy", style="bold cyan", no_wrap=True)
         else:
@@ -231,7 +241,7 @@ def make_dashboard(global_mode, config):
             table.add_column("Amt", style="cyan", no_wrap=True)
             table.add_column("Entry", style="magenta", no_wrap=True)
             table.add_column("Fee", style="red", no_wrap=True)
-            table.add_column("B.Prof", style="bold green", no_wrap=True)
+            table.add_column("Bench", style="bold green", no_wrap=True)
             table.add_column("Tendency", style="bold white", no_wrap=True)
             table.add_column("Last Order", style="bold", no_wrap=True)
             table.add_column("Signal", style="bold", no_wrap=True)
@@ -239,104 +249,132 @@ def make_dashboard(global_mode, config):
             table.add_column("Strategy", style="bold cyan", no_wrap=True)
 
         sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
-        # Calculate exactly available height: Header(3) + Logs(10) + Status(3) + Panel Border(2) = 18
-        # Increased to 20 to provide more margin and avoid cutting off rows.
-        pairs_height = console.height - 20
-        if pairs_height < 3: pairs_height = 3
-        max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
 
-        if max_pairs_offset > 0 and should_step:
-             if now_ts > pairs_pause_until:
-                  if pairs_marquee_dir == 1:
-                       if pairs_scroll_offset < max_pairs_offset:
-                           pairs_scroll_offset += 1
-                       if pairs_scroll_offset >= max_pairs_offset:
-                           pairs_marquee_dir = -1
-                           pairs_pause_until = now_ts + 2
-                  else:
-                       if pairs_scroll_offset > 0:
-                           pairs_scroll_offset -= 1
-                       if pairs_scroll_offset <= 0:
-                           pairs_marquee_dir = 1
-                           pairs_pause_until = now_ts + 2
-
-        pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
-        visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
-
-        for symbol in visible_symbols:
-            data = bot_state[symbol]
-            has_position = data.get('position') is not None
-
-            # Show actual strategy signal with count
-            current_signal = "Waiting"
-            buy_count = data.get('consecutive_buys', 0)
-            sell_count = data.get('consecutive_sells', 0)
-
-            if buy_count > 0: current_signal = f"{buy_count} Buy"
-            elif sell_count > 0: current_signal = f"{sell_count} Sell"
-
-            last_order = data.get('last_action', 'Waiting')
-            if last_order == "WAITING": last_order = "Waiting"
-
-            signal_style = "bold green" if "Buy" in current_signal else "bold red" if "Sell" in current_signal else "white"
-            last_order_style = "bold green" if last_order == "BUY" else "bold red" if last_order == "SELL" else "white"
-
-            amt_str = "-"
-            entry_str = "-"
-            fee_str = "-"
-            if has_position:
-                 p = data['position']
-                 amt_str = f"{p['amount']:.6f}"
-                 entry_str = format_price(p['entry_price'])
-                 fee_str = f"{p.get('entry_fee', 0):.4f}"
-
-            tendency = data.get('tendency', 'N/A')
-            tend_style = "bold green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "bold yellow" if tendency == "Range" else "white"
-
-            if expert_mode:
-                 flags = []
-                 if data.get('whale_active'): flags.append("WHL")
-                 if data.get('is_mean_rev'): flags.append("MRV")
-                 else: flags.append("TRD")
-                 flags_str = ",".join(flags)
-
-                 row_vals = [
-                      symbol,
-                      f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
-                      f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0):.4f}",
-                      f"{data.get('rsi', 0):.2f}",
-                      f"{data.get('volatility', 0):.4f}/{data.get('adx', 0):.1f}",
-                      f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
-                      f"{data.get('score', 0)}",
-                      format_price(data.get('expected_profit', 0)) if has_position else '0.00',
-                      data.get('aggr', 'N/A'),
-                      data.get('strategy', 'N/A')
-                 ]
+        if sell_proposal_pair and (now_ts - sell_proposal_time < 60):
+            symbol = sell_proposal_pair
+            data = bot_state.get(symbol, {})
+            candles_text = Text()
+            candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(sell_proposal_profit)} profit?\n", style="bold yellow")
+            candles_text.append("Type 'y' to confirm, 'n' to dismiss. (Auto-close in 1 min)\n\n", style="dim")
+            if 'last_20_candles' in data:
+                for c in data['last_20_candles']:
+                    candles_text.append("█", style="red")
+                candles_text.append("\n")
+            pairs_panel = Panel(candles_text, title="[bold red]SELL PROPOSAL[/]", border_style="bold red")
+        elif show_candles_for_pair:
+            symbol = show_candles_for_pair
+            data = bot_state.get(symbol, {})
+            candles_text = Text()
+            candles_text.append(f"Last 20 candles for {symbol}:\n\n", style="bold cyan")
+            if 'last_20_candles' in data:
+                for c in data['last_20_candles']:
+                    candles_text.append("█", style="red")
+                candles_text.append("\n")
             else:
-                 row_vals = [
-                      symbol,
-                      format_price(data.get('price', 0)),
-                      amt_str, entry_str, fee_str,
-                      format_price(data.get('expected_profit', 0)) if has_position else '0.00',
-                      f"[{tend_style}]{tendency}[/]",
-                      f"[{last_order_style}]{last_order}[/]",
-                      f"[{signal_style}]{current_signal}[/]",
-                      data.get('aggr', 'N/A'),
-                      data.get('strategy', 'N/A')
-                 ]
+                candles_text.append("Candle data not available yet.\n", style="dim")
+            candles_text.append("\nPress any key to return...", style="dim")
+            pairs_panel = Panel(candles_text, title=f"[bold cyan]{symbol} Candles[/]", border_style="bold cyan")
+        else:
+            pairs_height = console.height - 20
+            if pairs_height < 3: pairs_height = 3
+            max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
 
-            table.add_row(*row_vals)
+            if max_pairs_offset > 0 and should_step:
+                 if now_ts > pairs_pause_until:
+                      if pairs_marquee_dir == 1:
+                           if pairs_scroll_offset < max_pairs_offset:
+                               pairs_scroll_offset += 1
+                           if pairs_scroll_offset >= max_pairs_offset:
+                               pairs_marquee_dir = -1
+                               pairs_pause_until = now_ts + 2
+                      else:
+                           if pairs_scroll_offset > 0:
+                               pairs_scroll_offset -= 1
+                           if pairs_scroll_offset <= 0:
+                               pairs_marquee_dir = 1
+                               pairs_pause_until = now_ts + 2
 
-        # Add a spacer row if we are at the end of the list to ensure the last line isn't cut off
-        if len(visible_symbols) > 0 and visible_symbols[-1] == sorted_symbols[-1]:
-             num_cols = 10 if expert_mode else 11
-             table.add_row(*([""] * num_cols))
+            pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
+            visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
 
-        pairs_panel = Panel(
-            table,
-            title="[bold]Trading Pairs[/]",
-            border_style="bold green" if focused_panel == "pairs" else "cyan"
-        )
+            for i, symbol in enumerate(visible_symbols):
+                data = bot_state[symbol]
+                is_selected = (pairs_scroll_offset + i) == selected_pair_index
+                has_position = data.get('position') is not None
+
+                current_signal = "Waiting"
+                buy_count = data.get('consecutive_buys', 0)
+                sell_count = data.get('consecutive_sells', 0)
+
+                if buy_count > 0: current_signal = f"{buy_count} Buy"
+                elif sell_count > 0: current_signal = f"{sell_count} Sell"
+
+                last_order = data.get('last_action', 'Waiting')
+                if last_order == "WAITING": last_order = "Waiting"
+
+                # Instruction 3: Bold and bright for new signals (20s delay)
+                is_new_signal = (symbol in signal_arrival_times) and (now_ts - signal_arrival_times[symbol] < 20)
+                if is_new_signal:
+                    signal_style = "bold bright_green" if "Buy" in current_signal else "bold bright_red" if "Sell" in current_signal else "white"
+                else:
+                    signal_style = "bold green" if "Buy" in current_signal else "bold red" if "Sell" in current_signal else "white"
+                last_order_style = "bold green" if last_order == "BUY" else "bold red" if last_order == "SELL" else "white"
+
+                amt_str, entry_str, fee_str = "-", "-", "-"
+                if has_position:
+                    p = data['position']
+                    amt_str = f"{p['amount']:.6f}"
+                    entry_str = format_price(p['entry_price'])
+                    fee_str = f"{p.get('entry_fee', 0):.4f}"
+
+                tendency = data.get('tendency', 'N/A')
+                tend_style = "bold green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "bold yellow" if tendency == "Range" else "white"
+
+                row_style = "bold black on yellow" if is_selected else ""
+
+                if expert_mode:
+                    flags = []
+                    if data.get('whale_active'): flags.append("WHL")
+                    if data.get('is_mean_rev'): flags.append("MRV")
+                    else: flags.append("TRD")
+                    flags_str = ",".join(flags)
+
+                    row_vals = [
+                        symbol,
+                        f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
+                        f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0):.4f}",
+                        f"{data.get('rsi', 0):.2f}",
+                        f"{data.get('volatility', 0):.4f}/{data.get('adx', 0):.1f}",
+                        f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
+                        f"{data.get('score', 0)}",
+                        data.get('aggr', 'N/A'),
+                        (lambda d: d['all_matching_strategies'][int(now_ts % len(d['all_matching_strategies']))] if 'all_matching_strategies' in d and d['all_matching_strategies'] else d.get('strategy', 'N/A'))(data)
+                    ]
+                else:
+                    row_vals = [
+                        symbol,
+                        format_price(data.get('price', 0)),
+                        amt_str, entry_str, fee_str,
+                        format_price(data.get('expected_profit', 0)) if has_position else '0.00',
+                        f"[{tend_style}]{tendency}[/]",
+                        f"[{last_order_style}]{last_order}[/]",
+                        f"[{signal_style}]{current_signal}[/]",
+                        data.get('aggr', 'N/A'),
+                        (lambda d: d['all_matching_strategies'][int(now_ts % len(d['all_matching_strategies']))] if 'all_matching_strategies' in d and d['all_matching_strategies'] else d.get('strategy', 'N/A'))(data)
+                    ]
+
+                table.add_row(*row_vals, style=row_style)
+
+            # Add a spacer row if we are at the end of the list to ensure the last line isn't cut off
+            if len(visible_symbols) > 0 and visible_symbols[-1] == sorted_symbols[-1]:
+                 num_cols = 10 if expert_mode else 11
+                 table.add_row(*([""] * num_cols))
+
+            pairs_panel = Panel(
+                table,
+                title="[bold]Trading Pairs[/]",
+                border_style="bold green" if focused_panel == "pairs" else "cyan"
+            )
 
         # 3. Status Bar Marquee
         status_text = Text()
@@ -389,28 +427,76 @@ def make_dashboard(global_mode, config):
     )
     return layout
 
-def input_thread_func():
+def input_thread_func(exchange, data_manager, engine, config):
     global pairs_scroll_offset, logs_scroll_offset, focused_panel
     global pairs_pause_until, logs_pause_until, expert_mode, show_help, marquee_enabled
+    global selected_pair_index, show_candles_for_pair, sell_proposal_pair, sell_proposal_time
+
     while not shutdown_event.is_set():
         try:
             key = readchar.readkey()
+
+            # Handle sell proposal (Instruction 6)
+            if sell_proposal_pair and (time.time() - sell_proposal_time < 60):
+                if key.lower() == 'y':
+                    symbol = sell_proposal_pair
+                    data = bot_state.get(symbol, {})
+                    if execute_sell(exchange, data_manager, engine, symbol, data):
+                         with bot_lock:
+                             data['last_action'] = 'SELL'
+                             data['position'] = None
+                         play_sound("sell", config)
+                    sell_proposal_pair = None
+                elif key.lower() == 'n':
+                    sell_proposal_pair = None
+                continue
+
+            if show_candles_for_pair:
+                show_candles_for_pair = None
+                continue
+
+            sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
+
             if key == readchar.key.TAB:
                 focused_panel = "logs" if focused_panel == "pairs" else "pairs"
             elif key == readchar.key.UP:
                 if focused_panel == "pairs":
-                    pairs_scroll_offset = max(0, pairs_scroll_offset - 1)
+                    selected_pair_index = max(0, selected_pair_index - 1)
+                    # Adjust scroll if needed
+                    if selected_pair_index < pairs_scroll_offset:
+                        pairs_scroll_offset = selected_pair_index
                     pairs_pause_until = time.time() + 5 # Longer pause on manual interaction
                 else:
                     logs_scroll_offset = min(500, logs_scroll_offset + 1)
                     logs_pause_until = time.time() + 5
             elif key == readchar.key.DOWN:
                 if focused_panel == "pairs":
-                    pairs_scroll_offset += 1
+                    selected_pair_index = min(len(sorted_symbols) - 1, selected_pair_index + 1)
+                    # Adjust scroll if needed
+                    pairs_height = console.height - 20
+                    if selected_pair_index >= pairs_scroll_offset + pairs_height:
+                        pairs_scroll_offset = selected_pair_index - pairs_height + 1
                     pairs_pause_until = time.time() + 5
                 else:
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
                     logs_pause_until = time.time() + 5
+            elif key == readchar.key.ENTER:
+                if focused_panel == "pairs" and sorted_symbols:
+                    show_candles_for_pair = sorted_symbols[selected_pair_index]
+            elif key.lower() == 'b':
+                # Manual Buy (Instruction 3)
+                if focused_panel == "pairs" and sorted_symbols:
+                    symbol = sorted_symbols[selected_pair_index]
+                    data = bot_state[symbol]
+                    if not data.get('position'):
+                        threading.Thread(target=execute_buy, args=(exchange, data_manager, engine, symbol, data, config), daemon=True).start()
+            elif key.lower() == 's':
+                # Manual Sell (Instruction 3)
+                if focused_panel == "pairs" and sorted_symbols:
+                    symbol = sorted_symbols[selected_pair_index]
+                    data = bot_state[symbol]
+                    if data.get('position'):
+                        threading.Thread(target=execute_sell, args=(exchange, data_manager, engine, symbol, data), daemon=True).start()
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'm':
@@ -453,8 +539,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     last_assets_update = 0
     sim_init_done = False
 
+    # Track inconsistent pairs (Instruction 5)
+    inconsistent_pairs = {}
+    warning_issued_pairs = set()
+
     time.sleep(5)
     exchange.load_markets()
+
+    global last_sell_proposal_check, sell_proposal_pair, sell_proposal_profit, sell_proposal_time
 
     while not shutdown_event.is_set():
         if mode == 'simulation' and not sim_init_done:
@@ -488,9 +580,29 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     try:
                         data = future.result()
                         if data:
+                            # API Health Check (Instruction 5)
+                            candles = data.get('last_20_candles', [])
+                            if len(candles) >= 2:
+                                is_variable = any(candles[i] != candles[i-1] for i in range(1, len(candles)))
+                                if not is_variable:
+                                    if symbol not in inconsistent_pairs:
+                                        inconsistent_pairs[symbol] = time.time()
+                                    elif time.time() - inconsistent_pairs[symbol] > 300: # 5 minutes
+                                        if symbol not in warning_issued_pairs:
+                                            logging.warning(f"Pair {symbol} has been inconsistent for 5 minutes. Disabling updates.")
+                                            warning_issued_pairs.add(symbol)
+                                            suspended_pairs.add(symbol)
+                                else:
+                                    inconsistent_pairs.pop(symbol, None)
+
                             with bot_lock:
                                 data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
-                                bot_state[symbol] = data
+                                # Instruction 3: Bold and bright new signals
+                            old_buy = bot_state.get(symbol, {}).get('buy', False)
+                            old_sell = bot_state.get(symbol, {}).get('sell', False)
+                            if (data.get('buy') and not old_buy) or (data.get('sell') and not old_sell):
+                                signal_arrival_times[symbol] = time.time()
+                            bot_state[symbol] = data
 
                             if data.get('sell_triggered'):
                                  if execute_sell(exchange, data_manager, engine, symbol, data):
@@ -525,6 +637,30 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                play_sound("buy", config)
                                # Update balance for next iteration
                                balance = exchange.fetch_balance()
+
+            # Proactive Sell Proposal (Instruction 6)
+            now = time.time()
+            if (now - bot_start_time > 300) and (now - last_sell_proposal_check > 300):
+                last_sell_proposal_check = now
+                open_positions = data_manager.get_open_positions()
+                for symbol, pos in open_positions.items():
+                    if symbol in bot_state:
+                        current_price = bot_state[symbol].get('price', 0)
+                        entry_price = pos.get('entry_price', 0)
+                        if current_price > 0 and entry_price > 0:
+                            fee_rate = 0.001
+                            try: fee_rate = exchange.fetch_trading_fee(symbol)
+                            except: pass
+
+                            is_prof = engine.is_profitable(current_price, entry_price, fee_rate)
+                            if is_prof:
+                                amount = pos.get('amount', 0)
+                                profit = (amount * current_price * (1 - fee_rate)) - pos.get('entry_total_base', 0)
+                                if profit > 0:
+                                    sell_proposal_pair = symbol
+                                    sell_proposal_profit = profit
+                                    sell_proposal_time = now
+                                    break # Only one proposal at a time
 
             for _ in range(100):
                  if shutdown_event.is_set(): break
@@ -727,7 +863,7 @@ def main():
 
                         # Score for prioritization (the profit predicted for the term)
                         priority_score = best['profit']
-                        config['pairs'][sym]['expected_profit'] = priority_score
+                        config['pairs'][sym]['expected_profit'] = best.get('avg_bench_profit', priority_score)
                         pair_priorities.append((sym, priority_score))
                         if best.get('is_cached'):
                              console.print(f"[bold green][{sym}][/] Optimized from [cyan]cached results[/] to [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | {args.term.upper()} Term Profit: {format_price(priority_score)} EUR")
@@ -748,7 +884,7 @@ def main():
             # Retrieve optimized settings from config if available (after benchmark)
             pair_cfg = pairs[symbol]
             aggr_val = pair_cfg.get('aggr', 'normal')
-            strat_val = pair_cfg.get('strategy', 'double_ema_macd_rsi')
+            strat_val = pair_cfg.get('strategy', 'simple_ema')
             exp_profit = float(pair_cfg.get('expected_profit', 0))
 
             bot_state[symbol] = {
@@ -759,7 +895,7 @@ def main():
                 'expected_profit': exp_profit
             }
 
-    threading.Thread(target=input_thread_func, daemon=True).start()
+    threading.Thread(target=input_thread_func, args=(exchange, data_manager, engine, config), daemon=True).start()
     threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args.mode), daemon=True).start()
 
     play_sound("startup")
@@ -768,7 +904,9 @@ def main():
             while not shutdown_event.is_set():
                 live.update(make_dashboard(args.mode, config))
                 time.sleep(0.1)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
+        shutdown_event.set()
+    finally:
         shutdown_event.set()
         from persistence import create_consolidated_archive
         save_ohlcv_cache(ohlcv_cache)
@@ -801,140 +939,79 @@ def play_sound(action, config=None):
     except Exception: pass
 
 def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, global_config, engine=None):
-    # Retrieve patterns for matching
     patterns = pattern_manager.get_patterns(symbol)
-
-    # Timeframe now comes from the expected_profit_terms based on the bot's term (default short)
-    term = global_config.get('_active_term', 'short')
-    term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
+    term = global_config.get('_active_term', 'short'); term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
     timeframe = term_cfg.get('timeframe', '5m')
-
-    # Large buffer for indicator stability + pattern matching (500 is enough)
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
     if not ohlcv: return None
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    with bot_lock:
+        if symbol in bot_state: bot_state[symbol]['last_20_candles'] = df['close'].tail(20).tolist()
+    df = get_signals(df, {"device": device}, is_backtest=False); latest_row_base = df.iloc[-1]
 
-    # Pre-calculate common indicators for regime detection
-    df = get_signals(df, {"device": device}, is_backtest=False)
-    latest_row_base = df.iloc[-1]
-
-    # 1. Pattern Matching logic
-    active_pattern = None
-    if patterns:
-        best_sim = 0
-        for p in patterns:
+    # Cross-pair pattern matching (Instruction 1 & 2)
+    search_pool = patterns + global_pattern_pool; active_patterns = []
+    if search_pool:
+        for p in search_pool:
             p_len = len(p['prices'])
             if len(df) < p_len: continue
+            buffer_window = df.iloc[-p_len:]; sim = calculate_similarity(buffer_window, p, device=device)
+            if sim > 0.70: active_patterns.append((sim, p))
+    active_patterns.sort(key=lambda x: x[0], reverse=True); active_pattern = active_patterns[0][1] if active_patterns else None
 
-            buffer_window = df.iloc[-p_len:]
-            sim = calculate_similarity(buffer_window, p, device=device)
-            if sim > 0.70 and sim > best_sim: # Lowered threshold to 70% for better responsiveness
-                best_sim = sim
-                active_pattern = p
-
-    # 2. Dynamic Activation
     if active_pattern:
-        strategy_name = active_pattern['strategy']
-        mode_name = active_pattern['aggr']
+        strategy_name = active_pattern['strategy']; mode_name = active_pattern['aggr']
+        if engine: mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
+        else: mode_settings = {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70}
+        mode_settings['strategy'] = strategy_name; mode_settings['device'] = device
+        df = get_signals(df, mode_settings, is_backtest=False); latest_row = df.iloc[-1]
 
-        # Use Dynamic Risk Engine if engine is available
-        if engine:
-            mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
-        else:
-            # Fallback to balanced defaults if no engine
-            mode_settings = {
-                "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
-            }
-
-        mode_settings['strategy'] = strategy_name
-        mode_settings['device'] = device
-        df = get_signals(df, mode_settings, is_backtest=False)
-        latest_row = df.iloc[-1]
+        # Instruction 2b: New Monte Carlo tests pondering with pattern score
+        mc = MonteCarloEngine(num_simulations=1000, timeframe_candles=20); mc.set_device(device); mc_score = mc.validate_strategy(df)
+        pattern_score = active_pattern.get('score', 1.0); combined_mc_score = mc_score * (1 + pattern_score)
+        if combined_mc_score < 0.5: latest_row['buy_signal'] = False; latest_row['sell_signal'] = False
     else:
-        # No pattern active -> N/A and No Signals
-        strategy_name = "N/A"
-        mode_name = "N/A"
-        latest_row = latest_row_base.copy()
-        latest_row['buy_signal'] = False
-        latest_row['sell_signal'] = False
+        strategy_name = "N/A"; mode_name = "N/A"; latest_row = latest_row_base.copy()
+        latest_row['buy_signal'] = False; latest_row['sell_signal'] = False
 
-    # Clean up trigger data
     exclude = ['open', 'high', 'low', 'close', 'volume', 'buy_candidate', 'sell_candidate', 'ema_up_win', 'macd_up_win', 'rsi_up_win', 'ema_down_win', 'macd_down_win', 'rsi_down_win', 'ema_up', 'ema_down', 'macd_up', 'macd_down', 'rsi_up', 'rsi_down']
     trigger_data = {k: v for k, v in latest_row.to_dict().items() if k not in exclude and not isinstance(v, (pd.Timestamp, datetime))}
-
-    # Store candle timestamp for signal tracking
     candle_ts = int(latest_row['timestamp']) if not isinstance(latest_row['timestamp'], (pd.Timestamp, datetime)) else int(latest_row['timestamp'].timestamp())
-    trigger_data['candle_ts'] = candle_ts
-
-    # Consecutive signal logic
-    prev_data = bot_state.get(symbol, {})
-    last_candle_ts = prev_data.get('_last_candle_ts')
-
-    consecutive_buys = prev_data.get('consecutive_buys', 0)
-    consecutive_sells = prev_data.get('consecutive_sells', 0)
-
-    # RESTART FIX: If first run, look back at historical signals to pick up current trend
+    trigger_data['candle_ts'] = candle_ts; prev_data = bot_state.get(symbol, {}); last_candle_ts = prev_data.get('_last_candle_ts')
+    consecutive_buys = prev_data.get('consecutive_buys', 0); consecutive_sells = prev_data.get('consecutive_sells', 0)
     if last_candle_ts is None:
-        buy_hist = df['buy_signal'].tolist()
-        sell_hist = df['sell_signal'].tolist()
-
-        c_buys = 0
+        buy_hist = df['buy_signal'].tolist(); sell_hist = df['sell_signal'].tolist()
+        c_buys = 0;
         for s in reversed(buy_hist[-10:]):
             if s: c_buys += 1
             else: break
-
-        c_sells = 0
+        c_sells = 0;
         for s in reversed(sell_hist[-10:]):
             if s: c_sells += 1
             else: break
-
-        consecutive_buys = c_buys
-        consecutive_sells = c_sells
+        consecutive_buys = c_buys; consecutive_sells = c_sells
     elif last_candle_ts != candle_ts:
-        if latest_row['buy_signal']:
-            consecutive_buys += 1
-            consecutive_sells = 0
-        elif latest_row['sell_signal']:
-            consecutive_sells += 1
-            consecutive_buys = 0
-        else:
-            consecutive_buys = 0
-            consecutive_sells = 0
+        if latest_row['buy_signal']: consecutive_buys += 1; consecutive_sells = 0
+        elif latest_row['sell_signal']: consecutive_sells += 1; consecutive_buys = 0
+        else: consecutive_buys = 0; consecutive_sells = 0
     else:
-        # If it's the same candle, keep existing counts unless signal lost
-        if not latest_row['buy_signal'] and not latest_row['sell_signal']:
-            consecutive_buys = 0
-            consecutive_sells = 0
+        if not latest_row['buy_signal'] and not latest_row['sell_signal']: consecutive_buys = 0; consecutive_sells = 0
 
-    # Dynamic confirmation window based on term (Instruction 2)
-    # Short: 3, Medium: 2, Long: 1
     buy_threshold = 1
     if term == 'medium': buy_threshold = 2
     elif term == 'long': buy_threshold = 3
 
     return {
-        'price': latest_row['close'],
-        'ema_f': latest_row.get('ema_f', 0),
-        'ema_s': latest_row.get('ema_s', 0),
-        'macd_hist': latest_row.get('macd_hist', 0),
-        'rsi': latest_row.get('rsi', 0),
-        'adx': latest_row.get('adx', 0),
-        'volatility': latest_row.get('volatility', 0),
-        'score': latest_row.get('score', 0),
-        'whale_active': bool(latest_row.get('whale_active', 0)),
-        'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
-        'aggr': mode_name,
-        'strategy': strategy_name,
-        'tendency': latest_row.get('tendency', 'Neutral'),
-        'buy': consecutive_buys >= buy_threshold,
-        'sell': consecutive_sells >= 3, # Keep 3 for sells as it's for risk reduction
-        'consecutive_buys': consecutive_buys,
-        'consecutive_sells': consecutive_sells,
-        '_last_candle_ts': candle_ts,
+        'price': latest_row['close'], 'ema_f': latest_row.get('ema_f', 0), 'ema_s': latest_row.get('ema_s', 0),
+        'macd_hist': latest_row.get('macd_hist', 0), 'rsi': latest_row.get('rsi', 0), 'adx': latest_row.get('adx', 0),
+        'volatility': latest_row.get('volatility', 0), 'score': latest_row.get('score', 0),
+        'whale_active': bool(latest_row.get('whale_active', 0)), 'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
+        'aggr': mode_name, 'strategy': strategy_name,
+        'all_matching_strategies': [ap[1]['strategy'] for ap in active_patterns] if active_patterns else [strategy_name],
+        'tendency': latest_row.get('tendency', 'Neutral'), 'buy': consecutive_buys >= buy_threshold, 'sell': consecutive_sells >= 3,
+        'consecutive_buys': consecutive_buys, 'consecutive_sells': consecutive_sells, '_last_candle_ts': candle_ts,
         'sell_triggered': consecutive_sells >= 3 and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
-        'position': data_manager.get_position(symbol),
-        'expected_profit': float(pair_config.get('expected_profit', 0)),
+        'position': data_manager.get_position(symbol), 'expected_profit': float(pair_config.get('expected_profit', 0)),
         'trigger_data': trigger_data
     }
 
@@ -948,9 +1025,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
     current_price = fresh_ticker['last'] if fresh_ticker else data['price']
 
     base_curr = symbol.split('/')[1]
-    amount = engine.calculate_position_size(
-        balance, current_price, base_curr, win_streak=win_streak
-    )
+    amount = engine.calculate_position_size(balance, current_price, base_curr, win_streak=win_streak, exchange=exchange)
     base_currency = symbol.split('/')[1]
     if amount > 0:
         # Check if balance is sufficient before attempting order
@@ -972,10 +1047,22 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             suspended_pairs.add(symbol)
             return False
         if order:
+            # Use executed values if available
+            exec_price = order.get('average', order.get('price', current_price))
+            exec_amount = order.get('filled', order.get('amount', amount))
             fee = order.get('calculated_fee', 0)
-            total_paid = (amount * current_price) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {current_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-            data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
+
+            total_paid = (exec_amount * exec_price) + fee
+            logging.info(f"[{symbol}] Executing buy of amount {exec_amount:.6f} at {exec_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+            data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
+
+            # Immediately update Sellable list (Instruction 2)
+            asset = symbol.split('/')[0]
+            with bot_lock:
+                if asset not in available_assets:
+                    available_assets.append(asset)
+                    available_assets.sort()
+
             return True
         else:
             logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}")
@@ -986,6 +1073,10 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
 def execute_sell(exchange, data_manager, engine, symbol, data):
     position = data['position']
     should_execute = True
+
+    # Instruction 7: check for "guaranteed" sale price
+    ticker = exchange.fetch_ticker(symbol)
+    guaranteed_price = ticker['bid'] if ticker and 'bid' in ticker else data['price']
 
     if should_execute:
         base_asset = symbol.split('/')[0]
@@ -1005,12 +1096,15 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                 data_manager.flag_ignore_sell(symbol)
                 return False
             if order:
+                # Use executed values if available
+                exec_price = order.get('average', order.get('price', guaranteed_price))
+                exec_amount = order.get('filled', order.get('amount', position['amount']))
                 fee = order.get('calculated_fee', 0)
-                amount = position['amount']
-                total_received = (amount * data['price']) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {data['price']}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+
+                total_received = (exec_amount * exec_price) - fee
+                logging.info(f"[{symbol}] Executing sell of amount {exec_amount:.6f} at {exec_price}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
                 profit = total_received - position.get('entry_total_base', 0)
-                data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
+                data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
                 return True
     return False
 
@@ -1328,8 +1422,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
          aggr_settings = engine.get_dynamic_settings(latest.get('adx', 0), latest.get('volatility', 0))
     else:
          aggr_settings = {
-             "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
+             "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
          }
 
     mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
@@ -1477,7 +1570,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
 
 def run_backtest_mode(exchange, config, args, engine=None, device=None):
     # Default strategy for backtest
-    default_strategy = "double_ema_macd_rsi"
+    default_strategy = "simple_ema"
 
     strategy = args.strategy or default_strategy
     aggr = args.aggr or config.get('force_agressivity_to_all_pairs', 'normal')
@@ -1524,14 +1617,25 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     # We use 'dynamic' as the default aggr for benchmarking
     aggr = aggrs[0] if aggrs else 'dynamic'
 
+    # Instruction 8: Convert thresholds to base currency
+    quote = symbol.split('/')[1]
+    threshold_conv = 1.0
+    if quote != 'EUR':
+        try:
+            ticker = exchange.fetch_ticker(f'EUR/{quote}')
+            if ticker and ticker.get('last'):
+                threshold_conv = ticker['last']
+        except: pass
+
+    profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015) * threshold_conv
+
     for strategy in strategies:
         # Prepare settings
         if engine:
             mode_settings = engine.get_dynamic_settings(25.0, 0.001)
         else:
             mode_settings = {
-                "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
+                "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
             }
         mode_settings['strategy'] = strategy
         mode_settings['device'] = device if device is not None else torch.device("cpu")
@@ -1573,7 +1677,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
             # Profit in this window
             win_profit = equity[end_idx-1] - equity[start_idx]
 
-            if win_profit < 0.015:
+            if win_profit < profit_threshold:
                 continue
 
             # Score with Recency Pondering
@@ -1618,7 +1722,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     seen_times = []
 
     for p in patterns:
-        if len(unique_patterns) >= 4: break
+        if len(unique_patterns) >= 10: break
         is_overlap = False
         for st in seen_times:
             if abs(p['start_ts'] - st) < (eval_window * 60):
@@ -1716,49 +1820,25 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_limit = 10000
-            current_since = since_ts
-
-            if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching up to {target_limit} candles for {symbol}...")
-
+            target_date = datetime(2021, 1, 1); target_ts = int(target_date.timestamp() * 1000)
+            current_since = since_ts if since_ts else target_ts
+            if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching history for {symbol}...")
             try:
-                # Check cache first
-                cache_key = f"{symbol}_{timeframe}_{target_limit}"
+                cache_key = f"{symbol}_{timeframe}_deep"
                 if cache_key in ohlcv_cache:
-                    df = ohlcv_cache[cache_key]
-                    symbol_data_map[symbol] = df
-                    if not status: console.print(f"[dim][{symbol}] Loaded {len(df)} candles from cache.")
-                    continue
-
-                # Paginate fetch to bypass API limits
-                while len(all_ohlcv) < target_limit:
-                    fetch_limit = min(1000, target_limit - len(all_ohlcv))
-                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=fetch_limit)
+                    symbol_data_map[symbol] = ohlcv_cache[cache_key]; continue
+                while True:
+                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
                     if not ohlcv or len(ohlcv) == 0: break
-
-                    all_ohlcv.extend(ohlcv)
-                    # Move since pointer to last candle + 1ms
-                    current_since = ohlcv[-1][0] + 1
-                    if len(ohlcv) < fetch_limit: break
-
+                    all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
+                    if len(all_ohlcv) > 100000: break
+                    if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching {symbol}: {len(all_ohlcv)} candles...")
                 if all_ohlcv:
                     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-                    # Filter by --until if provided
-                    if args.until:
-                         try:
-                              until_dt = datetime.strptime(args.until, "%Y-%m-%d %H:%M")
-                              df = df[df['timestamp'] <= until_dt]
-                         except Exception: pass
-
-                    symbol_data_map[symbol] = df
-                    ohlcv_cache[cache_key] = df
-                    if not status: console.print(f"[dim][{symbol}] Successfully fetched {len(df)} candles.[/]")
-                else:
-                    if not status: console.print(f"[yellow]No OHLCV returned for {symbol} ({timeframe}) during pre-fetch.[/]")
+                    symbol_data_map[symbol] = df; ohlcv_cache[cache_key] = df
             except Exception as e:
-                if not status: console.print(f"[red]Failed to fetch {symbol} for benchmark: {e}[/]")
+                if not status: console.print(f"[red]Failed to fetch {symbol}: {e}")
 
         def handle_bench_shutdown(sig, frame):
              shutdown_event.set()
@@ -1779,8 +1859,16 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
                     if patterns:
-                        # For now, the 'best' is the first pattern in the list (highest score)
-                        best_for_symbol = patterns[0]
+                        if len(patterns) < 10: msg_target.print(f'[bold yellow]Warning: {sym} has only {len(patterns)} successful patterns (history too short).[/]')
+                        # Instruction 4: Bench is average of techniques >= 0.22 EUR
+                        winning_patterns = [p for p in patterns if p['profit'] >= 0.22]
+                        if winning_patterns:
+                            avg_profit = sum(p['profit'] for p in winning_patterns) / len(winning_patterns)
+                        else:
+                            avg_profit = patterns[0]['profit']
+
+                        best_for_symbol = patterns[0].copy()
+                        best_for_symbol['avg_bench_profit'] = avg_profit
                         best_per_symbol[sym] = best_for_symbol
 
                         # Store patterns in DataManager for real-time matching
@@ -1794,9 +1882,9 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         msg_target = status.console if status else console
                         if term_override:
                             optimization_map[sym] = best_for_symbol
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
+                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} EUR{period_str}")
                         else:
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
+                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} EUR{period_str}")
 
                         if best_overall.get(term_to_test) and best_for_symbol['profit'] > best_overall[term_to_test]['profit']:
                             best_overall[term_to_test] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
@@ -1815,6 +1903,12 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         if status: status.update('[bold green]Optimization complete.')
         if best_per_symbol:
             time.sleep(3)
+        # Instruction 1d & 2: populate global pool for cross-pair matching
+        with bot_lock:
+            global_pattern_pool.clear()
+            for sym in optimization_map:
+                patterns = pattern_manager.get_patterns(sym)
+                global_pattern_pool.extend(patterns)
         return optimization_map
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
@@ -1832,7 +1926,19 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             console.print(f"  > [bold green]Estimated Gain:[/] {format_price(data['profit'])} EUR\n")
 
     if not found_any:
-        console.print("[yellow]No successful patterns (> 0.022 profit) were found in the scanned historical data.[/]")
+        # Instruction 8: Convert message threshold to base currency
+        # We take the first pair's quote currency as a representative
+        msg_threshold = "0.022 EUR"
+        if symbols:
+            quote = symbols[0].split('/')[1]
+            if quote != 'EUR':
+                try:
+                    ticker = exchange.fetch_ticker(f'EUR/{quote}')
+                    if ticker and ticker.get('last'):
+                        msg_threshold = f"{config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.022) * ticker['last']:.3f} {quote}"
+                except: pass
+
+        console.print(f"[yellow]No successful patterns (> {msg_threshold} profit) were found in the scanned historical data.[/]")
     else:
         # Final check: if some symbols returned nothing, let the user know
         for sym in symbols_to_bench:
