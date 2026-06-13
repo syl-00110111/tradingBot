@@ -202,8 +202,8 @@ class CacheManager:
     """
     def __init__(self):
         if not os.path.exists(CACHE_DIR):
-            if not load_from_archive():
-                os.makedirs(CACHE_DIR, exist_ok=True)
+            load_from_archive()
+            os.makedirs(CACHE_DIR, exist_ok=True)
 
     def _get_path(self, symbol, term):
         safe_symbol = symbol.replace('/', '_')
@@ -245,8 +245,8 @@ class MonteCarloCacheManager:
     """
     def __init__(self):
         if not os.path.exists(CACHE_DIR):
-            if not load_from_archive():
-                os.makedirs(CACHE_DIR, exist_ok=True)
+            load_from_archive()
+            os.makedirs(CACHE_DIR, exist_ok=True)
 
     def _get_path(self, symbol, timeframe, timestamp):
         safe_symbol = symbol.replace('/', '_')
