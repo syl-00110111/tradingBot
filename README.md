@@ -53,9 +53,10 @@ Store your credentials and preferred exchange:
 ### `config.json`
 ```json
 {
-    "max_open_positions": 8,
-    "base_bet": 10.0,
-    "global_risk_multiplier": 1.0
+    "max_open_positions": 10,
+    "// Explanation": "base_bet now supports currency suffix, e.g., '20.0 USDT' or '50.0 USDC'",
+    "base_bet": "20.0 USDT",
+    "global_risk_multiplier": 1.2
 }
 ```
 
