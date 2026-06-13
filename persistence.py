@@ -93,8 +93,6 @@ class PatternManager:
     def save(self):
         with open(self.filename, 'w') as f:
             json.dump(self.data, f, indent=4)
-        create_consolidated_archive()
-        load_from_archive() # Keep files on disk for runtime
 
     def set_patterns(self, symbol, patterns):
         self.data[symbol] = patterns[:10]
@@ -136,15 +134,11 @@ class DataManager:
 
         with open(self.filepath, 'w') as f:
             json.dump(self.data, f, indent=4)
-        create_consolidated_archive()
-        load_from_archive() # Keep files on disk for runtime
 
     def clear_history(self):
         self.data = {"open_positions": {}, "trade_history": []}
         if os.path.exists(self.filepath):
             os.remove(self.filepath)
-        create_consolidated_archive()
-        load_from_archive()
 
     def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
         self.data["open_positions"][symbol] = {

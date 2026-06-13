@@ -270,9 +270,16 @@ def make_dashboard(global_mode, config):
             candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(sell_proposal_profit)} profit?\n", style="bold yellow")
             candles_text.append("Type 'y' to confirm, 'n' to dismiss. (Auto-close in 1 min)\n\n", style="dim")
             if 'last_20_candles' in data:
-                for c in data['last_20_candles']:
-                    candles_text.append("█", style="red")
-                candles_text.append("\n")
+                prices = data['last_20_candles']
+                min_p, max_p = min(prices), max(prices)
+                diff = max_p - min_p if max_p > min_p else 1.0
+                chart_height = 5
+                for h in reversed(range(chart_height)):
+                    for p in prices:
+                        threshold = min_p + (h / chart_height) * diff
+                        if p >= threshold: candles_text.append("█ ", style="red")
+                        else: candles_text.append("  ")
+                    candles_text.append("\n")
             pairs_panel = Panel(candles_text, title="[bold red]SELL PROPOSAL[/]", border_style="bold red")
         elif show_candles_for_pair:
             symbol = show_candles_for_pair
@@ -280,9 +287,16 @@ def make_dashboard(global_mode, config):
             candles_text = Text()
             candles_text.append(f"Last 20 candles for {symbol}:\n\n", style="bold cyan")
             if 'last_20_candles' in data:
-                for c in data['last_20_candles']:
-                    candles_text.append("█", style="red")
-                candles_text.append("\n")
+                prices = data['last_20_candles']
+                min_p, max_p = min(prices), max(prices)
+                diff = max_p - min_p if max_p > min_p else 1.0
+                chart_height = 8
+                for h in reversed(range(chart_height)):
+                    for p in prices:
+                        threshold = min_p + (h / chart_height) * diff
+                        if p >= threshold: candles_text.append("█ ", style="red")
+                        else: candles_text.append("  ")
+                    candles_text.append("\n")
             else:
                 candles_text.append("Candle data not available yet.\n", style="dim")
             candles_text.append("\nPress any key to return...", style="dim")
@@ -460,9 +474,12 @@ def input_thread_func(exchange, data_manager, engine, config):
                              data['position'] = None
                          play_sound("sell", config)
                     sell_proposal_pair = None
+                    continue
                 elif key.lower() == 'n':
                     sell_proposal_pair = None
-                continue
+                    continue
+            else:
+                sell_proposal_pair = None # Clear if expired
 
             if show_candles_for_pair:
                 show_candles_for_pair = None
@@ -502,14 +519,26 @@ def input_thread_func(exchange, data_manager, engine, config):
                     symbol = sorted_symbols[selected_pair_index]
                     data = bot_state[symbol]
                     if not data.get('position'):
-                        threading.Thread(target=execute_buy, args=(exchange, data_manager, engine, symbol, data, config), daemon=True).start()
+                        def manual_buy_task():
+                            if execute_buy(exchange, data_manager, engine, symbol, data, config):
+                                with bot_lock:
+                                    data['last_action'] = 'BUY'
+                                    data['position'] = data_manager.get_position(symbol)
+                                play_sound("buy", config)
+                        threading.Thread(target=manual_buy_task, daemon=True).start()
             elif key.lower() == 's':
                 # Manual Sell (Instruction 3)
                 if focused_panel == "pairs" and sorted_symbols:
                     symbol = sorted_symbols[selected_pair_index]
                     data = bot_state[symbol]
                     if data.get('position'):
-                        threading.Thread(target=execute_sell, args=(exchange, data_manager, engine, symbol, data, config), daemon=True).start()
+                        def manual_sell_task():
+                            if execute_sell(exchange, data_manager, engine, symbol, data, config):
+                                with bot_lock:
+                                    data['last_action'] = 'SELL'
+                                    data['position'] = None
+                                play_sound("sell", config)
+                        threading.Thread(target=manual_sell_task, daemon=True).start()
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'm':
@@ -1220,7 +1249,11 @@ def sync_live_positions(exchange, data_manager, config):
             logging.warning(f"[{symbol}] Asset found in wallet but no purchase record found via API. Please connect to exchange and sell manually or manage this asset.")
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
-        logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
+        has_base_balance = any(free_balances.get(bc, 0) > 10 for bc in base_currencies)
+        if not has_base_balance:
+            logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
+        else:
+            logging.info("No non-base sellable assets found, but base currency balance is available.")
 
 def get_sellable_assets_sim(data_manager):
     positions = data_manager.get_open_positions()
