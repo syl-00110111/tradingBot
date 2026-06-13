@@ -441,7 +441,7 @@ def input_thread_func(exchange, data_manager, engine, config):
                 if key.lower() == 'y':
                     symbol = sell_proposal_pair
                     data = bot_state.get(symbol, {})
-                    if execute_sell(exchange, data_manager, engine, symbol, data):
+                    if execute_sell(exchange, data_manager, engine, symbol, data, config):
                          with bot_lock:
                              data['last_action'] = 'SELL'
                              data['position'] = None
@@ -496,7 +496,7 @@ def input_thread_func(exchange, data_manager, engine, config):
                     symbol = sorted_symbols[selected_pair_index]
                     data = bot_state[symbol]
                     if data.get('position'):
-                        threading.Thread(target=execute_sell, args=(exchange, data_manager, engine, symbol, data), daemon=True).start()
+                        threading.Thread(target=execute_sell, args=(exchange, data_manager, engine, symbol, data, config), daemon=True).start()
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'm':
@@ -605,7 +605,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             bot_state[symbol] = data
 
                             if data.get('sell_triggered'):
-                                 if execute_sell(exchange, data_manager, engine, symbol, data):
+                                 if execute_sell(exchange, data_manager, engine, symbol, data, config):
                                       with bot_lock:
                                           data['last_action'] = 'SELL'
                                           data['position'] = None
@@ -690,7 +690,7 @@ def main():
     parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
-    parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/EUR)')
+    parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/USDT)')
     parser.add_argument('--every-symbol', action='store_true', help='Run benchmark for all configured pairs')
 
     strat_help = f"Strategy for backtest. Available: {', '.join(STRATEGIES)}"
@@ -849,6 +849,7 @@ def main():
             status.update(f"[bold blue]Optimizing strategies for {args.term} term...")
             opt_map = run_benchmark_mode(exchange, config, args, term_override=args.term, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             # Store profits for prioritization
+            _, base_bet_curr = engine.parse_base_bet()
             pair_priorities = []
             for sym, data in opt_map.items():
                 # data can be a list (patterns) or a single pattern (legacy cache)
@@ -866,7 +867,7 @@ def main():
                         config['pairs'][sym]['expected_profit'] = best.get('avg_bench_profit', priority_score)
                         pair_priorities.append((sym, priority_score))
                         if best.get('is_cached'):
-                             console.print(f"[bold green][{sym}][/] Optimized from [cyan]cached results[/] to [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | {args.term.upper()} Term Profit: {format_price(priority_score)} EUR")
+                         console.print(f"[bold green][{sym}][/] Optimized from [cyan]cached results[/] to [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | {args.term.upper()} Term Profit: {format_price(priority_score)} {base_bet_curr}")
 
                 time.sleep(1) # Brief pause after bench
 
@@ -1060,7 +1061,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             fee = order.get('calculated_fee', 0)
 
             total_paid = (exec_amount * exec_price) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {exec_amount:.6f} at {exec_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+            logging.info(f"[{symbol}] Executing buy of amount {exec_amount:.6f} at {exec_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]}")
             data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
 
             # Immediately update Sellable list (Instruction 2)
@@ -1077,7 +1078,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
     return False
 
-def execute_sell(exchange, data_manager, engine, symbol, data):
+def execute_sell(exchange, data_manager, engine, symbol, data, global_config):
     position = data['position']
     should_execute = True
 
@@ -1109,7 +1110,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                 fee = order.get('calculated_fee', 0)
 
                 total_received = (exec_amount * exec_price) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {exec_amount:.6f} at {exec_price}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                logging.info(f"[{symbol}] Executing sell of amount {exec_amount:.6f} at {exec_price}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]}")
                 profit = total_received - position.get('entry_total_base', 0)
                 data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
                 return True
@@ -1153,10 +1154,10 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
-    logging.info("Syncing positions from Binance API...")
+    logging.info(f"Syncing positions from {exchange.__class__.__name__} API...")
     balance = exchange.fetch_balance()
     free_balances = balance.get('free', balance)
-    base_currencies = config.get('base_currencies', ['EUR'])
+    base_currencies = config.get('base_currencies', [parse_base_bet(global_config)[1]])
 
     # We clear local cache for Live mode as requested
     data_manager.data['open_positions'] = {}
@@ -1215,7 +1216,8 @@ def get_sellable_assets_sim(data_manager):
 def get_sellable_assets(exchange, config=None):
     balance = exchange.fetch_balance()
     assets = []
-    base_currencies = config.get('base_currencies', ['EUR']) if config else ['EUR']
+    default_base = parse_base_bet(global_config)[1] if config else 'USDT'
+    base_currencies = config.get('base_currencies', [default_base]) if config else [default_base]
     free_balances = balance.get('free', balance)
 
     for asset, amount in free_balances.items():
@@ -1249,7 +1251,7 @@ def interactive_sell(exchange, data_manager, engine, config):
     console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
     balance = exchange.fetch_balance()
     free_balances = balance.get('free', balance)
-    base_currencies = config.get('base_currencies', ['EUR'])
+    base_currencies = config.get('base_currencies', [parse_base_bet(global_config)[1]])
 
     sellable_found = False
     for asset, amount in free_balances.items():
@@ -1272,7 +1274,7 @@ def interactive_sell(exchange, data_manager, engine, config):
         elif hasattr(exchange, 'markets'):
             markets = exchange.markets
 
-        # Skip if no EUR market exists for this asset
+        # Skip if no base currency market exists for this asset
         if not markets or symbol not in markets:
             continue
 
@@ -1291,17 +1293,20 @@ def interactive_sell(exchange, data_manager, engine, config):
             continue
 
         sellable_found = True
-        console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {amount:.6f} | [bold cyan]Value:[/] {format_price(cost)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+        quote = symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]
+        console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {amount:.6f} | [bold cyan]Value:[/] {format_price(cost)} {quote}")
 
         confirm = input(f"Confirm sell of entire {asset} balance? (y/n): ").lower()
         if confirm == 'y':
-            console.print(f"[yellow]Selling {amount} {asset} at ~{format_price(price)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}...[/]")
+            quote = symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]
+            console.print(f"[yellow]Selling {amount} {asset} at ~{format_price(price)} {quote}...[/]")
             order = exchange.create_order(symbol, 'sell', amount)
             if order:
                 fee = order.get('calculated_fee', 0)
                 total_received = (amount * price) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-                console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}[/]")
+                quote = symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]
+                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {quote}")
+                console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {quote}[/]")
                 play_sound("sell", None)
                 # Also close position in data manager if it exists
                 if data_manager.get_position(symbol):
@@ -1321,18 +1326,19 @@ def show_balance(exchange):
     balance = exchange.fetch_balance()
 
     table = Table(title="Asset Inventory", expand=True)
+    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
     table.add_column("Asset", style="cyan")
     table.add_column("Free", justify="right")
     table.add_column("Used", justify="right")
     table.add_column("Total", justify="right")
-    table.add_column("Estimated Value (EUR)", justify="right", style="green")
+    table.add_column(f"Estimated Value ({base_bet_curr})", justify="right", style="green")
 
     # Access balances correctly
     total_balances = balance.get('total', balance)
     free_balances = balance.get('free', {})
     used_balances = balance.get('used', {})
 
-    total_eur_value = 0
+    total_value_base = 0
 
     # Sort assets alphabetically
     for asset in sorted(total_balances.keys()):
@@ -1343,30 +1349,27 @@ def show_balance(exchange):
         free = free_balances.get(asset, 0)
         used = used_balances.get(asset, 0)
 
-        eur_val = 0
-        if asset in ['EUR', 'USDT', 'USDC']:
-            eur_val = total # Simplified valuation for base currencies
+        val_in_base = 0
+        if asset in [base_bet_curr, 'USDT', 'USDC']:
+            val_in_base = total # Simplified valuation for base currencies
         else:
             # Try finding any valid pair with this asset as base
-            symbol = None
-            for bc in ['EUR', 'USDT', 'USDC']:
+            ticker = None
+            for bc in [base_bet_curr, 'USDT', 'USDC']:
                 candidate = f"{asset}/{bc}"
-                # We don't have config here but we can try common ones
                 ticker = exchange.fetch_ticker(candidate)
                 if ticker and ticker.get('last', 0) > 0:
-                     eur_val = total * ticker['last']
+                     val_in_base = total * ticker['last']
                      break
-            if ticker:
-                eur_val = total * ticker['last']
-            else:
-                # Try USDT bridge if EUR pair not found
+            if not ticker or ticker.get('last', 0) <= 0:
+                # Try USDT bridge if base pair not found
                 ticker_usdt = exchange.fetch_ticker(f"{asset}/USDT")
-                ticker_eur_usdt = exchange.fetch_ticker("EUR/USDT")
-                if ticker_usdt and ticker_eur_usdt:
-                    eur_val = (total * ticker_usdt['last']) / ticker_eur_usdt['last']
+                ticker_base_usdt = exchange.fetch_ticker(f"{base_bet_curr}/USDT")
+                if ticker_usdt and ticker_base_usdt and ticker_base_usdt['last'] > 0:
+                    val_in_base = (total * ticker_usdt['last']) / ticker_base_usdt['last']
 
-        total_eur_value += eur_val
-        val_str = format_price(eur_val) if eur_val > 0 else "N/A"
+        total_value_base += val_in_base
+        val_str = format_price(val_in_base) if val_in_base > 0 else "N/A"
 
         table.add_row(
             asset,
@@ -1377,9 +1380,9 @@ def show_balance(exchange):
         )
 
     console.print(table)
-    console.print(f"\n[bold yellow]Estimated Total Wallet Value: {total_eur_value:.2f} EUR[/]\n")
+    console.print(f"\n[bold yellow]Estimated Total Wallet Value: {total_value_base:.2f} {base_bet_curr}[/]\n")
 
-def plot_backtest(df, symbol, strategy_name, aggr_name, results):
+def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config):
     """Generates a matplotlib plot for backtesting results."""
     plt.figure(figsize=(12, 7))
     plt.plot(df['timestamp'], df['close'], label='Price', color='blue', alpha=0.6)
@@ -1397,7 +1400,8 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     plt.ylabel("Price")
 
     p_str = format_price(results['profit'])
-    stats_text = f"Profit: {p_str} EUR\nWin Rate: {results['win_rate']:.1%}\nMax DD: {results['max_dd']:.1%}"
+    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    stats_text = f"Profit: {p_str} {base_bet_curr}\nWin Rate: {results['win_rate']:.1%}\nMax DD: {results['max_dd']:.1%}"
     plt.annotate(stats_text, xy=(0.02, 0.95), xycoords='axes fraction',
                  bbox=dict(boxstyle="round", fc="w", alpha=0.8), fontsize=10, verticalalignment='top')
 
@@ -1487,7 +1491,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
              console.print(f"[yellow]Warning: Only {len(df)} candles available for {symbol}, but term requested {eval_window}.[/]")
 
     # Simulation
-    balance = 100.0 # Starting virtual EUR
+    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    balance = 100.0 # Starting virtual balance
     position = None
     trades = []
     equity_curve = []
@@ -1513,7 +1518,14 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
             position = None
 
         # Buy logic
-        raw_val = float(config.get('base_trade_amount', 10.0))
+        base_bet_cfg = config.get('base_bet', '10.0 USDT')
+        if isinstance(base_bet_cfg, str):
+            try:
+                raw_val = float(base_bet_cfg.split(' ')[0])
+            except ValueError:
+                raw_val = 10.0
+        else:
+            raw_val = float(base_bet_cfg)
         base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
         trade_amount = balance * base_percentage
         if not position and row['buy_signal'] and balance >= trade_amount:
@@ -1594,12 +1606,13 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
 
     if results:
         if results['trades_count'] > 0:
-            plot_backtest(results['df'], args.symbol, strategy, aggr, results)
+            plot_backtest(results['df'], args.symbol, strategy, aggr, results, engine, config)
         else:
             console.print("[yellow]No trades executed during backtest. Plot not generated.[/]")
 
         console.print(f"\n[bold yellow]Backtest Summary for {args.symbol}:[/]")
-        console.print(f"Total Profit: {format_price(results['profit'])} EUR")
+        _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+        console.print(f"Total Profit: {format_price(results['profit'])} {base_bet_curr}")
         console.print(f"Win Rate: {results['win_rate']:.1%}")
         console.print(f"Max Drawdown: {results['max_dd']:.1%}")
         console.print(f"Total Trades: {results['trades_count']}")
@@ -1627,9 +1640,10 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     # Instruction 8: Convert thresholds to base currency
     quote = symbol.split('/')[1]
     threshold_conv = 1.0
-    if quote != 'EUR':
+    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    if quote != base_bet_curr:
         try:
-            ticker = exchange.fetch_ticker(f'EUR/{quote}')
+            ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
             if ticker and ticker.get('last'):
                 threshold_conv = ticker['last']
         except: pass
@@ -1789,6 +1803,9 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     }
 
     optimization_map = {}
+    # Use the currency from base_bet for display
+    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+
     # If explicit benchmark mode (no term_override and not backtest), we scan all terms
     # Otherwise we scan just the requested term.
     # Actually, to fulfill Instruction 3, we should ensure we scan what is requested.
@@ -1885,7 +1902,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                     sym, patterns = future.result()
                     if patterns:
                         if len(patterns) < 10: msg_target.print(f'[bold yellow]Warning: {sym} has only {len(patterns)} successful patterns (history too short).[/]')
-                        # Instruction 4: Bench is average of techniques >= 0.22 EUR
+                        # Instruction 4: Bench is average of techniques >= 0.22 base_bet_curr
                         winning_patterns = [p for p in patterns if p['profit'] >= 0.22]
                         if winning_patterns:
                             avg_profit = sum(p['profit'] for p in winning_patterns) / len(winning_patterns)
@@ -1907,9 +1924,9 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         msg_target = status.console if status else console
                         if term_override:
                             optimization_map[sym] = best_for_symbol
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} EUR{period_str}")
+                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} {base_bet_curr}{period_str}")
                         else:
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} EUR{period_str}")
+                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} {base_bet_curr}{period_str}")
 
                         if best_overall.get(term_to_test) and best_for_symbol['profit'] > best_overall[term_to_test]['profit']:
                             best_overall[term_to_test] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
@@ -1948,22 +1965,23 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             console.print(f"[{label}] Best Performance on {sym}:")
             console.print(f"  > [bold cyan]Strategy:[/] {strat}")
             console.print(f"  > [bold cyan]Agressivity:[/] {aggr}")
-            console.print(f"  > [bold green]Estimated Gain:[/] {format_price(data['profit'])} EUR\n")
+            console.print(f"  > [bold green]Estimated Gain:[/] {format_price(data['profit'])} {base_bet_curr}\n")
 
     if not found_any:
         # Instruction 8: Convert message threshold to base currency
         # We take the first pair's quote currency as a representative
-        msg_threshold = "0.022 EUR"
+        _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+        msg_threshold = f"0.022 {base_bet_curr}"
         if symbols:
             quote = symbols[0].split('/')[1]
-            if quote != 'EUR':
+            if quote != base_bet_curr:
                 try:
-                    ticker = exchange.fetch_ticker(f'EUR/{quote}')
+                    ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
                     if ticker and ticker.get('last'):
                         msg_threshold = f"{config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.022) * ticker['last']:.3f} {quote}"
                 except: pass
 
-        console.print(f"[yellow]No successful patterns (> {msg_threshold} profit) were found in the scanned historical data.[/]")
+        console.print(f"[yellow]No successful patterns (> {msg_threshold}) were found in the scanned historical data.[/]")
     else:
         # Final check: if some symbols returned nothing, let the user know
         for sym in symbols_to_bench:
