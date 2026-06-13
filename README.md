@@ -66,13 +66,17 @@ Store your credentials and preferred exchange:
 ### Installation
 
 **Linux/macOS:**
-1. Create a virtual environment: `python -m venv venv && source venv/bin/activate`
-2. Install dependencies: `pip install -r requirements.txt`
+1. Create a virtual environment: `python -m venv venv`
+2. Active it: `source venv/bin/activate`
+3. Install dependencies: `pip install -r requirements.txt`
 
 **Windows:**
 1. Create a virtual environment: `python -m venv venv`
 2. Activate it: `.\venv\Scripts\activate`
 3. Install dependencies: `pip install -r requirements.txt`
+
+**Any:**
+4. Always activate the virtual environment before using the bot if you configured one.
 
 *Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific llvmlite dependency requirements on this platform.*
 
@@ -86,6 +90,7 @@ To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` o
 - **Benchmark**: `python bot.py --mode benchmark --every-symbol`
 - **Backtest**: `python bot.py --mode backtest --symbol BTC/USDT --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
+- **Interactive Close**: `python bot.py --mode sell`
 
 ---
 
