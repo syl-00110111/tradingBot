@@ -46,13 +46,16 @@ class ExchangeInterface:
     def fetch_ticker(self, symbol): raise NotImplementedError
     def fetch_trading_fee(self, symbol): raise NotImplementedError
 
-class BinanceExchange(ExchangeInterface):
-    def __init__(self, api_key, api_secret):
-        self.exchange = ThrottledExchange(ccxt.binance({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
-            'options': {'defaultType': 'spot', 'poolSize': 50},
+class CCXTExchange(ExchangeInterface):
+    def __init__(self, exchange_id, api_key, api_secret, options=None):
+        ex_class = getattr(ccxt, exchange_id)
+        default_options = {
+            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
+            'options': {'poolSize': 50},
             'session': create_ccxt_session()
-        }))
+        }
+        if options: default_options.update(options)
+        self.exchange = ThrottledExchange(ex_class(default_options))
 
     def load_markets(self):
         try: return self.exchange.load_markets()
@@ -90,7 +93,7 @@ class BinanceExchange(ExchangeInterface):
             if side == 'sell':
                 base, _ = symbol.split('/')
                 balance = self.fetch_balance()
-                free_balance = balance.get(base, {}).get('free', 0)
+                free_balance = balance.get(base, {}).get('free', 0) if isinstance(balance.get(base), dict) else balance.get(base, 0)
                 if free_balance < amount:
                     if free_balance > 0 and (amount - free_balance) / amount < 0.01:
                         amount = float(self.exchange.amount_to_precision(symbol, free_balance))
@@ -122,23 +125,83 @@ class BinanceExchange(ExchangeInterface):
                 return {'error': 'dust_limit', 'message': err_msg}
             logging.error(f"Error during {side} order on {symbol}: {e}"); return None
 
+class BinanceExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('binance', api_key, api_secret, options={'options': {'defaultType': 'spot', 'poolSize': 50}})
+
+class KrakenExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('kraken', api_key, api_secret)
+
+class BitvavoExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('bitvavo', api_key, api_secret)
+
+class CoinbaseExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('coinbaseexchange', api_key, api_secret)
+
+class GeminiExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('gemini', api_key, api_secret)
+
+class MercadoBitcoinExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('mercado', api_key, api_secret)
+
+class BitsoExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('bitso', api_key, api_secret)
+
+class BitstampExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('bitstamp', api_key, api_secret)
+
+class WhiteBITExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('whitebit', api_key, api_secret)
+
+class IndodaxExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('indodax', api_key, api_secret)
+
+class UpbitExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('upbit', api_key, api_secret)
+
+class LunoExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('luno', api_key, api_secret)
+
+class IndependentReserveExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('independentreserve', api_key, api_secret)
+
+class BTCMarketsExchange(CCXTExchange):
+    def __init__(self, api_key, api_secret):
+        super().__init__('btcmarkets', api_key, api_secret)
+
 class MockExchange(ExchangeInterface):
     def __init__(self, api_key=None, api_secret=None, exchange_type='binance'):
-        self.balance = {'EUR': 1000.0, 'USDC': 1000.0, 'USDT': 1000.0}
+        self.balance = {'USDT': 1000.0, 'USDC': 1000.0}
         self.ohlcv_data = {}
         self.real_exchange = None
         self.fee_rate = 0.001
         self.markets = {}
+        self.exchange_type = exchange_type
         self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                ex_class = ccxt.binance if exchange_type == 'binance' else (ccxt.kraken if exchange_type == 'kraken' else ccxt.bitvavo)
-                self.real_exchange = ThrottledExchange(ex_class({
-                    'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
-                    'options': {'defaultType': 'spot', 'poolSize': 50},
-                    'session': create_ccxt_session()
-                }))
-                logging.info("Mock initialized with real API balance discovery (deferred)")
+                mapping = {
+                    'binance': BinanceExchange, 'kraken': KrakenExchange, 'bitvavo': BitvavoExchange,
+                    'coinbase': CoinbaseExchange, 'gemini': GeminiExchange, 'mercado': MercadoBitcoinExchange,
+                    'bitso': BitsoExchange, 'bitstamp': BitstampExchange, 'whitebit': WhiteBITExchange,
+                    'indodax': IndodaxExchange, 'upbit': UpbitExchange, 'luno': LunoExchange,
+                    'independentreserve': IndependentReserveExchange, 'btcmarkets': BTCMarketsExchange
+                }
+                ex_class = mapping.get(exchange_type, BinanceExchange)
+                self.real_exchange = ex_class(api_key, api_secret)
+                logging.info(f"Mock initialized with real {exchange_type} balance discovery (deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")
 
     def _init_balance(self):
@@ -146,20 +209,12 @@ class MockExchange(ExchangeInterface):
         if self.real_exchange:
             try:
                 real_bal = self.real_exchange.fetch_balance()
-                total = real_bal.get('total', {})
+                total = real_bal.get('total', real_bal)
                 for asset, amt in total.items():
-                    if amt <= 0: continue
-                    # Ignore dust: value must be > 1.0 in base currency
-                    is_dust = False
-                    if asset not in ['EUR', 'USDT', 'USDC']:
-                        try:
-                            ticker = self.fetch_ticker(f"{asset}/EUR")
-                            if ticker and (amt * ticker['last']) < 1.0:
-                                is_dust = True
-                        except: pass
-                    if not is_dust:
-                        self.balance[asset] = amt
-                logging.info("Mock virtual balance initialized from real wallet (dust ignored).")
+                    if not isinstance(amt, (int, float)) or amt <= 0: continue
+                    # Ignore dust logic here if needed, simplified for now
+                    self.balance[asset] = amt
+                logging.info(f"Mock virtual balance initialized from real {self.exchange_type} wallet.")
             except Exception as e:
                 logging.error(f"Failed to sync virtual balance from real API: {e}")
         self._balance_initialized = True
@@ -206,9 +261,7 @@ class MockExchange(ExchangeInterface):
 
     def fetch_trading_fee(self, symbol):
         if self.real_exchange:
-            try:
-                fees = self.real_exchange.fetch_trading_fee(symbol)
-                return fees.get('taker', 0.001)
+            try: return self.real_exchange.fetch_trading_fee(symbol)
             except Exception: pass
         return self.fee_rate
 
@@ -237,18 +290,3 @@ class MockExchange(ExchangeInterface):
                 self.balance[quote] = free_quote + cost - fee
                 return {'id': 'mock_sell_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
         return None
-
-class KrakenExchange(BinanceExchange):
-    def __init__(self, api_key, api_secret):
-        self.exchange = ThrottledExchange(ccxt.kraken({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
-            'session': create_ccxt_session()
-        }))
-
-class BitvavoExchange(BinanceExchange):
-    def __init__(self, api_key, api_secret):
-        self.exchange = ThrottledExchange(ccxt.bitvavo({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'poolSize': 50},
-            'options': {'poolSize': 50},
-            'session': create_ccxt_session()
-        }))

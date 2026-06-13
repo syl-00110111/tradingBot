@@ -37,7 +37,7 @@ The bot features 30+ distinct trading strategies, including:
 ## ⚙️ Configuration
 
 ### `pairs.txt`
-Trading pairs are now defined in a simple `pairs.txt` file (one per line, e.g., `BTC/EUR`). Base currencies are automatically identified from this list.
+Trading pairs are now defined in a simple `pairs.txt` file (one per line, e.g., `BTC/USDT`). Base currencies are automatically identified from this list.
 
 ### `api.json`
 Store your credentials and preferred exchange:
@@ -48,13 +48,13 @@ Store your credentials and preferred exchange:
   "exchange": "binance"
 }
 ```
-*Options: `binance`, `kraken`, `bitvavo`.*
+*Options: `binance`, `kraken`, `bitvavo`, `coinbase`, `gemini`, `mercado`, `bitso`, `bitstamp`, `whitebit`, `indodax`, `upbit`, `luno`, `independentreserve`, `btcmarkets`.*
 
 ### `config.json`
 ```json
 {
     "max_open_positions": 8,
-    "base_trade_amount": 10.0,
+    "base_bet": 10.0,
     "global_risk_multiplier": 1.0
 }
 ```
@@ -84,7 +84,7 @@ To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` o
 - **Simulation**: `python bot.py --mode simulation --term short`
 - **Live**: `python bot.py --mode live --term medium`
 - **Benchmark**: `python bot.py --mode benchmark --every-symbol`
-- **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
+- **Backtest**: `python bot.py --mode backtest --symbol BTC/USDT --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
 
 ---
