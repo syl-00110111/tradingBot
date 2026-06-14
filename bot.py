@@ -207,13 +207,12 @@ def make_dashboard(global_mode, config):
     global pairs_marquee_dir, logs_marquee_dir, status_marquee_dir, pairs_pause_until, logs_pause_until, status_pause_until, last_marquee_update
     global selected_pair_index, show_candles_for_pair, sell_proposal_pair, sell_proposal_profit, sell_proposal_time
 
-    # Slow down marquee (e.g., 2 steps per second)
-    should_step = False
-    if marquee_enabled and (now_ts - last_marquee_update >= 0.4):
-         should_step = True
-         last_marquee_update = now_ts
-
     with bot_lock:
+        # Moderate speed marquee (e.g., 10 steps per second)
+        should_step = False
+        if marquee_enabled and (now_ts - last_marquee_update >= 0.1):
+             should_step = True
+             last_marquee_update = now_ts
         # 1. Logs Panel
         log_height = 8
         log_content = Text()
@@ -226,13 +225,13 @@ def make_dashboard(global_mode, config):
                             logs_scroll_offset += 1
                        if logs_scroll_offset >= max_logs_offset:
                             logs_marquee_dir = -1
-                            logs_pause_until = now_ts + 2
+                            logs_pause_until = now_ts + 1
                   else:
                        if logs_scroll_offset > 0:
                             logs_scroll_offset -= 1
                        if logs_scroll_offset <= 0:
                             logs_marquee_dir = 1
-                            logs_pause_until = now_ts + 2
+                            logs_pause_until = now_ts + 1
 
         logs_scroll_offset = max(0, min(logs_scroll_offset, max_logs_offset))
         start = max(0, len(all_logs) - log_height - logs_scroll_offset)
@@ -327,13 +326,13 @@ def make_dashboard(global_mode, config):
                                pairs_scroll_offset += 1
                            if pairs_scroll_offset >= max_pairs_offset:
                                pairs_marquee_dir = -1
-                               pairs_pause_until = now_ts + 2
+                               pairs_pause_until = now_ts + 1
                       else:
                            if pairs_scroll_offset > 0:
                                pairs_scroll_offset -= 1
                            if pairs_scroll_offset <= 0:
                                pairs_marquee_dir = 1
-                               pairs_pause_until = now_ts + 2
+                               pairs_pause_until = now_ts + 1
 
             pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
             visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
@@ -435,13 +434,13 @@ def make_dashboard(global_mode, config):
                             status_scroll_index += 1
                        if status_scroll_index >= max_status_offset:
                             status_marquee_dir = -1
-                            status_pause_until = now_ts + 2
+                            status_pause_until = now_ts + 1
                   else:
                        if status_scroll_index > 0:
                             status_scroll_index -= 1
                        if status_scroll_index <= 0:
                             status_marquee_dir = 1
-                            status_pause_until = now_ts + 2
+                            status_pause_until = now_ts + 1
 
              status_scroll_index = max(0, min(status_scroll_index, max_status_offset))
              status_display = status_text[status_scroll_index : status_scroll_index + display_width]
