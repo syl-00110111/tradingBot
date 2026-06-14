@@ -279,6 +279,7 @@ def make_dashboard(global_mode, config):
             symbol = sell_proposal_pair
             data = bot_state.get(symbol, {})
             candles_text = Text()
+            # If multiple positions exist, propose selling the most profitable one
             candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(sell_proposal_profit)} profit?\n", style="bold yellow")
             candles_text.append("Type 'y' to confirm, 'n' to dismiss. (Auto-close in 1 min)\n\n", style="dim")
             if 'last_20_candles' in data:
@@ -339,7 +340,8 @@ def make_dashboard(global_mode, config):
             for i, symbol in enumerate(visible_symbols):
                 data = bot_state[symbol]
                 is_selected = (pairs_scroll_offset + i) == selected_pair_index
-                has_position = data.get('position') is not None
+                positions = data.get('positions', [])
+                has_position = len(positions) > 0
 
                 current_signal = "Waiting"
                 buy_count = data.get('consecutive_buys', 0)
@@ -361,8 +363,9 @@ def make_dashboard(global_mode, config):
 
                 amt_str, entry_str, fee_str = "-", "-", "-"
                 if has_position:
-                    p = data['position']
+                    p = positions[-1] # Show most recent position info in summary
                     amt_str = f"{p['amount']:.6f}"
+                    if len(positions) > 1: amt_str = f"({len(positions)}) {amt_str}"
                     entry_str = format_price(p['entry_price'])
                     fee_str = f"{p.get('entry_fee', 0):.4f}"
 
@@ -480,10 +483,13 @@ def input_thread_func(exchange, data_manager, engine, config):
                 if key.lower() == 'y':
                     symbol = sell_proposal_pair
                     data = bot_state.get(symbol, {})
-                    if execute_sell(exchange, data_manager, engine, symbol, data, config):
+                    # Find which position was proposed (usually the first/index 0 in sell check)
+                    # For simplicity, we sell the FIRST position found for that symbol
+                    if execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0):
                          with bot_lock:
                              data['last_action'] = 'SELL'
-                             data['position'] = None
+                             data['positions'] = data_manager.get_positions(symbol)
+                             data['position'] = data_manager.get_position(symbol)
                          play_sound("sell", config)
                     sell_proposal_pair = None
                     continue
@@ -543,12 +549,14 @@ def input_thread_func(exchange, data_manager, engine, config):
                 if focused_panel == "pairs" and sorted_symbols:
                     symbol = sorted_symbols[selected_pair_index]
                     data = bot_state[symbol]
-                    if data.get('position'):
+                    if data.get('positions'):
                         def manual_sell_task():
-                            if execute_sell(exchange, data_manager, engine, symbol, data, config):
+                            # Close the OLDEST position manually
+                            if execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0):
                                 with bot_lock:
                                     data['last_action'] = 'SELL'
-                                    data['position'] = None
+                                    data['positions'] = data_manager.get_positions(symbol)
+                                    data['position'] = data_manager.get_position(symbol)
                                 play_sound("sell", config)
                         threading.Thread(target=manual_sell_task, daemon=True).start()
             elif key.lower() == 'x':
@@ -659,16 +667,21 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             bot_state[symbol] = data
 
                             if data.get('sell_triggered'):
-                                 if execute_sell(exchange, data_manager, engine, symbol, data, config):
-                                      with bot_lock:
-                                          data['last_action'] = 'SELL'
-                                          data['position'] = None
-                                          if mode == 'live' and not pending_asset_update:
-                                              pending_asset_update = True
-                                              threading.Thread(target=update_available_assets_live, args=(exchange, config), daemon=True).start()
-                                      play_sound("sell", config)
+                                 # Close ALL triggered positions
+                                 positions = data_manager.get_positions(symbol)
+                                 for i in reversed(range(len(positions))):
+                                     if execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=i):
+                                          with bot_lock:
+                                              data['last_action'] = 'SELL'
+                                              if mode == 'live' and not pending_asset_update:
+                                                  pending_asset_update = True
+                                                  threading.Thread(target=update_available_assets_live, args=(exchange, config), daemon=True).start()
+                                          play_sound("sell", config)
+                                 with bot_lock:
+                                     data['positions'] = data_manager.get_positions(symbol)
+                                     data['position'] = data_manager.get_position(symbol)
 
-                            if data.get('buy') and not data.get('position'):
+                            if data.get('buy'):
                                  potential_buys.append((symbol, data))
                     except Exception as e:
                         logging.error(f"Error analyzing {symbol}: {e}")
@@ -687,6 +700,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                           if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
                                with bot_lock:
                                    data['last_action'] = 'BUY'
+                                   data['positions'] = data_manager.get_positions(symbol)
                                    data['position'] = data_manager.get_position(symbol)
                                play_sound("buy", config)
                                # Update balance for next iteration
@@ -697,10 +711,12 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             if (now - bot_start_time > 300) and (now - last_sell_proposal_check > 300):
                 last_sell_proposal_check = now
                 open_positions = data_manager.get_open_positions()
-                for symbol, pos in open_positions.items():
+                for symbol, pos_list in open_positions.items():
                     if symbol in bot_state:
                         current_price = bot_state[symbol].get('price', 0)
-                        entry_price = pos.get('entry_price', 0)
+                        # Propose based on first position if many exist
+                        p = pos_list[0]
+                        entry_price = p.get('entry_price', 0)
                         if current_price > 0 and entry_price > 0:
                             fee_rate = 0.001
                             try: fee_rate = exchange.fetch_trading_fee(symbol)
@@ -708,8 +724,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
                             is_prof = engine.is_profitable(current_price, entry_price, fee_rate)
                             if is_prof:
-                                amount = pos.get('amount', 0)
-                                profit = (amount * current_price * (1 - fee_rate)) - pos.get('entry_total_base', 0)
+                                amount = p.get('amount', 0)
+                                profit = (amount * current_price * (1 - fee_rate)) - p.get('entry_total_base', 0)
                                 if profit > 0:
                                     sell_proposal_pair = symbol
                                     sell_proposal_profit = profit
@@ -963,10 +979,9 @@ def main():
                         priority_score = best['profit']
                         config['pairs'][sym]['expected_profit'] = best.get('avg_bench_profit', priority_score)
                         pair_priorities.append((sym, priority_score))
-                        if best.get('is_cached'):
-                         console.print(f"[bold green][{sym}][/] Optimized from [cyan]cached results[/] to [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | {args.term.upper()} Term Profit: {format_price(priority_score)} {base_bet_curr}")
 
-                time.sleep(1) # Brief pause after bench
+                if not any(best.get('is_cached') for best in opt_map.values()):
+                     time.sleep(1) # Brief pause after bench
 
                 # Global sort pairs by expected profit for priority execution
                 sorted_pairs = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
@@ -976,8 +991,8 @@ def main():
                 data_manager.clear_history()
 
         for symbol in pairs:
-            # Check if we already have an open position for this symbol
-            pos = data_manager.get_position(symbol)
+            # Check if we already have open positions for this symbol
+            pos_list = data_manager.get_positions(symbol)
 
             # Retrieve optimized settings from config if available (after benchmark)
             pair_cfg = pairs[symbol]
@@ -988,8 +1003,9 @@ def main():
             bot_state[symbol] = {
                 'aggr': aggr_val,
                 'strategy': strat_val,
-                'last_action': 'BUY' if pos else 'Waiting',
-                'position': pos,
+                'last_action': 'BUY' if pos_list else 'Waiting',
+                'positions': pos_list,
+                'position': pos_list[0] if pos_list else None,
                 'expected_profit': exp_profit
             }
 
@@ -1115,8 +1131,10 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'all_matching_strategies': [ap[1]['strategy'] for ap in active_patterns] if active_patterns else [strategy_name],
         'tendency': latest_row.get('tendency', 'Neutral'), 'buy': consecutive_buys >= buy_threshold, 'sell': consecutive_sells >= 3,
         'consecutive_buys': consecutive_buys, 'consecutive_sells': consecutive_sells, '_last_candle_ts': candle_ts,
-        'sell_triggered': consecutive_sells >= 3 and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
-        'position': data_manager.get_position(symbol), 'expected_profit': float(pair_config.get('expected_profit', 0)),
+        'sell_triggered': consecutive_sells >= 3 and len(data_manager.get_positions(symbol)) > 0,
+        'positions': data_manager.get_positions(symbol),
+        'position': data_manager.get_position(symbol),
+        'expected_profit': float(pair_config.get('expected_profit', 0)),
         'trigger_data': trigger_data
     }
 
@@ -1175,8 +1193,12 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, balance=No
         logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
     return False
 
-def execute_sell(exchange, data_manager, engine, symbol, data, config):
-    position = data['position']
+def execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0):
+    positions = data_manager.get_positions(symbol)
+    if not positions or position_idx >= len(positions):
+        return False
+
+    position = positions[position_idx]
     should_execute = True
 
     # Instruction 7: check for "guaranteed" sale price
@@ -1209,7 +1231,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config):
                 total_received = (exec_amount * exec_price) - fee
                 logging.info(f"[{symbol}] Executing sell of amount {exec_amount:.6f} at {exec_price}, final price received: {total_received:.2f} {get_base_currency(symbol, config)}")
                 profit = total_received - position.get('entry_total_base', 0)
-                data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
+                data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, position_idx=position_idx)
                 return True
     return False
 
@@ -1224,7 +1246,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     potential_buys = []
     for symbol in pair_keys:
         pair_config = pairs_dict[symbol]
-        if not data_manager.get_position(symbol):
+        if not data_manager.get_positions(symbol):
             # Pass pair_config to analyze_pair
             data = analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, config, engine=engine)
             if data and data.get('buy'):
@@ -1242,6 +1264,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
                 symbol, data = potential_buys[i]
                 if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
                     with bot_lock:
+                        bot_state[symbol]['positions'] = data_manager.get_positions(symbol)
                         bot_state[symbol]['position'] = data_manager.get_position(symbol)
                         bot_state[symbol]['price'] = data['price']
                         bot_state[symbol]['last_action'] = 'BUY'
@@ -1298,8 +1321,11 @@ def sync_live_positions(exchange, data_manager, config):
                 entry_price = buy_trades[-1]['price']
 
         if entry_price > 0:
-            logging.info(f"[{symbol}] Found purchase price: {entry_price}. Adding to tracking.")
-            data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time())
+            # Avoid duplicate sync if already tracked
+            existing = data_manager.get_positions(symbol)
+            if not any(p['amount'] == amount and p['entry_price'] == entry_price for p in existing):
+                logging.info(f"[{symbol}] Found purchase price: {entry_price}. Adding to tracking.")
+                data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time())
         else:
             logging.warning(f"[{symbol}] Asset found in wallet but no purchase record found via API. Please connect to exchange and sell manually or manage this asset.")
 
@@ -1408,11 +1434,13 @@ def interactive_sell(exchange, data_manager, engine, config):
                 logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {quote}")
                 console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {quote}[/]")
                 play_sound("sell", None)
-                # Also close position in data manager if it exists
-                if data_manager.get_position(symbol):
-                    pos = data_manager.get_position(symbol)
+                # Also close positions in data manager if they exist
+                pos_list = data_manager.get_positions(symbol)
+                if pos_list:
+                    # Close the oldest position found (or we could close all, but manual usually implies one)
+                    pos = pos_list[0]
                     profit = total_received - pos.get('entry_total_base', 0)
-                    data_manager.close_position(symbol, price, fee, profit, {}, time.time(), total_base=total_received)
+                    data_manager.close_position(symbol, price, fee, profit, {}, time.time(), total_base=total_received, position_idx=0)
             else:
                 console.print(f"[bold red]Failed to sell {asset}.[/]")
         else:
@@ -1906,32 +1934,39 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
     symbols_to_bench = []
     for symbol in symbols:
-        if term_override:
-            cached_patterns = cache_mgr.get(symbol, term_override, validity_map.get(term_override, 3600))
-            if cached_patterns:
-                # Context-based invalidation: check if market context evolved too much
-                best = cached_patterns[0]
-                try:
-                    # Small limit to minimize bandwidth and rate-limit risk
-                    ohlcv_now = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=20)
-                    if ohlcv_now:
-                        df_now = pd.DataFrame(ohlcv_now, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df_now = get_signals(df_now, {"device": device}, is_backtest=False)
-                        # Reuse similarity logic for invalidation
-                        sim = calculate_similarity(df_now.iloc[-len(best['prices']):] if len(df_now) >= len(best['prices']) else df_now, best, device=device)
-                        if sim < 0.70:
-                             logging.info(f"[{symbol}] Cache invalidated: Market context evolved too much (sim: {sim:.2f})")
-                             cache_mgr.delete(symbol, term_override)
-                             symbols_to_bench.append(symbol)
-                             continue
-                except Exception as e:
-                    logging.warning(f"[{symbol}] Failed to verify cache context: {e}")
+        # Reuse previous benchmark results from cache if valid
+        cached_patterns = cache_mgr.get(symbol, term_to_test, validity_map.get(term_to_test, 3600))
+        if cached_patterns:
+            # Context-based invalidation: check if market context evolved too much
+            best = cached_patterns[0]
+            try:
+                # Small limit to minimize bandwidth and rate-limit risk
+                ohlcv_now = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=20)
+                if ohlcv_now:
+                    df_now = pd.DataFrame(ohlcv_now, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_now = get_signals(df_now, {"device": device}, is_backtest=False)
+                    # Reuse similarity logic for invalidation
+                    sim = calculate_similarity(df_now.iloc[-len(best['prices']):] if len(df_now) >= len(best['prices']) else df_now, best, device=device)
+                    if sim < 0.70:
+                         logging.info(f"[{symbol}] Cache invalidated: Market context evolved too much (sim: {sim:.2f})")
+                         cache_mgr.delete(symbol, term_to_test)
+                         symbols_to_bench.append(symbol)
+                         continue
+            except Exception as e:
+                logging.warning(f"[{symbol}] Failed to verify cache context: {e}")
 
-                best['is_cached'] = True
-                optimization_map[symbol] = best
-                if data_manager:
-                    pattern_manager.set_patterns(symbol, cached_patterns)
-                continue
+            best['is_cached'] = True
+            best_for_symbol = best.copy()
+            best_per_symbol[symbol] = best_for_symbol
+            optimization_map[symbol] = best
+
+            # Print cached result info
+            period_str = f" [dim](From {best.get('start_time')} to {best.get('end_time')})[/]"
+            console.print(f"[bold green][{symbol}][/] Using cached benchmark: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Bench: {format_price(best.get('avg_bench_profit', best['profit']))} {base_bet_curr}{period_str}")
+
+            if data_manager:
+                pattern_manager.set_patterns(symbol, cached_patterns)
+            continue
         symbols_to_bench.append(symbol)
 
     if symbols_to_bench:
