@@ -54,7 +54,7 @@ from monte_carlo import MonteCarloEngine
 pairs_scroll_offset = 0
 logs_scroll_offset = 0
 focused_panel = "pairs"
-ohlcv_cache = {}
+ohlcv_cache_manager = None
 all_logs = []
 status_scroll_index = 0
 expert_mode = False
@@ -764,35 +764,16 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             time.sleep(5)
 
 
-def load_ohlcv_cache():
-    # If not on disk, try loading from archive
-    if not os.path.exists('ohlcv_cache.pkl'):
-        from persistence import load_from_archive
-        load_from_archive('ohlcv_cache.pkl')
-
-    if os.path.exists('ohlcv_cache.pkl'):
-        try:
-            with open('ohlcv_cache.pkl', 'rb') as f:
-                return pickle.load(f)
-        except Exception: return {}
-    return {}
-
-def save_ohlcv_cache(cache):
-    with open('ohlcv_cache.pkl', 'wb') as f:
-        pickle.dump(cache, f)
-
 def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
     """
-    Retrieves candles incrementally using ohlcv_cache.
+    Retrieves candles incrementally using ohlcv_cache_manager.
     If candles exist in cache, only the gap is fetched from the exchange.
     """
-    global ohlcv_cache
-    cache_key = f"{symbol}_{timeframe}"
-
-    cached_data = ohlcv_cache.get(cache_key, [])
+    cached_data = ohlcv_cache_manager.get(symbol, timeframe)
     if isinstance(cached_data, pd.DataFrame):
          cached_data = cached_data.values.tolist()
 
+    updated = False
     if cached_data:
         last_ts = cached_data[-1][0]
         # Fetch gap candles starting from the last cached timestamp
@@ -805,24 +786,41 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
                  # Keep only the last 100,000 for stability
                  if len(cached_data) > 100000:
                       cached_data = cached_data[-100000:]
-                 ohlcv_cache[cache_key] = cached_data
+                 updated = True
         except Exception as e:
             logging.warning(f"[{symbol}] Incremental fetch failed: {e}")
     else:
         # Fallback to standard fetch if no cache
         new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         if new_candles:
-            ohlcv_cache[cache_key] = new_candles
             cached_data = new_candles
+            updated = True
+
+    if updated:
+         ohlcv_cache_manager.set(symbol, timeframe, cached_data)
 
     return cached_data[-limit:] if limit and len(cached_data) > limit else cached_data
 
 def main():
-    global ohlcv_cache
-    from persistence import load_from_archive, migrate_fresh_files_to_archive
+    global ohlcv_cache_manager
+    from persistence import load_from_archive, migrate_fresh_files_to_archive, OHLCVCacheManager
     migrate_fresh_files_to_archive()
     load_from_archive()
-    ohlcv_cache = load_ohlcv_cache()
+    ohlcv_cache_manager = OHLCVCacheManager()
+
+    # Migration path for old consolidated ohlcv_cache.pkl
+    if os.path.exists('ohlcv_cache.pkl'):
+        try:
+            logging.info("Migrating legacy ohlcv_cache.pkl to individual files...")
+            with open('ohlcv_cache.pkl', 'rb') as f:
+                old_cache = pickle.load(f)
+            for key, data in old_cache.items():
+                if '_' in key:
+                    symbol, timeframe = key.rsplit('_', 1)
+                    ohlcv_cache_manager.set(symbol, timeframe, data)
+            os.remove('ohlcv_cache.pkl')
+        except Exception as e:
+            logging.error(f"Migration failed: {e}")
 
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
@@ -1048,10 +1046,9 @@ def main():
         shutdown_event.set()
     finally:
         shutdown_event.set()
-        from persistence import create_consolidated_archive
-        with bot_lock:
-            save_ohlcv_cache(ohlcv_cache)
+        from persistence import create_consolidated_archive, archiver
         create_consolidated_archive()
+        archiver.stop()
 
     logging.info("Bot stopped gracefully.")
 
@@ -2005,8 +2002,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 current_since = since_ts if since_ts else target_ts
 
                 # Fetch base data if cache is empty or older than target_ts
-                cache_key = f"{symbol}_{timeframe}"
-                existing = ohlcv_cache.get(cache_key, [])
+                existing = ohlcv_cache_manager.get(symbol, timeframe)
                 if isinstance(existing, pd.DataFrame):
                      existing = existing.values.tolist()
 
@@ -2022,7 +2018,8 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
                         if len(all_ohlcv) > 40000: break
                         if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Initial history for {symbol}: {len(all_ohlcv)} candles...")
-                    if all_ohlcv: ohlcv_cache[cache_key] = all_ohlcv
+                    if all_ohlcv:
+                        ohlcv_cache_manager.set(symbol, timeframe, all_ohlcv)
 
                 # Now perform incremental gap filling
                 full_history = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=40000)
@@ -2086,8 +2083,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         if best_for_symbol['profit'] > best_overall['total']['profit']:
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
-                with bot_lock:
-                    save_ohlcv_cache(ohlcv_cache)
                 from persistence import create_consolidated_archive
                 create_consolidated_archive()
                 signal.signal(signal.SIGINT, original_handler)
