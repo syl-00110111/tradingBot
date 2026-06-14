@@ -98,6 +98,67 @@ STRATEGIES = [
 # Global MC engine for reuse
 _mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
 
+def get_common_indicators(df, device=torch.device('cpu')):
+    """
+    Calculates technical indicators used by multiple strategies.
+    Cached indicators are skipped if already present in the DataFrame.
+    """
+    if df.empty: return df
+
+    # Standardize hardware acceleration: enable MKLDNN if on CPU and supported
+    if device.type == 'cpu' and torch.backends.mkldnn.is_available():
+        torch.backends.mkldnn.enabled = True
+
+    use_acceleration = (device.type != 'cpu') or (device.type == 'cpu' and torch.backends.mkldnn.enabled)
+
+    # Only calculate if missing to save CPU during benchmarking
+    missing_basics = any(c not in df.columns for c in ['ema_f', 'ema_s', 'macd_val', 'rsi', 'adx'])
+
+    if missing_basics:
+        if use_acceleration:
+            close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+            high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
+            low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
+            df['ema_f'] = torch_ema(close_t, 9).to('cpu').numpy()
+            df['ema_s'] = torch_ema(close_t, 21).to('cpu').numpy()
+            m_val, m_sig, m_hist = torch_macd(close_t)
+            df['macd_val'] = m_val.to('cpu').numpy()
+            df['macd_sig'] = m_sig.to('cpu').numpy()
+            df['macd_hist'] = m_hist.to('cpu').numpy()
+            df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
+            df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
+        else:
+            ema_f = ta.ema(df['close'], length=9)
+            df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
+            ema_s = ta.ema(df['close'], length=21)
+            df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
+            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+            if macd is not None:
+                df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
+            else:
+                df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
+            rsi = ta.rsi(df['close'], length=14)
+            df['rsi'] = rsi.fillna(50) if rsi is not None else 50
+            adx_df = ta.adx(df['high'], df['low'], df['close'])
+            df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
+
+    if 'volatility' not in df.columns:
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+
+    # Whale Detection Proxy (Common)
+    if 'whale_active' not in df.columns:
+        df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
+        df['vol_std_whale'] = df['volume'].rolling(window=20).std()
+        df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
+
+    # Market Regime Proxy (Common)
+    if 'is_mean_rev' not in df.columns:
+        df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
+        df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
+
+    return df
+
 def get_signals(df, mode_config, is_backtest=False):
     """
     Dispatcher for multiple trading strategies.
@@ -108,52 +169,7 @@ def get_signals(df, mode_config, is_backtest=False):
     _mc_engine.set_device(device)
 
     # Common indicators for tendency and background analysis (Expert Mode)
-    if df.empty: return finalize_signals(df)
-
-    # Standardize hardware acceleration: enable MKLDNN if on CPU and supported
-    if device.type == 'cpu' and torch.backends.mkldnn.is_available():
-        torch.backends.mkldnn.enabled = True
-
-    use_acceleration = (device.type != 'cpu') or (device.type == 'cpu' and torch.backends.mkldnn.enabled)
-
-    if use_acceleration:
-        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
-        high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
-        low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
-        df['ema_f'] = torch_ema(close_t, 9).to('cpu').numpy()
-        df['ema_s'] = torch_ema(close_t, 21).to('cpu').numpy()
-        m_val, m_sig, m_hist = torch_macd(close_t)
-        df['macd_val'] = m_val.to('cpu').numpy()
-        df['macd_sig'] = m_sig.to('cpu').numpy()
-        df['macd_hist'] = m_hist.to('cpu').numpy()
-        df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
-        df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
-    else:
-        ema_f = ta.ema(df['close'], length=9)
-        df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
-        ema_s = ta.ema(df['close'], length=21)
-        df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
-        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-        if macd is not None:
-            df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
-        else:
-            df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
-        rsi = ta.rsi(df['close'], length=14)
-        df['rsi'] = rsi.fillna(50) if rsi is not None else 50
-        adx_df = ta.adx(df['high'], df['low'], df['close'])
-        df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
-
-    df['returns'] = np.log(df['close'] / df['close'].shift(1))
-    df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
-
-    # Whale Detection Proxy (Common)
-    df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
-    df['vol_std_whale'] = df['volume'].rolling(window=20).std()
-    df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
-
-    # Market Regime Proxy (Common)
-    df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
-    df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
+    df = get_common_indicators(df, device)
 
     # Calculate tendency (Vectorized for performance)
     ema_diff = df['ema_f'] - df['ema_s']

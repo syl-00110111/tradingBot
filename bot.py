@@ -1786,7 +1786,11 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     patterns = []
     now_ts = time.time()
 
-    from indicators import get_signals
+    from indicators import get_signals, get_common_indicators
+
+    # Pre-calculate common indicators once for all strategies
+    worker_device = device if device is not None else torch.device("cpu")
+    df_with_common = get_common_indicators(df_in.copy(), device=worker_device)
 
     # We use 'dynamic' as the default aggr for benchmarking
     aggr = aggrs[0] if aggrs else 'dynamic'
@@ -1817,7 +1821,8 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
         # 1. Calculate signals once for the entire dataset
         try:
-            full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
+            # Re-use the common indicators pre-calculated above
+            full_df = get_signals(df_with_common.copy(), mode_settings, is_backtest=True)
         except Exception:
             continue
 
