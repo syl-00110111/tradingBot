@@ -7,5 +7,5 @@ api.json
 trades_history_*.json
 benchmark_cache.json
 
-ohlcv_cache.pkl.gz
+ohlcv_cache.pkl
 bot_data_backup.zip
