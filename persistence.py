@@ -237,6 +237,9 @@ class OHLCVCacheManager:
         return os.path.join(OHLCV_DIR, f"{safe_symbol}_{timeframe}.pkl")
 
     def get(self, symbol, timeframe):
+        """
+        Retrieves individual candle data for a pair/timeframe.
+        """
         path = self._get_path(symbol, timeframe)
         if not os.path.exists(path):
             load_from_archive(path)
@@ -414,7 +417,11 @@ class CacheManager:
         safe_symbol = symbol.replace('/', '_')
         return os.path.join(CACHE_DIR, f"bench_{safe_symbol}_{term}.json")
 
-    def get(self, symbol, term, max_age_seconds):
+    def get(self, symbol, term, max_age_seconds=None):
+        """
+        Retrieves cached benchmark patterns.
+        If max_age_seconds is None, returns the raw entry (data + timestamp) for custom validation.
+        """
         path = self._get_path(symbol, term)
         if not os.path.exists(path):
             load_from_archive(path)
@@ -424,6 +431,8 @@ class CacheManager:
                 try:
                     with open(path, 'r') as f:
                         entry = json.load(f)
+                        if max_age_seconds is None:
+                            return entry
                         if time.time() - entry['timestamp'] < max_age_seconds:
                             return entry['data']
                 except Exception: pass

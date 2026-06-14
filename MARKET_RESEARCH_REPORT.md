@@ -56,13 +56,10 @@ This report details the research into 1-3 cryptocurrency exchanges per continent
    - **Status:** Supported via existing `Binance` and `Kraken` implementations.
 
 ## Implementation Notes
-To integrate these exchanges, update the `exchange_handler.py` to include specific subclasses for these exchanges if they require custom logic (like `KrakenExchange` or `BitvavoExchange`). For most, the base `BinanceExchange` logic (which uses standard CCXT methods) can be adapted by changing the exchange ID.
+To integrate these exchanges, update the `exchange_handler.py` to include specific subclasses for these exchanges if they require custom logic (like `KrakenExchange` or `BitvavoExchange`). For most, the base `CCXTExchange` logic (which uses standard CCXT methods) can be adapted by changing the exchange ID.
 
 ```python
-class CoinbaseExchange(BinanceExchange):
+class CoinbaseExchange(CCXTExchange):
     def __init__(self, api_key, api_secret):
-        self.exchange = ThrottledExchange(ccxt.coinbaseexchange({
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'session': create_ccxt_session()
-        }))
+        super().__init__('coinbaseexchange', api_key, api_secret)
 ```

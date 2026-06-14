@@ -768,12 +768,14 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
     """
     Retrieves candles incrementally using ohlcv_cache_manager.
     If candles exist in cache, only the gap is fetched from the exchange.
+    Returns (data, new_candles_count)
     """
     cached_data = ohlcv_cache_manager.get(symbol, timeframe)
     if isinstance(cached_data, pd.DataFrame):
          cached_data = cached_data.values.tolist()
 
     updated = False
+    new_count = 0
     if cached_data:
         last_ts = cached_data[-1][0]
         # Fetch gap candles starting from the last cached timestamp
@@ -781,6 +783,7 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
         try:
             new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=last_ts + 1)
             if new_candles:
+                 new_count = len(new_candles)
                  # Deduplicate and merge
                  cached_data.extend([c for c in new_candles if c[0] > last_ts])
                  # Keep only the last 100,000 for stability
@@ -793,13 +796,15 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
         # Fallback to standard fetch if no cache
         new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         if new_candles:
+            new_count = len(new_candles)
             cached_data = new_candles
             updated = True
 
     if updated:
          ohlcv_cache_manager.set(symbol, timeframe, cached_data)
 
-    return cached_data[-limit:] if limit and len(cached_data) > limit else cached_data
+    data = cached_data[-limit:] if limit and len(cached_data) > limit else cached_data
+    return data, new_count
 
 def main():
     global ohlcv_cache_manager
@@ -1079,7 +1084,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     patterns = pattern_manager.get_patterns(symbol)
     term = global_config.get('_active_term', 'short'); term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
     timeframe = term_cfg.get('timeframe', '5m')
-    ohlcv = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500)
+    ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500)
     if not ohlcv: return None
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     with bot_lock:
@@ -1602,7 +1607,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     if df_in is None:
         # Use a large buffer for indicator stability
         try:
-            ohlcv = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=limit)
+            ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=limit)
         except Exception as e:
             console.print(f"[red]Error fetching OHLCV for {symbol} ({timeframe}): {e}[/]")
             return None
@@ -1908,14 +1913,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
     cache_mgr = CacheManager()
 
-    # Cache validity mapping (1hr per evaluation term)
     terms_cfg = config.get('expected_profit_terms', {})
-    validity_map = {
-        'short': terms_cfg.get('short', {}).get('duration_hours', 1) * 3600,
-        'medium': terms_cfg.get('medium', {}).get('duration_hours', 24) * 3600,
-        'long': terms_cfg.get('long', {}).get('duration_hours', 168) * 3600
-    }
-
     symbols = [args.symbol] if (hasattr(args, 'symbol') and args.symbol) else list(config.get('pairs', {}).keys())
 
     # Best per symbol
@@ -1930,105 +1928,106 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     }
 
     optimization_map = {}
-    # Use the currency from base_bet for display
     base_bet_curr = get_base_currency(None, config)
 
-    # If explicit benchmark mode (no term_override and not backtest), we scan all terms
-    # Otherwise we scan just the requested term.
-    # Actually, to fulfill Instruction 3, we should ensure we scan what is requested.
     term_to_test = term_override if term_override else getattr(args, 'term', 'short')
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
     timeframe = term_cfg.get('timeframe', '5m')
 
+    # Step 1: Pre-fetch OHLCV for all symbols and track incremental counts
+    symbol_data_map = {}
+    incremental_info = {} # sym -> (new_count, total_count)
+
+    # Date filtering logic
+    since_ts = None
+    if args.since:
+         try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
+         except Exception: console.print(f"[red]Invalid --since format. Use YYYY-MM-DD HH:MM[/]")
+
+    msg = f"Updating OHLCV data for {len(symbols)} symbol(s)..."
+    if status: status.update(f"[bold blue]{msg}")
+    else: console.print(f"[bold blue]{msg}")
+
+    for i, symbol in enumerate(symbols):
+        if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Updating history for {symbol}...")
+        try:
+            target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
+            current_since = since_ts if since_ts else target_ts
+
+            existing = ohlcv_cache_manager.get(symbol, timeframe)
+            if isinstance(existing, pd.DataFrame): existing = existing.values.tolist()
+
+            if not existing or (existing[0][0] > current_since):
+                all_ohlcv = []
+                while True:
+                    try:
+                        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
+                    except Exception as e:
+                        logging.warning(f"[{symbol}] Failed to fetch OHLCV: {e}")
+                        break
+                    if not ohlcv or len(ohlcv) == 0: break
+                    all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
+                    if len(all_ohlcv) > 40000: break
+                    if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Initial history for {symbol}: {len(all_ohlcv)} candles...")
+                if all_ohlcv: ohlcv_cache_manager.set(symbol, timeframe, all_ohlcv)
+
+            full_history, new_count = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=40000)
+            if full_history:
+                df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                symbol_data_map[symbol] = df
+                incremental_info[symbol] = (new_count, len(full_history))
+        except Exception as e:
+            if not status: console.print(f"[red]Failed to fetch {symbol}: {e}")
+
+    # Step 2: Decide whether to reuse cached benchmarks or re-bench
     symbols_to_bench = []
+    now_ts = time.time()
+
     for symbol in symbols:
-        # Reuse previous benchmark results from cache if valid
-        cached_patterns = cache_mgr.get(symbol, term_to_test, validity_map.get(term_to_test, 3600))
-        if cached_patterns:
-            # Context-based invalidation: check if market context evolved too much
-            best = cached_patterns[0]
-            try:
-                # Small limit to minimize bandwidth and rate-limit risk
-                ohlcv_now = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=20)
-                if ohlcv_now:
-                    df_now = pd.DataFrame(ohlcv_now, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_now = get_signals(df_now, {"device": device}, is_backtest=False)
-                    # Reuse similarity logic for invalidation
-                    sim = calculate_similarity(df_now.iloc[-len(best['prices']):] if len(df_now) >= len(best['prices']) else df_now, best, device=device)
-                    if sim < 0.70:
-                         logging.info(f"[{symbol}] Cache invalidated: Market context evolved too much (sim: {sim:.2f})")
-                         cache_mgr.delete(symbol, term_to_test)
-                         symbols_to_bench.append(symbol)
-                         continue
-            except Exception as e:
-                logging.warning(f"[{symbol}] Failed to verify cache context: {e}")
+        if symbol not in symbol_data_map: continue
 
-            best['is_cached'] = True
-            best_for_symbol = best.copy()
-            best_per_symbol[symbol] = best_for_symbol
-            optimization_map[symbol] = best
+        # Load full cache entry to get timestamp
+        cache_entry = cache_mgr.get(symbol, term_to_test)
 
-            # Print cached result info
-            period_str = f" [dim](From {best.get('start_time')} to {best.get('end_time')})[/]"
-            console.print(f"[bold green][{symbol}][/] Using cached benchmark: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Bench: {format_price(best.get('avg_bench_profit', best['profit']))} {base_bet_curr}{period_str}")
+        should_rebench = True
+        if cache_entry:
+            cached_patterns = cache_entry['data']
+            benchmark_ts = cache_entry['timestamp']
+            new_count, total_count = incremental_info.get(symbol, (0, 0))
 
-            if data_manager:
-                pattern_manager.set_patterns(symbol, cached_patterns)
-            continue
-        symbols_to_bench.append(symbol)
+            df = symbol_data_map[symbol]
+
+            # Instruction: consider it valid even if old, EXCEPT if:
+            # 1. Number of newly fetched candles > number of candles previously stored
+            # 2. Benchmark age > 2 * (Duration of stored history)
+
+            prev_stored_count = total_count - new_count
+            invalidation_1 = new_count > prev_stored_count
+
+            total_history_duration = df['timestamp'].iloc[-1].timestamp() - df['timestamp'].iloc[0].timestamp()
+            invalidation_2 = (now_ts - benchmark_ts) > (2 * total_history_duration)
+
+            if not invalidation_1 and not invalidation_2:
+                should_rebench = False
+                best = cached_patterns[0]
+                best['is_cached'] = True
+                best_per_symbol[symbol] = best.copy()
+                optimization_map[symbol] = best
+
+                period_str = f" [dim](From {best.get('start_time')} to {best.get('end_time')})[/]"
+                console.print(f"[bold green][{symbol}][/] Reusing cached benchmark: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Bench: {format_price(best.get('avg_bench_profit', best['profit']))} {base_bet_curr}{period_str}")
+
+                if data_manager:
+                    pattern_manager.set_patterns(symbol, cached_patterns)
+
+        if should_rebench:
+            symbols_to_bench.append(symbol)
 
     if symbols_to_bench:
         msg = f"Benchmarking all strategies for {len(symbols_to_bench)} symbol(s) using multi-processing..."
         if status: status.update(f"[bold blue]{msg}")
         else: console.print(f"[bold blue]{msg}")
-
-        # Pre-fetch historical data for all symbols in the process
-        symbol_data_map = {}
-        term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
-        timeframe = term_cfg.get('timeframe', '5m')
-
-        # Date filtering logic
-        since_ts = None
-        if args.since:
-             try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
-             except Exception: console.print(f"[red]Invalid --since format. Use YYYY-MM-DD HH:MM[/]")
-
-        for i, symbol in enumerate(symbols_to_bench):
-            if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching history for {symbol}...")
-            try:
-                # Use incremental fetching to fill the gap
-                target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
-                current_since = since_ts if since_ts else target_ts
-
-                # Fetch base data if cache is empty or older than target_ts
-                existing = ohlcv_cache_manager.get(symbol, timeframe)
-                if isinstance(existing, pd.DataFrame):
-                     existing = existing.values.tolist()
-
-                if not existing or (existing[0][0] > current_since):
-                    all_ohlcv = []
-                    while True:
-                        try:
-                            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
-                        except Exception as e:
-                            logging.warning(f"[{symbol}] Failed to fetch OHLCV at {current_since}: {e}")
-                            break
-                        if not ohlcv or len(ohlcv) == 0: break
-                        all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
-                        if len(all_ohlcv) > 40000: break
-                        if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Initial history for {symbol}: {len(all_ohlcv)} candles...")
-                    if all_ohlcv:
-                        ohlcv_cache_manager.set(symbol, timeframe, all_ohlcv)
-
-                # Now perform incremental gap filling
-                full_history = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=40000)
-
-                if full_history:
-                    df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    symbol_data_map[symbol] = df
-            except Exception as e:
-                if not status: console.print(f"[red]Failed to fetch {symbol}: {e}")
 
         def handle_bench_shutdown(sig, frame):
              shutdown_event.set()

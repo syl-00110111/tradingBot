@@ -54,6 +54,7 @@ Store your credentials and preferred exchange:
 ```json
 {
     "max_open_positions": 10,
+    "// Note": "base_bet: % of available quote asset (USDT/USDC/etc) per trade. '10%' uses 10% of balance.",
     "base_bet": "10%",
     "global_risk_multiplier": 1.2
 }
