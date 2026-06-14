@@ -2051,6 +2051,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
                     if patterns:
+                        msg_target = status.console if status else console
                         if len(patterns) < 10: msg_target.print(f'[bold yellow]Warning: {sym} has only {len(patterns)} successful patterns (history too short).[/]')
                         # Instruction 4: Bench is average of techniques >= 0.22 base_bet_curr
                         winning_patterns = [p for p in patterns if p['profit'] >= 0.22]
@@ -2071,7 +2072,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         # Always save patterns to benchmark_cache.json
                         cache_mgr.set(sym, term_to_test, patterns)
 
-                        msg_target = status.console if status else console
                         if term_override:
                             optimization_map[sym] = best_for_symbol
                             msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} {base_bet_curr}{period_str}")
