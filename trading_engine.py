@@ -61,11 +61,13 @@ class TradingEngine:
         # Handle currency conversion if base_bet currency differs from pair's quote currency
         if curr_part != base_currency and exchange:
             try:
-                # We need to know the price of the base_bet currency in terms of the pair's quote currency
-                # Example: base_bet is "20.0 {base_bet_curr}", trading BTC/USDC. We need {base_bet_curr}/USDC price.
                 ticker = exchange.fetch_ticker(f"{curr_part}/{base_currency}")
                 if ticker and ticker.get("last"):
                     raw_val *= ticker["last"]
+                else:
+                    ticker_inv = exchange.fetch_ticker(f"{base_currency}/{curr_part}")
+                    if ticker_inv and ticker_inv.get("last"):
+                        raw_val /= ticker_inv["last"]
             except:
                 logging.warning(f"Could not convert {curr_part} to {base_currency}. Using raw value.")
 
