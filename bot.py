@@ -767,43 +767,93 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
     """
     Retrieves candles incrementally using ohlcv_cache_manager.
-    If candles exist in cache, only the gap is fetched from the exchange.
+    If candles exist in cache, it bridges gaps both forwards and backwards.
     Returns (data, new_candles_count)
     """
     cached_data = ohlcv_cache_manager.get(symbol, timeframe)
     if isinstance(cached_data, pd.DataFrame):
          cached_data = cached_data.values.tolist()
+    if not cached_data: cached_data = []
 
-    updated = False
     new_count = 0
+    updated = False
+
+    # 1. Forward Update (New candles since last cache)
     if cached_data:
         last_ts = cached_data[-1][0]
-        # Fetch gap candles starting from the last cached timestamp
-        # since parameter should be one ms after last_ts
         try:
             new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=last_ts + 1)
             if new_candles:
-                 new_count = len(new_candles)
-                 # Deduplicate and merge
+                 new_count += len(new_candles)
                  cached_data.extend([c for c in new_candles if c[0] > last_ts])
-                 # Keep only the last 100,000 for stability
-                 if len(cached_data) > 100000:
-                      cached_data = cached_data[-100000:]
                  updated = True
         except Exception as e:
-            logging.warning(f"[{symbol}] Incremental fetch failed: {e}")
-    else:
-        # Fallback to standard fetch if no cache
-        new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-        if new_candles:
-            new_count = len(new_candles)
-            cached_data = new_candles
+            logging.warning(f"[{symbol}] Forward incremental fetch failed: {e}")
+
+    # 2. Backward Update (If 'since' is earlier than cache start)
+    if since and (not cached_data or cached_data[0][0] > since):
+        target_since = since
+        backward_candles = []
+        while True:
+            try:
+                # We limit backward fetch to 1000 at a time to be polite
+                limit_back = 1000
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=target_since, limit=limit_back)
+                if not ohlcv: break
+
+                # Check if we've reached the existing cache
+                reach_cache = False
+                if cached_data:
+                    first_cached_ts = cached_data[0][0]
+                    filtered = [c for c in ohlcv if c[0] < first_cached_ts]
+                    if len(filtered) < len(ohlcv): reach_cache = True
+                    ohlcv = filtered
+
+                if not ohlcv: break
+                backward_candles.extend(ohlcv)
+                new_count += len(ohlcv)
+                target_since = ohlcv[-1][0] + 1
+
+                # Safety limits
+                if reach_cache or len(backward_candles) > 100000: break
+            except Exception as e:
+                logging.warning(f"[{symbol}] Backward incremental fetch failed: {e}")
+                break
+
+        if backward_candles:
+            cached_data = backward_candles + cached_data
             updated = True
 
+    # 3. Fallback: if cache still empty and since was not provided
+    if not cached_data:
+        try:
+            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit if limit else 500)
+            if new_candles:
+                new_count = len(new_candles)
+                cached_data = new_candles
+                updated = True
+        except Exception as e:
+             logging.warning(f"[{symbol}] Initial fetch failed: {e}")
+
+    # Final maintenance
     if updated:
+         # Deduplicate by timestamp and sort
+         df_tmp = pd.DataFrame(cached_data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+         df_tmp.drop_duplicates(subset='ts', keep='first', inplace=True)
+         df_tmp.sort_values('ts', inplace=True)
+         cached_data = df_tmp.values.tolist()
+
+         # Cap history at 150k candles for stability
+         if len(cached_data) > 150000:
+              cached_data = cached_data[-150000:]
+
          ohlcv_cache_manager.set(symbol, timeframe, cached_data)
 
-    data = cached_data[-limit:] if limit and len(cached_data) > limit else cached_data
+    # Return "Everything" if limit is None or 0
+    if limit is None or limit <= 0:
+        return cached_data, new_count
+
+    data = cached_data[-limit:] if len(cached_data) > limit else cached_data
     return data, new_count
 
 def main():
@@ -1964,24 +2014,10 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
             current_since = since_ts if since_ts else target_ts
 
-            existing = ohlcv_cache_manager.get(symbol, timeframe)
-            if isinstance(existing, pd.DataFrame): existing = existing.values.tolist()
+            # Use unified incremental fetch which now handles backward gaps too
+            # Passing limit=None ensures we get "Everything" since June 2024
+            full_history, new_count = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=None, since=current_since)
 
-            if not existing or (existing[0][0] > current_since):
-                all_ohlcv = []
-                while True:
-                    try:
-                        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
-                    except Exception as e:
-                        logging.warning(f"[{symbol}] Failed to fetch OHLCV: {e}")
-                        break
-                    if not ohlcv or len(ohlcv) == 0: break
-                    all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
-                    if len(all_ohlcv) > 40000: break
-                    if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Initial history for {symbol}: Downloading {len(all_ohlcv)}/40000 candles...")
-                if all_ohlcv: ohlcv_cache_manager.set(symbol, timeframe, all_ohlcv)
-
-            full_history, new_count = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=40000)
             if new_count > 0:
                 msg = f"[bold cyan][{i+1}/{len(symbols)}] Downloading {new_count} new candles for {symbol} (Total: {len(full_history)})"
                 if status: status.update(msg)
