@@ -1,0 +1,9 @@
+Hardware optimization level detected: AVX
+Warning: GPU acceleration is disabled or no compatible GPU found.
+Computations will run on CPU, which can be significantly slower (minutes to
+hours) for the first benchmarks.
+Please ensure benchmark_cache.json remains intact once finished to avoid
+re-running slow benchmarks.
+
+=== BENCHMARK RECOMMENDATIONS ===
+No successful patterns (> 0.022 USDT) were found in the scanned historical data.
