@@ -1,4 +1,4 @@
-# 🛸 Cryptocurrencies Trading Bot: Advanced Quantitative & Scientific Suite
+# 🛸 Crypto-Currencies MultiPlatform Trading Bot: Advanced Quantitative & Scientific Suite
 
 An industrial-grade trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, **Bitvavo**, **Coinbase**, **Gemini**, **Mercado Bitcoin**, **Bitso**, **Bitstamp**, **WhiteBIT**, **Indodax**, **Upbit**, **Luno**, **Independent Reserve**, and **Btc Markets**.
 
@@ -54,8 +54,7 @@ Store your credentials and preferred exchange:
 ```json
 {
     "max_open_positions": 10,
-    "// Explanation": "base_bet now supports currency suffix, e.g., '20.0 USDT' or '50.0 USDC'",
-    "base_bet": "20.0 USDT",
+    "base_bet": "10%",
     "global_risk_multiplier": 1.2
 }
 ```

@@ -1,7 +1,6 @@
 {
     "max_open_positions": 10,
-    "// Explanation": "base_bet now supports currency suffix, e.g., '20.0 USDT' or '50.0 USDC'",
-    "base_bet": "20.0 USDT",
+    "base_bet": "10%",
     "global_risk_multiplier": 1.2,
     "profit_thresholds": {
         "min_pattern_profit": 0.015,

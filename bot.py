@@ -1046,8 +1046,7 @@ def main():
         shutdown_event.set()
     finally:
         shutdown_event.set()
-        from persistence import create_consolidated_archive, archiver
-        create_consolidated_archive()
+        from persistence import archiver
         archiver.stop()
 
     logging.info("Bot stopped gracefully.")
@@ -2083,8 +2082,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         if best_for_symbol['profit'] > best_overall['total']['profit']:
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
-                from persistence import create_consolidated_archive
-                create_consolidated_archive()
                 signal.signal(signal.SIGINT, original_handler)
 
     # If we are in optimization mode for live/sim, return the map

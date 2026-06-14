@@ -34,8 +34,9 @@ class AsyncArchiver(threading.Thread):
                 while not self.queue.empty():
                     self.queue.get_nowait()
 
-                logging.debug("Async Archiver: Consolidating archive...")
-                create_consolidated_archive(delete_after=True)
+                logging.debug("Async Archiver: Updating archive...")
+                # Async updates don't delete from disk to avoid the overwrite-empty-zip bug
+                create_consolidated_archive(delete_after=False)
 
                 self.queue.task_done()
             except queue.Empty:
@@ -49,9 +50,10 @@ class AsyncArchiver(threading.Thread):
     def stop(self):
         self._stop_event.set()
         if self.is_alive():
-            # Final consolidation on stop
+            # Final consolidation on stop - here we CAN delete after archiving
+            logging.info("Async Archiver: Finalizing archive before exit...")
             create_consolidated_archive(delete_after=True)
-            self.join(timeout=2)
+            self.join(timeout=5)
 
 # Global archiver instance
 archiver = AsyncArchiver()
@@ -59,8 +61,8 @@ archiver.start()
 
 def create_consolidated_archive(delete_after=True):
     """
-    Creates/updates a compressed archive of all runtime data files and deletes the source files.
-    Includes the cache/ directory and its contents.
+    Creates/updates a compressed archive of all runtime data files.
+    Ensures that existing data in the archive is preserved if not present on disk.
     """
     files_to_archive = [
         'success_patterns.json',
@@ -69,43 +71,73 @@ def create_consolidated_archive(delete_after=True):
         'trades_history_simulation.json',
         'trades_history_sell.json'
     ]
+    temp_archive = ARCHIVE_NAME + '.tmp'
+
     with persistence_lock:
         try:
-            # We perform a fresh write to ensure consistency as per "Consolidated"
-            with zipfile.ZipFile(ARCHIVE_NAME, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Archive individual files
-                for file in files_to_archive:
-                    if os.path.exists(file):
-                        zipf.write(file)
+            # Determine what's on disk
+            on_disk = {}
+            for f in files_to_archive:
+                if os.path.exists(f):
+                    on_disk[f] = f
 
-                # Archive cache directory
-                if os.path.exists(CACHE_DIR):
-                    for root, dirs, files in os.walk(CACHE_DIR):
-                        for file in files:
-                            filepath = os.path.join(root, file)
-                            zipf.write(filepath)
+            if os.path.exists(CACHE_DIR):
+                for root, dirs, files in os.walk(CACHE_DIR):
+                    for file in files:
+                        filepath = os.path.join(root, file)
+                        # Normalize path for zip comparison
+                        norm_path = filepath.replace('\\', '/')
+                        on_disk[norm_path] = filepath
+
+            if not on_disk and not os.path.exists(ARCHIVE_NAME):
+                return
+
+            # Implementation of Merge/Update logic to avoid data loss
+            if os.path.exists(ARCHIVE_NAME):
+                with zipfile.ZipFile(ARCHIVE_NAME, 'r') as old_zip:
+                    with zipfile.ZipFile(temp_archive, 'w', zipfile.ZIP_DEFLATED) as new_zip:
+                        # 1. Copy everything from old zip that is NOT being updated from disk
+                        for item in old_zip.infolist():
+                            if item.filename not in on_disk:
+                                new_zip.writestr(item, old_zip.read(item.filename))
+
+                        # 2. Add/Update everything from disk
+                        for norm_path, real_path in on_disk.items():
+                            new_zip.write(real_path, norm_path)
+
+                # Atomic swap
+                if os.path.exists(ARCHIVE_NAME):
+                    os.remove(ARCHIVE_NAME)
+                os.rename(temp_archive, ARCHIVE_NAME)
+            else:
+                # Fresh archive
+                with zipfile.ZipFile(ARCHIVE_NAME, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for norm_path, real_path in on_disk.items():
+                        zipf.write(real_path, norm_path)
 
             if delete_after:
-                # Delete source files and cache as requested (bot design pattern)
-                for file in files_to_archive:
-                    if os.path.exists(file):
-                        try: os.remove(file)
+                # Standard Bot Design: archive then clean disk
+                for f in files_to_archive:
+                    if os.path.exists(f):
+                        try: os.remove(f)
                         except: pass
 
                 if os.path.exists(CACHE_DIR):
                     try: shutil.rmtree(CACHE_DIR)
                     except: pass
 
-                # Re-ensure directories exist for next write
+                # Re-ensure directories exist for next disk write phase
                 os.makedirs(OHLCV_DIR, exist_ok=True)
 
         except Exception as e:
             logging.error(f"Failed to create consolidated archive: {e}")
+            if os.path.exists(temp_archive):
+                try: os.remove(temp_archive)
+                except: pass
 
 def load_from_archive(filename=None):
     """
-    Extracts files from the archive. If filename provided, only extracts that one.
-    If filename is None, extracts everything including the cache/ directory.
+    Extracts files from the archive.
     """
     if not os.path.exists(ARCHIVE_NAME):
         return False
@@ -122,7 +154,7 @@ def load_from_archive(filename=None):
 
                 # Extract everything
                 zipf.extractall()
-                # Re-ensure OHLCV_DIR exists
+                # Re-ensure directory structure
                 os.makedirs(OHLCV_DIR, exist_ok=True)
                 return True
         except:
@@ -130,9 +162,7 @@ def load_from_archive(filename=None):
 
 def migrate_fresh_files_to_archive():
     """
-    Compares flat files on disk with the consolidated archive.
-    If disk files are fresher or new, they are moved into the archive.
-    The archive is consolidated before any computation phase.
+    Compares disk files with the archive and consolidates if disk is newer.
     """
     files_to_check = [
         'success_patterns.json',
@@ -142,12 +172,11 @@ def migrate_fresh_files_to_archive():
         'trades_history_sell.json'
     ]
 
-    # If no archive exists, create one from current disk state
     if not os.path.exists(ARCHIVE_NAME):
         any_file = any(os.path.exists(f) for f in files_to_check) or os.path.exists(CACHE_DIR)
         if any_file:
             logging.info("Initializing bot archive from disk files...")
-            create_consolidated_archive()
+            create_consolidated_archive(delete_after=True)
         return
 
     with persistence_lock:
@@ -164,7 +193,6 @@ def migrate_fresh_files_to_archive():
 
             if not all_disk_files: return
 
-            # Open archive to compare timestamps
             with zipfile.ZipFile(ARCHIVE_NAME, 'r') as zipf:
                 archive_members = {info.filename: info for info in zipf.infolist()}
 
@@ -175,25 +203,23 @@ def migrate_fresh_files_to_archive():
                     if norm_path not in archive_members:
                         updated = True; break
 
-                    # Compare disk vs archive timestamp
                     z_time = archive_members[norm_path].date_time
                     archive_mtime = time.mktime((*z_time, 0, 0, -1))
 
-                    if disk_mtime > (archive_mtime + 2): # 2s buffer for FAT/ZIP precision
+                    if disk_mtime > (archive_mtime + 2):
                         updated = True; break
 
             if updated:
                 logging.info("Found fresher or new data files on disk. Consolidating into archive...")
                 create_consolidated_archive(delete_after=True)
             else:
-                # Files are consistent, clean up disk to force use of archive (Standard Bot Design)
+                # Disk matches archive, clean up to avoid confusion
                 for f in all_disk_files:
                      try: os.remove(f)
                      except: pass
                 if os.path.exists(CACHE_DIR):
                      try: shutil.rmtree(CACHE_DIR)
                      except: pass
-                # Re-ensure directories exist
                 os.makedirs(OHLCV_DIR, exist_ok=True)
         except Exception as e:
             logging.error(f"Error during archive consolidation: {e}")
@@ -227,12 +253,9 @@ class OHLCVCacheManager:
         path = self._get_path(symbol, timeframe)
         with persistence_lock:
             try:
-                # Ensure directory exists before writing
                 os.makedirs(OHLCV_DIR, exist_ok=True)
-                # Write to disk
                 with open(path, 'wb') as f:
                     pickle.dump(data, f)
-                # Trigger async archive
                 archiver.trigger()
             except Exception as e:
                 logging.error(f"Failed to save OHLCV cache for {symbol}: {e}")
@@ -284,12 +307,9 @@ class DataManager:
                         data = json.load(f)
                         if "open_positions" not in data: data["open_positions"] = {}
                         if "trade_history" not in data: data["trade_history"] = []
-                        # Migration: convert single position (dict) to list of positions
                         for sym, pos in data["open_positions"].items():
                             if isinstance(pos, dict):
                                 data["open_positions"][sym] = [pos]
-
-                            # Add missing keys to all positions in the list
                             for p in data["open_positions"][sym]:
                                 if "sell_signals_received" not in p: p["sell_signals_received"] = 0
                                 if "last_sell_signal_candle_ts" not in p: p["last_sell_signal_candle_ts"] = None
@@ -369,7 +389,6 @@ class DataManager:
     def get_open_positions(self): return self.data["open_positions"]
     def get_positions(self, symbol): return self.data["open_positions"].get(symbol, [])
     def get_position(self, symbol):
-        # For legacy compatibility, return the first position or None
         pos_list = self.get_positions(symbol)
         return pos_list[0] if pos_list else None
 
@@ -383,7 +402,7 @@ class DataManager:
 
 class CacheManager:
     """
-    Manages benchmark results using individual files for each symbol/term context.
+    Manages benchmark results using individual files.
     """
     def __init__(self):
         if not os.path.exists(CACHE_DIR):
@@ -417,9 +436,9 @@ class CacheManager:
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 with open(path, 'w') as f:
                     json.dump({'timestamp': time.time(), 'data': data}, f, indent=4)
+                archiver.trigger()
             except Exception as e:
                 logging.error(f"Failed to set cache for {symbol}/{term}: {e}")
-        archiver.trigger()
 
     def delete(self, symbol, term):
         path = self._get_path(symbol, term)
@@ -427,8 +446,8 @@ class CacheManager:
             if os.path.exists(path):
                 try:
                     os.remove(path)
+                    archiver.trigger()
                 except: pass
-        archiver.trigger()
 
 class MonteCarloCacheManager:
     """
@@ -465,13 +484,10 @@ class MonteCarloCacheManager:
                 with open(path, 'w') as f:
                     json.dump({'score': score, 'timestamp': time.time()}, f)
                 self.cleanup_old_cache(symbol, timeframe)
+                archiver.trigger()
             except Exception: pass
-        archiver.trigger()
 
     def cleanup_old_cache(self, symbol, timeframe, keep=5):
-        """
-        Keeps only the most recent 'keep' MC cache files for a given symbol and timeframe.
-        """
         try:
             safe_symbol = symbol.replace('/', '_')
             prefix = f"mc_{safe_symbol}_{timeframe}_"
@@ -479,11 +495,8 @@ class MonteCarloCacheManager:
                 files = [f for f in os.listdir(CACHE_DIR) if f.startswith(prefix) and f.endswith(".json")]
                 if len(files) <= keep:
                     return
-
-                # Sort by modification time which is safer
                 full_paths = [os.path.join(CACHE_DIR, f) for f in files]
                 full_paths.sort(key=os.path.getmtime, reverse=True)
-
                 for old_file in full_paths[keep:]:
                     try:
                         os.remove(old_file)
