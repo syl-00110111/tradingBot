@@ -1,10 +1,10 @@
-# 🛸 Crypto-Currencies MultiPlatform Trading Bot: Advanced Quantitative & Scientific Suite
+# 🛸 Cryptocurrencies multiplatform trading bot
 
-An industrial-grade trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, **Bitvavo**, **Coinbase**, **Gemini**, **Mercado Bitcoin**, **Bitso**, **Bitstamp**, **WhiteBIT**, **Indodax**, **Upbit**, **Luno**, **Independent Reserve**, and **Btc Markets**.
+A trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, **Bitvavo**, **Coinbase**, **Gemini**, **Mercado Bitcoin**, **Bitso**, **Bitstamp**, **WhiteBIT**, **Indodax**, **Upbit**, **Luno**, **Independent Reserve**, and **Btc Markets**.
 
 ---
 
-## 🔬 Scientific Foundations
+## 🔬 Foundations
 This bot implements strategies and logic recommended by leading empirical studies in the cryptocurrency markets:
 
 - **Success Pattern Matching (SPM)**: The bot scans historical candles backwards to identify success patterns. It then uses GPU-accelerated Pearson correlation and technical state similarity (RSI/ADX) to activate trading only when current market conditions match these proven windows.
