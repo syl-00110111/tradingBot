@@ -109,8 +109,13 @@ def get_signals(df, mode_config, is_backtest=False):
 
     # Common indicators for tendency and background analysis (Expert Mode)
     if df.empty: return finalize_signals(df)
-    # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
-    use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
+
+    # Standardize hardware acceleration: enable MKLDNN if on CPU and supported
+    if device.type == 'cpu' and torch.backends.mkldnn.is_available():
+        torch.backends.mkldnn.enabled = True
+
+    use_acceleration = (device.type != 'cpu') or (device.type == 'cpu' and torch.backends.mkldnn.enabled)
+
     if use_acceleration:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
         high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
@@ -150,18 +155,19 @@ def get_signals(df, mode_config, is_backtest=False):
     df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
     df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
 
-    # Calculate tendency (used for UI)
-    def get_tendency(row):
-        ema_diff = row['ema_f'] - row['ema_s']
-        price = row['close']
-        macd_hist = row['macd_hist']
-        if price == 0 or np.isnan(ema_diff) or np.isnan(macd_hist): return "Neutral"
-        if abs(ema_diff) / price < 0.001: return "Range"
-        if ema_diff > 0 and macd_hist > 0: return "Bullish"
-        if ema_diff < 0 and macd_hist < 0: return "Bearish"
-        return "Neutral"
+    # Calculate tendency (Vectorized for performance)
+    ema_diff = df['ema_f'] - df['ema_s']
+    price = df['close']
+    macd_hist = df['macd_hist']
 
-    df['tendency'] = df.apply(get_tendency, axis=1)
+    conditions = [
+        (price == 0) | ema_diff.isna() | macd_hist.isna(),
+        (ema_diff.abs() / price.replace(0, 1)) < 0.001,
+        (ema_diff > 0) & (macd_hist > 0),
+        (ema_diff < 0) & (macd_hist < 0)
+    ]
+    choices = ["Neutral", "Range", "Bullish", "Bearish"]
+    df['tendency'] = np.select(conditions, choices, default="Neutral")
 
     # Strategy Selection
     if df.empty:

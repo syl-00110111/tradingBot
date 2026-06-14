@@ -95,6 +95,31 @@ def format_price(price):
         return f"{price:.3e}"
     return f"{price:.2f}"
 
+def parse_base_bet(config):
+    """
+    Parses base_bet as a percentage of available balance.
+    Returns (percentage as float, "%").
+    """
+    if not config: return 0.10, "%"
+    raw_val = config.get('base_trade_amount', config.get('base_bet', '10%'))
+    if isinstance(raw_val, str):
+        try:
+            val = float(raw_val.replace('%', '').strip())
+            pct = val / 100.0 if val >= 1.0 else val
+            return pct, "%"
+        except ValueError:
+            return 0.10, "%"
+    val = float(raw_val)
+    pct = val / 100.0 if val >= 1.0 else val
+    return pct, "%"
+
+def get_base_currency(symbol, config):
+    """Returns the quote currency for a symbol, or the first configured base currency."""
+    if symbol and '/' in symbol:
+        return symbol.split('/')[1]
+    base_currencies = config.get('base_currencies', ['USDT'])
+    return base_currencies[0] if base_currencies else 'USDT'
+
 class DashboardHandler(logging.Handler):
     def __init__(self, duration=5):
         super().__init__()
@@ -257,9 +282,16 @@ def make_dashboard(global_mode, config):
             candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(sell_proposal_profit)} profit?\n", style="bold yellow")
             candles_text.append("Type 'y' to confirm, 'n' to dismiss. (Auto-close in 1 min)\n\n", style="dim")
             if 'last_20_candles' in data:
-                for c in data['last_20_candles']:
-                    candles_text.append("█", style="red")
-                candles_text.append("\n")
+                prices = data['last_20_candles']
+                min_p, max_p = min(prices), max(prices)
+                diff = max_p - min_p if max_p > min_p else 1.0
+                chart_height = 5
+                for h in reversed(range(chart_height)):
+                    for p in prices:
+                        threshold = min_p + (h / chart_height) * diff
+                        if p >= threshold: candles_text.append("█ ", style="red")
+                        else: candles_text.append("  ")
+                    candles_text.append("\n")
             pairs_panel = Panel(candles_text, title="[bold red]SELL PROPOSAL[/]", border_style="bold red")
         elif show_candles_for_pair:
             symbol = show_candles_for_pair
@@ -267,9 +299,16 @@ def make_dashboard(global_mode, config):
             candles_text = Text()
             candles_text.append(f"Last 20 candles for {symbol}:\n\n", style="bold cyan")
             if 'last_20_candles' in data:
-                for c in data['last_20_candles']:
-                    candles_text.append("█", style="red")
-                candles_text.append("\n")
+                prices = data['last_20_candles']
+                min_p, max_p = min(prices), max(prices)
+                diff = max_p - min_p if max_p > min_p else 1.0
+                chart_height = 8
+                for h in reversed(range(chart_height)):
+                    for p in prices:
+                        threshold = min_p + (h / chart_height) * diff
+                        if p >= threshold: candles_text.append("█ ", style="red")
+                        else: candles_text.append("  ")
+                    candles_text.append("\n")
             else:
                 candles_text.append("Candle data not available yet.\n", style="dim")
             candles_text.append("\nPress any key to return...", style="dim")
@@ -447,9 +486,12 @@ def input_thread_func(exchange, data_manager, engine, config):
                              data['position'] = None
                          play_sound("sell", config)
                     sell_proposal_pair = None
+                    continue
                 elif key.lower() == 'n':
                     sell_proposal_pair = None
-                continue
+                    continue
+            else:
+                sell_proposal_pair = None # Clear if expired
 
             if show_candles_for_pair:
                 show_candles_for_pair = None
@@ -489,14 +531,26 @@ def input_thread_func(exchange, data_manager, engine, config):
                     symbol = sorted_symbols[selected_pair_index]
                     data = bot_state[symbol]
                     if not data.get('position'):
-                        threading.Thread(target=execute_buy, args=(exchange, data_manager, engine, symbol, data, config), daemon=True).start()
+                        def manual_buy_task():
+                            if execute_buy(exchange, data_manager, engine, symbol, data, config):
+                                with bot_lock:
+                                    data['last_action'] = 'BUY'
+                                    data['position'] = data_manager.get_position(symbol)
+                                play_sound("buy", config)
+                        threading.Thread(target=manual_buy_task, daemon=True).start()
             elif key.lower() == 's':
                 # Manual Sell (Instruction 3)
                 if focused_panel == "pairs" and sorted_symbols:
                     symbol = sorted_symbols[selected_pair_index]
                     data = bot_state[symbol]
                     if data.get('position'):
-                        threading.Thread(target=execute_sell, args=(exchange, data_manager, engine, symbol, data, config), daemon=True).start()
+                        def manual_sell_task():
+                            if execute_sell(exchange, data_manager, engine, symbol, data, config):
+                                with bot_lock:
+                                    data['last_action'] = 'SELL'
+                                    data['position'] = None
+                                play_sound("sell", config)
+                        threading.Thread(target=manual_sell_task, daemon=True).start()
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'm':
@@ -683,7 +737,8 @@ def save_ohlcv_cache(cache):
         pickle.dump(cache, f)
 
 def main():
-    from persistence import load_from_archive
+    from persistence import load_from_archive, migrate_fresh_files_to_archive
+    migrate_fresh_files_to_archive()
     load_from_archive()
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
@@ -821,7 +876,7 @@ def main():
         elif args.mode == 'balance':
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             exchange.load_markets()
-            show_balance(exchange)
+            show_balance(exchange, config)
             return
         elif args.mode == 'backtest':
             if not args.symbol:
@@ -849,7 +904,7 @@ def main():
             status.update(f"[bold blue]Optimizing strategies for {args.term} term...")
             opt_map = run_benchmark_mode(exchange, config, args, term_override=args.term, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             # Store profits for prioritization
-            _, base_bet_curr = engine.parse_base_bet()
+            base_bet_curr = get_base_currency(None, config)
             pair_priorities = []
             for sym, data in opt_map.items():
                 # data can be a list (patterns) or a single pattern (legacy cache)
@@ -1023,7 +1078,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'trigger_data': trigger_data
     }
 
-def execute_buy(exchange, data_manager, engine, symbol, data, global_config, balance=None):
+def execute_buy(exchange, data_manager, engine, symbol, data, config, balance=None):
     if balance is None:
         balance = exchange.fetch_balance()
     win_streak = data_manager.get_win_streak(symbol)
@@ -1061,7 +1116,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             fee = order.get('calculated_fee', 0)
 
             total_paid = (exec_amount * exec_price) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {exec_amount:.6f} at {exec_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]}")
+            logging.info(f"[{symbol}] Executing buy of amount {exec_amount:.6f} at {exec_price}, final price paid: {total_paid:.2f} {get_base_currency(symbol, config)}")
             data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
 
             # Immediately update Sellable list (Instruction 2)
@@ -1078,7 +1133,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
     return False
 
-def execute_sell(exchange, data_manager, engine, symbol, data, global_config):
+def execute_sell(exchange, data_manager, engine, symbol, data, config):
     position = data['position']
     should_execute = True
 
@@ -1110,7 +1165,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data, global_config):
                 fee = order.get('calculated_fee', 0)
 
                 total_received = (exec_amount * exec_price) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {exec_amount:.6f} at {exec_price}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]}")
+                logging.info(f"[{symbol}] Executing sell of amount {exec_amount:.6f} at {exec_price}, final price received: {total_received:.2f} {get_base_currency(symbol, config)}")
                 profit = total_received - position.get('entry_total_base', 0)
                 data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
                 return True
@@ -1157,7 +1212,7 @@ def sync_live_positions(exchange, data_manager, config):
     logging.info(f"Syncing positions from {exchange.__class__.__name__} API...")
     balance = exchange.fetch_balance()
     free_balances = balance.get('free', balance)
-    base_currencies = config.get('base_currencies', [parse_base_bet(global_config)[1]])
+    base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR'])
 
     # We clear local cache for Live mode as requested
     data_manager.data['open_positions'] = {}
@@ -1207,7 +1262,11 @@ def sync_live_positions(exchange, data_manager, config):
             logging.warning(f"[{symbol}] Asset found in wallet but no purchase record found via API. Please connect to exchange and sell manually or manage this asset.")
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
-        logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
+        has_base_balance = any(free_balances.get(bc, 0) > 10 for bc in base_currencies)
+        if not has_base_balance:
+            logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
+        else:
+            logging.info("No non-base sellable assets found, but base currency balance is available.")
 
 def get_sellable_assets_sim(data_manager):
     positions = data_manager.get_open_positions()
@@ -1216,8 +1275,7 @@ def get_sellable_assets_sim(data_manager):
 def get_sellable_assets(exchange, config=None):
     balance = exchange.fetch_balance()
     assets = []
-    default_base = parse_base_bet(global_config)[1] if config else 'USDT'
-    base_currencies = config.get('base_currencies', [default_base]) if config else [default_base]
+    base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR']) if config else ['USDT', 'USDC', 'EUR']
     free_balances = balance.get('free', balance)
 
     for asset, amount in free_balances.items():
@@ -1251,7 +1309,7 @@ def interactive_sell(exchange, data_manager, engine, config):
     console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
     balance = exchange.fetch_balance()
     free_balances = balance.get('free', balance)
-    base_currencies = config.get('base_currencies', [parse_base_bet(global_config)[1]])
+    base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR'])
 
     sellable_found = False
     for asset, amount in free_balances.items():
@@ -1293,18 +1351,18 @@ def interactive_sell(exchange, data_manager, engine, config):
             continue
 
         sellable_found = True
-        quote = symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]
+        quote = get_base_currency(symbol, config)
         console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {amount:.6f} | [bold cyan]Value:[/] {format_price(cost)} {quote}")
 
         confirm = input(f"Confirm sell of entire {asset} balance? (y/n): ").lower()
         if confirm == 'y':
-            quote = symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]
+            quote = get_base_currency(symbol, config)
             console.print(f"[yellow]Selling {amount} {asset} at ~{format_price(price)} {quote}...[/]")
             order = exchange.create_order(symbol, 'sell', amount)
             if order:
                 fee = order.get('calculated_fee', 0)
                 total_received = (amount * price) - fee
-                quote = symbol.split('/')[1] if '/' in symbol else parse_base_bet(global_config)[1]
+                quote = get_base_currency(symbol, config)
                 logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {quote}")
                 console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {quote}[/]")
                 play_sound("sell", None)
@@ -1321,12 +1379,12 @@ def interactive_sell(exchange, data_manager, engine, config):
     if not sellable_found:
         console.print("[yellow]No sellable assets (above dust threshold) found in your real wallet.[/]")
 
-def show_balance(exchange):
+def show_balance(exchange, config):
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
     balance = exchange.fetch_balance()
 
     table = Table(title="Asset Inventory", expand=True)
-    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    base_bet_curr = get_base_currency(None, config)
     table.add_column("Asset", style="cyan")
     table.add_column("Free", justify="right")
     table.add_column("Used", justify="right")
@@ -1400,7 +1458,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config)
     plt.ylabel("Price")
 
     p_str = format_price(results['profit'])
-    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    base_bet_curr = get_base_currency(None, config)
     stats_text = f"Profit: {p_str} {base_bet_curr}\nWin Rate: {results['win_rate']:.1%}\nMax DD: {results['max_dd']:.1%}"
     plt.annotate(stats_text, xy=(0.02, 0.95), xycoords='axes fraction',
                  bbox=dict(boxstyle="round", fc="w", alpha=0.8), fontsize=10, verticalalignment='top')
@@ -1491,7 +1549,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
              console.print(f"[yellow]Warning: Only {len(df)} candles available for {symbol}, but term requested {eval_window}.[/]")
 
     # Simulation
-    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    base_percentage, _ = parse_base_bet(config)
     balance = 100.0 # Starting virtual balance
     position = None
     trades = []
@@ -1518,15 +1576,6 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
             position = None
 
         # Buy logic
-        base_bet_cfg = config.get('base_bet', '10.0 USDT')
-        if isinstance(base_bet_cfg, str):
-            try:
-                raw_val = float(base_bet_cfg.split(' ')[0])
-            except ValueError:
-                raw_val = 10.0
-        else:
-            raw_val = float(base_bet_cfg)
-        base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
         trade_amount = balance * base_percentage
         if not position and row['buy_signal'] and balance >= trade_amount:
             fee = trade_amount * fee_rate
@@ -1611,7 +1660,7 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
             console.print("[yellow]No trades executed during backtest. Plot not generated.[/]")
 
         console.print(f"\n[bold yellow]Backtest Summary for {args.symbol}:[/]")
-        _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+        base_bet_curr = get_base_currency(None, config)
         console.print(f"Total Profit: {format_price(results['profit'])} {base_bet_curr}")
         console.print(f"Win Rate: {results['win_rate']:.1%}")
         console.print(f"Max Drawdown: {results['max_dd']:.1%}")
@@ -1623,6 +1672,13 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
+    # Ensure hardware optimization is active in worker process
+    if device and device.type == 'cpu' and torch.backends.mkldnn.is_available():
+        torch.backends.mkldnn.enabled = True
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        torch.set_num_threads(1)
+
     if df_in is None or len(df_in) < 100: return symbol, []
 
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
@@ -1640,7 +1696,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     # Instruction 8: Convert thresholds to base currency
     quote = symbol.split('/')[1]
     threshold_conv = 1.0
-    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    base_bet_curr = get_base_currency(None, config)
     if quote != base_bet_curr:
         try:
             ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
@@ -1737,37 +1793,30 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
                 'tech_state': tech_state
             })
 
-    # Keep top 4 non-overlapping (by time) patterns
+    # Keep top 5 patterns per pair (overlapping allowed)
     patterns.sort(key=lambda x: x['score'], reverse=True)
-    unique_patterns = []
-    seen_times = []
+    top_patterns = []
 
     for p in patterns:
-        if len(unique_patterns) >= 10: break
-        is_overlap = False
-        for st in seen_times:
-            if abs(p['start_ts'] - st) < (eval_window * 60):
-                is_overlap = True
-                break
-        if not is_overlap:
-            # NOW apply Monte Carlo validation to the top patterns only (for speed)
-            # Find the window in df_in
-            # Use searchsorted for O(log N) instead of O(N)
-            p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
-            p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
+        if len(top_patterns) >= 5: break
 
-            if p_start_idx != -1:
-                window_df = df_in.iloc[max(0, p_start_idx-250):p_start_idx+eval_window]
-                mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
-                mc.set_device(device if device is not None else torch.device("cpu"))
-                mc_score = mc.validate_strategy(window_df)
-                p['profit'] *= mc_score
-                p['score'] *= mc_score
+        # apply Monte Carlo validation to the top patterns only (for speed)
+        # Find the window in df_in
+        # Use searchsorted for O(log N) instead of O(N)
+        p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
+        p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
 
-            unique_patterns.append(p)
-            seen_times.append(p.get('start_ts', 0))
+        if p_start_idx != -1:
+            window_df = df_in.iloc[max(0, p_start_idx-250):p_start_idx+eval_window]
+            mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
+            mc.set_device(device if device is not None else torch.device("cpu"))
+            mc_score = mc.validate_strategy(window_df)
+            p['profit'] *= mc_score
+            p['score'] *= mc_score
 
-    return symbol, unique_patterns
+        top_patterns.append(p)
+
+    return symbol, top_patterns
 
 def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
 
@@ -1804,7 +1853,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
     optimization_map = {}
     # Use the currency from base_bet for display
-    _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+    base_bet_curr = get_base_currency(None, config)
 
     # If explicit benchmark mode (no term_override and not backtest), we scan all terms
     # Otherwise we scan just the requested term.
@@ -1862,7 +1911,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_date = datetime(2021, 1, 1); target_ts = int(target_date.timestamp() * 1000)
+            target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
             current_since = since_ts if since_ts else target_ts
             if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching history for {symbol}...")
             try:
@@ -1870,10 +1919,14 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 if cache_key in ohlcv_cache:
                     symbol_data_map[symbol] = ohlcv_cache[cache_key]; continue
                 while True:
-                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
+                    try:
+                        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
+                    except Exception as e:
+                        logging.warning(f"[{symbol}] Failed to fetch OHLCV at {current_since}: {e}")
+                        break
                     if not ohlcv or len(ohlcv) == 0: break
                     all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
-                    if len(all_ohlcv) > 100000: break
+                    if len(all_ohlcv) > 40000: break
                     if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching {symbol}: {len(all_ohlcv)} candles...")
                 if all_ohlcv:
                     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -1970,7 +2023,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     if not found_any:
         # Instruction 8: Convert message threshold to base currency
         # We take the first pair's quote currency as a representative
-        _, base_bet_curr = engine.parse_base_bet() if engine else (10.0, 'USDT')
+        base_bet_curr = get_base_currency(None, config)
         msg_threshold = f"0.022 {base_bet_curr}"
         if symbols:
             quote = symbols[0].split('/')[1]
