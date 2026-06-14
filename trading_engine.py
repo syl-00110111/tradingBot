@@ -10,19 +10,17 @@ class TradingEngine:
 
     def parse_base_bet(self):
         """
-        Parses the base_bet configuration which can be a float or a string like '20.0 {base_bet_curr}'.
-        Returns (amount, currency).
+        Parses base_bet as a percentage of the available balance.
+        Example: "10%" or 10.0 -> returns 0.10.
         """
-        raw_val = self.config.get('base_bet', self.config.get('base_bet', '20.0 {base_bet_curr}'))
+        raw_val = self.config.get('base_trade_amount', self.config.get('base_bet', '10%'))
         if isinstance(raw_val, str):
             try:
-                parts = raw_val.split(' ')
-                val = float(parts[0])
-                curr = parts[1] if len(parts) > 1 else 'USDT'
-                return val, curr
-            except (ValueError, IndexError):
-                return 10.0, 'USDT'
-        return float(raw_val), 'USDT'
+                val = float(raw_val.replace('%', '').strip())
+                return val / 100.0 if val >= 1.0 else val
+            except ValueError:
+                return 0.10
+        return float(raw_val) / 100.0 if float(raw_val) >= 1.0 else float(raw_val)
 
     def get_dynamic_settings(self, adx, volatility):
         settings = {
@@ -50,26 +48,16 @@ class TradingEngine:
         return self.is_profitable(current_price, entry_price, fee_rate)
 
     def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, exchange=None):
+        """
+        Calculates position size based on a percentage of the available balance of the quote asset.
+        """
         base_balance = 0
         if isinstance(balance, dict):
             if 'free' in balance: base_balance = balance['free'].get(base_currency, 0)
             else: base_balance = balance.get(base_currency, 0)
         else: base_balance = balance.get(base_currency, 0)
 
-        raw_val, curr_part = self.parse_base_bet()
-
-        # Handle currency conversion if base_bet currency differs from pair's quote currency
-        if curr_part != base_currency and exchange:
-            try:
-                # We need to know the price of the base_bet currency in terms of the pair's quote currency
-                # Example: base_bet is "20.0 {base_bet_curr}", trading BTC/USDC. We need {base_bet_curr}/USDC price.
-                ticker = exchange.fetch_ticker(f"{curr_part}/{base_currency}")
-                if ticker and ticker.get("last"):
-                    raw_val *= ticker["last"]
-            except:
-                logging.warning(f"Could not convert {curr_part} to {base_currency}. Using raw value.")
-
-        base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
+        base_percentage = self.parse_base_bet()
         trade_amount_base = base_balance * base_percentage
         trade_amount_base *= self.risk_multiplier
 
