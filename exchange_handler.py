@@ -181,6 +181,14 @@ class BTCMarketsExchange(CCXTExchange):
     def __init__(self, api_key, api_secret):
         super().__init__('btcmarkets', api_key, api_secret)
 
+EXCHANGE_MAPPING = {
+    'binance': BinanceExchange, 'kraken': KrakenExchange, 'bitvavo': BitvavoExchange,
+    'coinbase': CoinbaseExchange, 'gemini': GeminiExchange, 'mercado': MercadoBitcoinExchange,
+    'bitso': BitsoExchange, 'bitstamp': BitstampExchange, 'whitebit': WhiteBITExchange,
+    'indodax': IndodaxExchange, 'upbit': UpbitExchange, 'luno': LunoExchange,
+    'independentreserve': IndependentReserveExchange, 'btcmarkets': BTCMarketsExchange
+}
+
 class MockExchange(ExchangeInterface):
     def __init__(self, api_key=None, api_secret=None, exchange_type='binance'):
         self.balance = {'USDT': 1000.0, 'USDC': 1000.0}
@@ -192,14 +200,7 @@ class MockExchange(ExchangeInterface):
         self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                mapping = {
-                    'binance': BinanceExchange, 'kraken': KrakenExchange, 'bitvavo': BitvavoExchange,
-                    'coinbase': CoinbaseExchange, 'gemini': GeminiExchange, 'mercado': MercadoBitcoinExchange,
-                    'bitso': BitsoExchange, 'bitstamp': BitstampExchange, 'whitebit': WhiteBITExchange,
-                    'indodax': IndodaxExchange, 'upbit': UpbitExchange, 'luno': LunoExchange,
-                    'independentreserve': IndependentReserveExchange, 'btcmarkets': BTCMarketsExchange
-                }
-                ex_class = mapping.get(exchange_type, BinanceExchange)
+                ex_class = EXCHANGE_MAPPING.get(exchange_type, BinanceExchange)
                 self.real_exchange = ex_class(api_key, api_secret)
                 logging.info(f"Mock initialized with real {exchange_type} balance discovery (deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")

@@ -44,7 +44,7 @@ from rich.text import Text
 
 import readchar
 
-from exchange_handler import BinanceExchange, MockExchange, KrakenExchange, BitvavoExchange
+from exchange_handler import EXCHANGE_MAPPING, MockExchange
 from indicators import get_signals, calculate_similarity, STRATEGIES
 from persistence import DataManager, CacheManager, PatternManager, MonteCarloCacheManager
 from trading_engine import TradingEngine
@@ -879,7 +879,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Crypto-Currencies MultiPlatform Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
-    parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
+    parser.add_argument('--exchange', choices=list(EXCHANGE_MAPPING.keys()), default='binance', help='Exchange to use')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
     parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/USDT)')
@@ -990,28 +990,23 @@ def main():
         api_key = api_creds.get('api_key') or config.get('api_key')
         api_secret = api_creds.get('api_secret') or config.get('api_secret')
 
+        exchange_class = EXCHANGE_MAPPING.get(args.exchange)
+
         if args.mode == 'live':
-            if args.exchange == 'binance':
-                exchange = BinanceExchange(api_key, api_secret)
-            elif args.exchange == 'kraken':
-
-                exchange = KrakenExchange(api_key, api_secret)
-            elif args.exchange == 'bitvavo':
-
-                exchange = BitvavoExchange(api_key, api_secret)
+            exchange = exchange_class(api_key, api_secret)
             logging.info(f"Starting bot in LIVE mode on {args.exchange}")
         elif args.mode == 'simulation':
             exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange)
             logging.info(f"Starting bot in SIMULATION mode ({args.exchange} discovery)")
         elif args.mode == 'sell':
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange) if api_key in [None, "YOUR_API_KEY"] else exchange_class(api_key, api_secret)
             exchange.load_markets()
             if hasattr(exchange, 'balance'): exchange.balance['TEST'] = True
             status.stop()  # Stop status before interactive input
             interactive_sell(exchange, data_manager, engine, config)
             return
         elif args.mode == 'balance':
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange) if api_key in [None, "YOUR_API_KEY"] else exchange_class(api_key, api_secret)
             exchange.load_markets()
             show_balance(exchange, config)
             return
@@ -1019,14 +1014,14 @@ def main():
             if not args.symbol:
                 console.print("[red]Error: --symbol required for backtest[/]")
                 return
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange) if api_key in [None, "YOUR_API_KEY"] else exchange_class(api_key, api_secret)
             run_backtest_mode(exchange, config, args, engine=engine, device=device)
             return
         elif args.mode == 'benchmark':
             if not args.symbol and not args.every_symbol:
                 console.print("[red]Error: --symbol or --every-symbol required for benchmark[/]")
                 return
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange) if api_key in [None, "YOUR_API_KEY"] else exchange_class(api_key, api_secret)
             # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
             run_benchmark_mode(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
             return
