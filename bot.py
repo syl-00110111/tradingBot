@@ -1979,6 +1979,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         symbols_to_bench.append(symbol)
 
     if symbols_to_bench:
+        global ohlcv_cache
         msg = f"Benchmarking all strategies for {len(symbols_to_bench)} symbol(s) using multi-processing..."
         if status: status.update(f"[bold blue]{msg}")
         else: console.print(f"[bold blue]{msg}")
