@@ -8,4 +8,5 @@ trades_history_*.json
 benchmark_cache.json
 
 ohlcv_cache.pkl
+cache/
 bot_data_backup.zip

@@ -40,8 +40,6 @@ A high-performance optimization phase that identifies historical "Success Patter
 4. **Recency Pondering**: Applies weights to window profits based on age:
    - **Short Term**: < 24h (1.0), < 7d (0.8), < 30d (0.5), older (0.2).
 5. **Success Pattern Matching (SPM) Extraction**: Saves the top 5 profitable windows (overlapping allowed) as "Success Patterns" into `success_patterns.json`.
-6. **Monte Carlo validation**: Final validation (100 simulations) on the discovered patterns before storage.
-
 ---
 
 ## 3. Live Mode (`--mode live`)
@@ -64,6 +62,7 @@ Real-time trading on supported exchanges (Binance, Kraken, Bitvavo, etc.).
 5. **Strategy Injection**: If a pattern matches, its specific `strategy` and `aggr` settings are dynamically applied to the current pair.
 6. **Monte Carlo Hurdle**: Before any trade, 1000 simulations are run. The probability of profit must exceed a **0.15% hurdle**.
 7. **Order Execution**: Market orders are placed via CCXT. Execution uses actual filled values and fees for position tracking.
+8. **Persistence**: Every individual pair update (candles, patterns, history) is flushed to disk and asynchronously archived into `bot_data_backup.zip`.
 
 ---
 
@@ -97,7 +96,7 @@ Functional equivalent of Live mode but with virtual execution.
 - **Whale Detection**: Volume > 3.0 standard deviations from mean
 
 ### Position Sizing
-- **Base Amount**: `base_trade_amount` is a percentage of the asset necessary to take a position (default: 10%).
+- **Base Amount**: `base_trade_amount` (or legacy `base_bet`) is a percentage of the available quote asset balance (default: 10%).
 - **Win Streak Bonus**: 1.3x multiplier after 2 consecutive wins.
 - **Global Risk Multiplier**: Scaled by `global_risk_multiplier` (default 1.2).
 
