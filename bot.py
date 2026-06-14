@@ -818,9 +818,12 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
     return cached_data[-limit:] if limit and len(cached_data) > limit else cached_data
 
 def main():
+    global ohlcv_cache
     from persistence import load_from_archive, migrate_fresh_files_to_archive
     migrate_fresh_files_to_archive()
     load_from_archive()
+    ohlcv_cache = load_ohlcv_cache()
+
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
@@ -1046,7 +1049,8 @@ def main():
     finally:
         shutdown_event.set()
         from persistence import create_consolidated_archive
-        save_ohlcv_cache(ohlcv_cache)
+        with bot_lock:
+            save_ohlcv_cache(ohlcv_cache)
         create_consolidated_archive()
 
     logging.info("Bot stopped gracefully.")
@@ -1978,13 +1982,11 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         symbols_to_bench.append(symbol)
 
     if symbols_to_bench:
-        global ohlcv_cache
         msg = f"Benchmarking all strategies for {len(symbols_to_bench)} symbol(s) using multi-processing..."
         if status: status.update(f"[bold blue]{msg}")
         else: console.print(f"[bold blue]{msg}")
 
         # Pre-fetch historical data for all symbols in the process
-        ohlcv_cache = load_ohlcv_cache()
         symbol_data_map = {}
         term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
         timeframe = term_cfg.get('timeframe', '5m')
@@ -2084,7 +2086,8 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         if best_for_symbol['profit'] > best_overall['total']['profit']:
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
-                save_ohlcv_cache(ohlcv_cache)
+                with bot_lock:
+                    save_ohlcv_cache(ohlcv_cache)
                 from persistence import create_consolidated_archive
                 create_consolidated_archive()
                 signal.signal(signal.SIGINT, original_handler)
