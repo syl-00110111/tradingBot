@@ -39,7 +39,7 @@ A high-performance optimization phase that identifies historical "Success Patter
    - A sliding window (sized by `eval_candles`) moves across the equity curve to identify periods of peak profitability.
 4. **Recency Pondering**: Applies weights to window profits based on age:
    - **Short Term**: < 24h (1.0), < 7d (0.8), < 30d (0.5), older (0.2).
-5. **Success Pattern Matching (SPM) Extraction**: Saves the top 10 non-overlapping profitable windows as "Success Patterns" into `success_patterns.json`.
+5. **Success Pattern Matching (SPM) Extraction**: Saves the top 5 profitable windows (overlapping allowed) as "Success Patterns" into `success_patterns.json`.
 6. **Monte Carlo validation**: Final validation (100 simulations) on the discovered patterns before storage.
 
 ---

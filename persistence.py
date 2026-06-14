@@ -153,7 +153,7 @@ class PatternManager:
             json.dump(self.data, f, indent=4)
 
     def set_patterns(self, symbol, patterns):
-        self.data[symbol] = patterns[:10]
+        self.data[symbol] = patterns[:5]
         self.save()
 
     def get_patterns(self, symbol):

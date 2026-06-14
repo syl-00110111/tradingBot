@@ -1793,37 +1793,30 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
                 'tech_state': tech_state
             })
 
-    # Keep top 4 non-overlapping (by time) patterns
+    # Keep top 5 patterns per pair (overlapping allowed)
     patterns.sort(key=lambda x: x['score'], reverse=True)
-    unique_patterns = []
-    seen_times = []
+    top_patterns = []
 
     for p in patterns:
-        if len(unique_patterns) >= 10: break
-        is_overlap = False
-        for st in seen_times:
-            if abs(p['start_ts'] - st) < (eval_window * 60):
-                is_overlap = True
-                break
-        if not is_overlap:
-            # NOW apply Monte Carlo validation to the top patterns only (for speed)
-            # Find the window in df_in
-            # Use searchsorted for O(log N) instead of O(N)
-            p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
-            p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
+        if len(top_patterns) >= 5: break
 
-            if p_start_idx != -1:
-                window_df = df_in.iloc[max(0, p_start_idx-250):p_start_idx+eval_window]
-                mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
-                mc.set_device(device if device is not None else torch.device("cpu"))
-                mc_score = mc.validate_strategy(window_df)
-                p['profit'] *= mc_score
-                p['score'] *= mc_score
+        # apply Monte Carlo validation to the top patterns only (for speed)
+        # Find the window in df_in
+        # Use searchsorted for O(log N) instead of O(N)
+        p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
+        p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
 
-            unique_patterns.append(p)
-            seen_times.append(p.get('start_ts', 0))
+        if p_start_idx != -1:
+            window_df = df_in.iloc[max(0, p_start_idx-250):p_start_idx+eval_window]
+            mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
+            mc.set_device(device if device is not None else torch.device("cpu"))
+            mc_score = mc.validate_strategy(window_df)
+            p['profit'] *= mc_score
+            p['score'] *= mc_score
 
-    return symbol, unique_patterns
+        top_patterns.append(p)
+
+    return symbol, top_patterns
 
 def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
 
