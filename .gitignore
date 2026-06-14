@@ -3,10 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 .env
-api.json
-trades_history_*.json
-benchmark_cache.json
 venv/
-ohlcv_cache.pkl
 cache/
+api.json
 bot_data_backup.zip
+bot_data_backup.zip.tmp
+PROMPT.txt
