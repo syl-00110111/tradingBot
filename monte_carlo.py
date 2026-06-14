@@ -1,4 +1,4 @@
-# Crypto-Currencies MultiPlatform Trading Bot - Monte Carlo Engine
+# Cryptocurrencies multiplatform Trading Bot - Monte Carlo Engine
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify
