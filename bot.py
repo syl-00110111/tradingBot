@@ -1,4 +1,4 @@
-# Crypto-Currencies MultiPlatform Trading Bot
+# Cryptocurrencies multiplatform Trading Bot
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify
@@ -88,12 +88,32 @@ bot_lock = threading.Lock()
 pending_asset_update = False
 
 def format_price(price):
+    """
+    Formats price with at least 6 significant figures.
+    Placing the dot smartly based on magnitude.
+    """
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
-    if price == 0: return "0.00"
-    if abs(price) < 0.01:
-        return f"{price:.3e}"
-    return f"{price:.2f}"
+    if price == 0: return "0.000000"
+
+    abs_price = abs(price)
+    # Use g format with 8 significant digits to ensure 10000.01 is preserved
+    # and 0.03565 is preserved without unacceptable rounding.
+    formatted = f"{price:.8g}"
+    # If it's in scientific notation, convert back to fixed point
+    if 'e' in formatted:
+        formatted = f"{price:.12f}".rstrip('0').rstrip('.')
+    return formatted
+
+def format_amount(amount):
+    """
+    Formats amount avoiding excessive zeros.
+    """
+    if amount is None: return "-"
+    if not isinstance(amount, (int, float)): return str(amount)
+    if amount == 0: return "0"
+    # Format with many decimals then strip trailing zeros
+    return f"{amount:.10}".rstrip('0').rstrip('.')
 
 def parse_base_bet(config):
     """
@@ -364,10 +384,10 @@ def make_dashboard(global_mode, config):
                 amt_str, entry_str, fee_str = "-", "-", "-"
                 if has_position:
                     p = positions[-1] # Show most recent position info in summary
-                    amt_str = f"{p['amount']:.6f}"
+                    amt_str = f"{format_amount(p['amount'])}"
                     if len(positions) > 1: amt_str = f"({len(positions)}) {amt_str}"
                     entry_str = format_price(p['entry_price'])
-                    fee_str = f"{p.get('entry_fee', 0):.4f}"
+                    fee_str = f"{format_amount(p.get('entry_fee', 0))}"
 
                 tendency = data.get('tendency', 'N/A')
                 tend_style = "bold green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "bold yellow" if tendency == "Range" else "white"
@@ -384,9 +404,9 @@ def make_dashboard(global_mode, config):
                     row_vals = [
                         symbol,
                         f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
-                        f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0):.4f}",
-                        f"{data.get('rsi', 0):.2f}",
-                        f"{data.get('volatility', 0):.4f}/{data.get('adx', 0):.1f}",
+                        f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0)}",
+                        f"{data.get('rsi', 0)}",
+                        f"{data.get('volatility', 0)}/{data.get('adx', 0):.1}",
                         f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
                         f"{data.get('score', 0)}",
                         data.get('aggr', 'N/A'),
@@ -462,7 +482,7 @@ def make_dashboard(global_mode, config):
 
     layout = Layout()
     layout.split(
-        Layout(Panel(Text("Crypto-Currencies MultiPlatform Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
+        Layout(Panel(Text(" Cryptocurrencies multiplatform Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
         Layout(log_panel, size=log_height+2),
         Layout(pairs_panel, name="main"),
         Layout(Panel(status_display, title="Status", border_style="cyan"), size=3)
@@ -904,7 +924,7 @@ def main():
         except Exception as e:
             logging.error(f"Migration failed: {e}")
 
-    parser = argparse.ArgumentParser(description='Crypto-Currencies MultiPlatform Trading Bot')
+    parser = argparse.ArgumentParser(description=' Cryptocurrencies multiplatform Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', choices=list(EXCHANGE_MAPPING.keys()), default='binance', help='Exchange to use (e.g. binance, kraken, bitvavo, etc.)')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
@@ -922,6 +942,12 @@ def main():
 
     args = parser.parse_args()
 
+    # Optimize CPU threading for computations
+    num_cores = os.cpu_count() or 1
+    torch.set_num_threads(num_cores)
+    os.environ['OMP_NUM_THREADS'] = str(num_cores)
+    os.environ['MKL_NUM_THREADS'] = str(num_cores)
+
     global device, gpu_enabled, use_mkldnn
     use_mkldnn = False
     if args.no_gpu:
@@ -935,9 +961,11 @@ def main():
             device = torch.device('cpu')
             use_mkldnn = True
             torch.backends.mkldnn.enabled = True
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['MKL_NUM_THREADS'] = '1'
-            torch.set_num_threads(1)
+            # Use all available cores for main thread computation
+            num_cores = str(os.cpu_count() or 1)
+            os.environ['OMP_NUM_THREADS'] = num_cores
+            os.environ['MKL_NUM_THREADS'] = num_cores
+            torch.set_num_threads(int(num_cores))
             gpu_enabled = True
         elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
             device = torch.device('vulkan')
@@ -985,7 +1013,7 @@ def main():
         except Exception as e:
             console.print(f"[bold red]Error parsing api.json: {e}[/]")
 
-    with console.status("[bold green]Initializing Crypto-Currencies MultiPlatform Trading Bot...", spinner="dots") as status:
+    with console.status("[bold green]Initializing Cryptocurrencies multiplatform Trading Bot...", spinner="dots") as status:
 
         # MMX, SSE, AVX Gradation Check (Instruction 6)
         try:
@@ -1279,7 +1307,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, balance=No
             fee = order.get('calculated_fee', 0)
 
             total_paid = (exec_amount * exec_price) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {exec_amount:.6f} at {exec_price}, final price paid: {total_paid:.2f} {get_base_currency(symbol, config)}")
+            logging.info(f"[{symbol}] Executing buy of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price paid: {format_price(total_paid)} {get_base_currency(symbol, config)}")
             data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
 
             # Immediately update Sellable list (Instruction 2)
@@ -1291,7 +1319,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, balance=No
 
             return True
         else:
-            logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}")
+            logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {format_amount(amount)}")
     else:
         logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
     return False
@@ -1335,7 +1363,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
                 fee = order.get('calculated_fee', 0)
 
                 total_received = (exec_amount * exec_price) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {exec_amount:.6f} at {exec_price}, final price received: {total_received:.2f} {get_base_currency(symbol, config)}")
+                logging.info(f"[{symbol}] Executing sell of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price received: {format_price(total_received)} {get_base_currency(symbol, config)}")
                 profit = total_received - position.get('entry_total_base', 0)
                 data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, position_idx=position_idx)
                 return True
@@ -1536,19 +1564,19 @@ def interactive_sell(exchange, data_manager, engine, config):
 
         sellable_found = True
         quote = get_base_currency(symbol, config)
-        console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {amount:.6f} | [bold cyan]Value:[/] {format_price(cost)} {quote}")
+        console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {format_amount(amount)} | [bold cyan]Value:[/] {format_price(cost)} {quote}")
 
         confirm = input(f"Confirm sell of entire {asset} balance? (y/n): ").lower()
         if confirm == 'y':
             quote = get_base_currency(symbol, config)
-            console.print(f"[yellow]Selling {amount} {asset} at ~{format_price(price)} {quote}...[/]")
+            console.print(f"[yellow]Selling {format_amount(amount)} {asset} at ~{format_price(price)} {quote}...[/]")
             order = exchange.create_order(symbol, 'sell', amount)
             if order:
                 fee = order.get('calculated_fee', 0)
                 total_received = (amount * price) - fee
                 quote = get_base_currency(symbol, config)
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {quote}")
-                console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {quote}[/]")
+                logging.info(f"[{symbol}] Executing sell of amount {format_amount(amount)} at {format_price(price)}, final price received: {format_price(total_received)} {quote}")
+                console.print(f"[bold green]Successfully sold {asset}! Final received: {format_price(total_received)} {quote}[/]")
                 play_sound("sell", None)
                 # Also close positions in data manager if they exist
                 pos_list = data_manager.get_positions(symbol)
@@ -1620,14 +1648,14 @@ def show_balance(exchange, config):
 
         table.add_row(
             asset,
-            f"{free:.8f}",
-            f"{used:.8f}",
-            f"{total:.8f}",
+            format_amount(free),
+            format_amount(used),
+            format_amount(total),
             val_str
         )
 
     console.print(table)
-    console.print(f"\n[bold yellow]Estimated Total Wallet Value: {total_value_base:.2f} {base_bet_curr}[/]\n")
+    console.print(f"\n[bold yellow]Estimated Total Wallet Value: {format_price(total_value_base)} {base_bet_curr}[/]\n")
 
 def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config):
     """Generates a matplotlib plot for backtesting results."""
@@ -2213,7 +2241,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 try:
                     ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
                     if ticker and ticker.get('last'):
-                        msg_threshold = f"{config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.022) * ticker['last']:.3f} {quote}"
+                        msg_threshold = f"{config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.022) * ticker['last']:.3} {quote}"
                 except: pass
 
         console.print(f"[yellow]No successful patterns (> {msg_threshold}) were found in the scanned historical data.[/]")
