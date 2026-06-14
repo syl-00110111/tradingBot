@@ -68,7 +68,7 @@ Store your credentials and preferred exchange:
 
 **Linux/macOS:**
 1. Create a virtual environment: `python -m venv venv`
-2. Active it: `source venv/bin/activate`
+2. Active the virtual environment: `source venv/bin/activate`
 3. Install dependencies: `pip install -r requirements.txt`
 
 **Windows:**
@@ -78,14 +78,13 @@ Store your credentials and preferred exchange:
 3. Install dependencies: `pip install -r requirements.txt`
 
 **Any:**
-4. Always activate the virtual environment before using the bot if you configured one.
+4. Always activate the virtual environment before using the bot if you effectivelly created the virtual environment.
+5. Work with the bot: `python bot.py --mode live`
+6. After work: `deactivate` then `exit`
 
 *Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific llvmlite dependency requirements on this platform.*
 
-5. Work with the bot: `python bot.py --mode live`
-6. After work: `deactivate` then `exit`
 **Regular maintenance:**
-
 To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to trigger the entire dependency upgrade process.
 
 ### Execution Modes
