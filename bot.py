@@ -1372,7 +1372,7 @@ def show_balance(exchange, config):
     balance = exchange.fetch_balance()
 
     table = Table(title="Asset Inventory", expand=True)
-    _, base_bet_curr = parse_base_bet(config) if engine else (10.0, 'USDT')
+    _, base_bet_curr = parse_base_bet(config)
     table.add_column("Asset", style="cyan")
     table.add_column("Free", justify="right")
     table.add_column("Used", justify="right")
@@ -1446,7 +1446,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config)
     plt.ylabel("Price")
 
     p_str = format_price(results['profit'])
-    _, base_bet_curr = parse_base_bet(config) if engine else (10.0, 'USDT')
+    _, base_bet_curr = parse_base_bet(config)
     stats_text = f"Profit: {p_str} {base_bet_curr}\nWin Rate: {results['win_rate']:.1%}\nMax DD: {results['max_dd']:.1%}"
     plt.annotate(stats_text, xy=(0.02, 0.95), xycoords='axes fraction',
                  bbox=dict(boxstyle="round", fc="w", alpha=0.8), fontsize=10, verticalalignment='top')
@@ -1537,7 +1537,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
              console.print(f"[yellow]Warning: Only {len(df)} candles available for {symbol}, but term requested {eval_window}.[/]")
 
     # Simulation
-    _, base_bet_curr = parse_base_bet(config) if engine else (10.0, 'USDT')
+    _, base_bet_curr = parse_base_bet(config)
     balance = 100.0 # Starting virtual balance
     position = None
     trades = []
@@ -1657,7 +1657,7 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
             console.print("[yellow]No trades executed during backtest. Plot not generated.[/]")
 
         console.print(f"\n[bold yellow]Backtest Summary for {args.symbol}:[/]")
-        _, base_bet_curr = parse_base_bet(config) if engine else (10.0, 'USDT')
+        _, base_bet_curr = parse_base_bet(config)
         console.print(f"Total Profit: {format_price(results['profit'])} {base_bet_curr}")
         console.print(f"Win Rate: {results['win_rate']:.1%}")
         console.print(f"Max Drawdown: {results['max_dd']:.1%}")
@@ -1669,6 +1669,13 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
+    # Ensure hardware optimization is active in worker process
+    if device and device.type == 'cpu' and torch.backends.mkldnn.is_available():
+        torch.backends.mkldnn.enabled = True
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        torch.set_num_threads(1)
+
     if df_in is None or len(df_in) < 100: return symbol, []
 
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
@@ -1686,7 +1693,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     # Instruction 8: Convert thresholds to base currency
     quote = symbol.split('/')[1]
     threshold_conv = 1.0
-    _, base_bet_curr = parse_base_bet(config) if engine else (10.0, 'USDT')
+    _, base_bet_curr = parse_base_bet(config)
     if quote != base_bet_curr:
         try:
             ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
@@ -1850,7 +1857,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
     optimization_map = {}
     # Use the currency from base_bet for display
-    _, base_bet_curr = parse_base_bet(config) if engine else (10.0, 'USDT')
+    _, base_bet_curr = parse_base_bet(config)
 
     # If explicit benchmark mode (no term_override and not backtest), we scan all terms
     # Otherwise we scan just the requested term.
@@ -2020,7 +2027,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     if not found_any:
         # Instruction 8: Convert message threshold to base currency
         # We take the first pair's quote currency as a representative
-        _, base_bet_curr = parse_base_bet(config) if engine else (10.0, 'USDT')
+        _, base_bet_curr = parse_base_bet(config)
         msg_threshold = f"0.022 {base_bet_curr}"
         if symbols:
             quote = symbols[0].split('/')[1]
