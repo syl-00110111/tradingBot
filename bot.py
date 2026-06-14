@@ -704,19 +704,19 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                      # Prioritize by benchmark profit (casted to float for robust sorting)
                      potential_buys.sort(key=lambda x: float(x[1].get('expected_profit', 0)), reverse=True)
                      balance = exchange.fetch_balance()
-            if balance:
-                for i in range(min(len(potential_buys), slots_available)):
-                     if shutdown_event.is_set(): break
-                     symbol, data = potential_buys[i]
-                     if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
-                          with bot_lock:
-                              data['last_action'] = 'BUY'
-                              data['positions'] = data_manager.get_positions(symbol)
-                              data['position'] = data_manager.get_position(symbol)
-                          play_sound("buy", config)
-                          # Refresh balance for next buy
-                          balance = exchange.fetch_balance()
-                          if not balance: break
+                     if balance:
+                         for i in range(min(len(potential_buys), slots_available)):
+                              if shutdown_event.is_set(): break
+                              symbol, data = potential_buys[i]
+                              if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
+                                   with bot_lock:
+                                       data['last_action'] = 'BUY'
+                                       data['positions'] = data_manager.get_positions(symbol)
+                                       data['position'] = data_manager.get_position(symbol)
+                                   play_sound("buy", config)
+                                   # Refresh balance for next buy
+                                   balance = exchange.fetch_balance()
+                                   if not balance: break
 
             # Proactive Sell Proposal (Instruction 6)
             now = time.time()
@@ -784,7 +784,7 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
     if cached_data:
         last_ts = cached_data[-1][0]
         try:
-            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=last_ts + 1)
+            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=int(last_ts + 1))
             if new_candles:
                  new_count += len(new_candles)
                  cached_data.extend([c for c in new_candles if c[0] > last_ts])
@@ -800,7 +800,7 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
             try:
                 # We limit backward fetch to 1000 at a time to be polite
                 limit_back = 1000
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=target_since, limit=limit_back)
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=int(target_since), limit=limit_back)
                 if not ohlcv: break
 
                 # Check if we've reached the existing cache
@@ -829,7 +829,8 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
     # 3. Fallback: if cache still empty and since was not provided
     if not cached_data:
         try:
-            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit if limit else 500)
+            fetch_since = int(since) if since is not None else None
+            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=fetch_since, limit=limit if limit else 500)
             if new_candles:
                 new_count = len(new_candles)
                 cached_data = new_candles
