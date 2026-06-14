@@ -78,6 +78,7 @@ Store your credentials and preferred exchange:
 3. Install dependencies: `pip install -r requirements.txt`
 
 **Any:**
+
 4. Always activate the virtual environment before using the bot if you effectivelly created the virtual environment.
 5. Work with the bot: `python bot.py --mode live`
 6. After work: `deactivate` then `exit`
