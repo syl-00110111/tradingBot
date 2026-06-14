@@ -32,7 +32,7 @@ A high-performance optimization phase that identifies historical "Success Patter
 `main()` → `run_benchmark_mode()` → `ProcessPoolExecutor` → `run_benchmark_for_symbol()`
 
 ### Process Workflow
-1. **Deep History Fetching**: Iteratively downloads up to 100,000 candles (starting from 2021-01-01) for the target symbols.
+1. **Deep History Fetching**: Iteratively downloads up to 40,000 candles (starting from 2024-06-01) for the target symbols.
 2. **Global Indicator Pass**: Calculates signals for all strategies across the *entire* historical dataset in one pass.
 3. **O(N) Sliding Window Algorithm**:
    - Instead of re-running full backtests, the bot calculates a continuous equity curve.
@@ -97,7 +97,7 @@ Functional equivalent of Live mode but with virtual execution.
 - **Whale Detection**: Volume > 3.0 standard deviations from mean
 
 ### Position Sizing
-- **Base Amount**: `base_trade_amount` (e.g., 20.0 EUR/USDT)
+- **Base Amount**: `base_trade_amount` is a percentage of the asset necessary to take a position (default: 10%).
 - **Win Streak Bonus**: 1.3x multiplier after 2 consecutive wins.
 - **Global Risk Multiplier**: Scaled by `global_risk_multiplier` (default 1.2).
 

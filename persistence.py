@@ -74,6 +74,64 @@ def load_from_archive(filename=None):
     except:
         return False
 
+def migrate_fresh_files_to_archive():
+    """
+    Compares flat files on disk with the consolidated archive.
+    If disk files are fresher, moves them into the archive.
+    """
+    files_to_check = [
+        'success_patterns.json',
+        'benchmark_cache.json',
+        'ohlcv_cache.pkl',
+        'trades_history_live.json',
+        'trades_history_simulation.json',
+        'trades_history_sell.json'
+    ]
+
+    if not os.path.exists(ARCHIVE_NAME):
+        create_consolidated_archive()
+        return
+
+    try:
+        updated = False
+        # We check both individual files and the cache/ directory
+        all_disk_files = []
+        for f in files_to_check:
+            if os.path.exists(f): all_disk_files.append(f)
+
+        if os.path.exists(CACHE_DIR):
+            for root, dirs, files in os.walk(CACHE_DIR):
+                for file in files:
+                    all_disk_files.append(os.path.join(root, file))
+
+        if not all_disk_files: return
+
+        # Open archive to compare
+        with zipfile.ZipFile(ARCHIVE_NAME, 'r') as zipf:
+            archive_members = {info.filename: info for info in zipf.infolist()}
+
+            for disk_file in all_disk_files:
+                # Normalize path for zip comparison
+                norm_path = disk_file.replace('\\', '/')
+
+                disk_mtime = os.path.getmtime(disk_file)
+
+                if norm_path not in archive_members:
+                    updated = True; break
+
+                # Zip timestamps are tuples: (Y, M, D, H, M, S)
+                z_time = archive_members[norm_path].date_time
+                archive_mtime = time.mktime((*z_time, 0, 0, -1))
+
+                if disk_mtime > (archive_mtime + 2): # 2s buffer for zip precision
+                    updated = True; break
+
+        if updated:
+            logging.info("Fresher data files detected on disk. Updating consolidated archive...")
+            create_consolidated_archive()
+    except Exception as e:
+        logging.error(f"Error during fresh file migration: {e}")
+
 class PatternManager:
     def __init__(self, filename='success_patterns.json'):
         self.filename = filename
