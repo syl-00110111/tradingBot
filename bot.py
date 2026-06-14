@@ -207,13 +207,12 @@ def make_dashboard(global_mode, config):
     global pairs_marquee_dir, logs_marquee_dir, status_marquee_dir, pairs_pause_until, logs_pause_until, status_pause_until, last_marquee_update
     global selected_pair_index, show_candles_for_pair, sell_proposal_pair, sell_proposal_profit, sell_proposal_time
 
-    # Slow down marquee (e.g., 2 steps per second)
-    should_step = False
-    if marquee_enabled and (now_ts - last_marquee_update >= 0.4):
-         should_step = True
-         last_marquee_update = now_ts
-
     with bot_lock:
+        # Moderate speed marquee (e.g., 10 steps per second)
+        should_step = False
+        if marquee_enabled and (now_ts - last_marquee_update >= 0.1):
+             should_step = True
+             last_marquee_update = now_ts
         # 1. Logs Panel
         log_height = 8
         log_content = Text()
@@ -226,13 +225,13 @@ def make_dashboard(global_mode, config):
                             logs_scroll_offset += 1
                        if logs_scroll_offset >= max_logs_offset:
                             logs_marquee_dir = -1
-                            logs_pause_until = now_ts + 2
+                            logs_pause_until = now_ts + 1
                   else:
                        if logs_scroll_offset > 0:
                             logs_scroll_offset -= 1
                        if logs_scroll_offset <= 0:
                             logs_marquee_dir = 1
-                            logs_pause_until = now_ts + 2
+                            logs_pause_until = now_ts + 1
 
         logs_scroll_offset = max(0, min(logs_scroll_offset, max_logs_offset))
         start = max(0, len(all_logs) - log_height - logs_scroll_offset)
@@ -275,13 +274,14 @@ def make_dashboard(global_mode, config):
 
         sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
 
-        if sell_proposal_pair and (now_ts - sell_proposal_time < 60):
+        if sell_proposal_pair and (now_ts - sell_proposal_time < 61):
             symbol = sell_proposal_pair
             data = bot_state.get(symbol, {})
             candles_text = Text()
+            time_left = max(0, int(61 - (now_ts - sell_proposal_time)))
             # If multiple positions exist, propose selling the most profitable one
             candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(sell_proposal_profit)} profit?\n", style="bold yellow")
-            candles_text.append("Type 'y' to confirm, 'n' to dismiss. (Auto-close in 1 min)\n\n", style="dim")
+            candles_text.append(f"Confirm sell? [Y/n] (Auto-exec in {time_left}s)\n\n", style="dim")
             if 'last_20_candles' in data:
                 prices = data['last_20_candles']
                 min_p, max_p = min(prices), max(prices)
@@ -326,13 +326,13 @@ def make_dashboard(global_mode, config):
                                pairs_scroll_offset += 1
                            if pairs_scroll_offset >= max_pairs_offset:
                                pairs_marquee_dir = -1
-                               pairs_pause_until = now_ts + 2
+                               pairs_pause_until = now_ts + 1
                       else:
                            if pairs_scroll_offset > 0:
                                pairs_scroll_offset -= 1
                            if pairs_scroll_offset <= 0:
                                pairs_marquee_dir = 1
-                               pairs_pause_until = now_ts + 2
+                               pairs_pause_until = now_ts + 1
 
             pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
             visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
@@ -434,13 +434,13 @@ def make_dashboard(global_mode, config):
                             status_scroll_index += 1
                        if status_scroll_index >= max_status_offset:
                             status_marquee_dir = -1
-                            status_pause_until = now_ts + 2
+                            status_pause_until = now_ts + 1
                   else:
                        if status_scroll_index > 0:
                             status_scroll_index -= 1
                        if status_scroll_index <= 0:
                             status_marquee_dir = 1
-                            status_pause_until = now_ts + 2
+                            status_pause_until = now_ts + 1
 
              status_scroll_index = max(0, min(status_scroll_index, max_status_offset))
              status_display = status_text[status_scroll_index : status_scroll_index + display_width]
@@ -479,8 +479,8 @@ def input_thread_func(exchange, data_manager, engine, config):
             key = readchar.readkey()
 
             # Handle sell proposal (Instruction 6)
-            if sell_proposal_pair and (time.time() - sell_proposal_time < 60):
-                if key.lower() == 'y':
+            if sell_proposal_pair and (time.time() - sell_proposal_time < 61):
+                if key.lower() == 'y' or key == readchar.key.ENTER:
                     symbol = sell_proposal_pair
                     data = bot_state.get(symbol, {})
                     # Find which position was proposed (usually the first/index 0 in sell check)
@@ -491,13 +491,23 @@ def input_thread_func(exchange, data_manager, engine, config):
                              data['positions'] = data_manager.get_positions(symbol)
                              data['position'] = data_manager.get_position(symbol)
                          play_sound("sell", config)
-                    sell_proposal_pair = None
+                    with bot_lock:
+                         sell_proposal_pair = None
+                         sell_proposal_time = 0
+                         sell_proposal_profit = 0
                     continue
                 elif key.lower() == 'n':
-                    sell_proposal_pair = None
+                    with bot_lock:
+                         sell_proposal_pair = None
+                         sell_proposal_time = 0
+                         sell_proposal_profit = 0
                     continue
             else:
-                sell_proposal_pair = None # Clear if expired
+                if sell_proposal_pair:
+                    with bot_lock:
+                         sell_proposal_pair = None
+                         sell_proposal_time = 0
+                         sell_proposal_profit = 0
 
             if show_candles_for_pair:
                 show_candles_for_pair = None
@@ -734,6 +744,20 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
             for _ in range(100):
                  if shutdown_event.is_set(): break
+                 # Auto-execute sell proposal after 61 seconds (Instruction 6)
+                 if sell_proposal_pair and (time.time() - sell_proposal_time >= 61):
+                      symbol = sell_proposal_pair
+                      data = bot_state.get(symbol, {})
+                      if execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0):
+                           with bot_lock:
+                               data['last_action'] = 'SELL'
+                               data['positions'] = data_manager.get_positions(symbol)
+                               data['position'] = data_manager.get_position(symbol)
+                           play_sound("sell", config)
+                      with bot_lock:
+                           sell_proposal_pair = None
+                           sell_proposal_time = 0
+                           sell_proposal_profit = 0
                  time.sleep(0.1)
         except Exception as e:
             logging.error(f"Error in trading thread: {e}")
@@ -1542,7 +1566,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config)
     console.print(f"[bold green]Backtest plot saved as {filename}[/]")
     plt.close()
 
-def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False):
+def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=True, return_full_df=False):
     """Core backtesting simulation logic."""
     from indicators import get_signals
 
@@ -1869,21 +1893,6 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
     for p in patterns:
         if len(top_patterns) >= 5: break
-
-        # apply Monte Carlo validation to the top patterns only (for speed)
-        # Find the window in df_in
-        # Use searchsorted for O(log N) instead of O(N)
-        p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
-        p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
-
-        if p_start_idx != -1:
-            window_df = df_in.iloc[max(0, p_start_idx-250):p_start_idx+eval_window]
-            mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
-            mc.set_device(device if device is not None else torch.device("cpu"))
-            mc_score = mc.validate_strategy(window_df)
-            p['profit'] *= mc_score
-            p['score'] *= mc_score
-
         top_patterns.append(p)
 
     return symbol, top_patterns
