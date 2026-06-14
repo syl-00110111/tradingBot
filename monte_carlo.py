@@ -30,39 +30,67 @@ class MonteCarloEngine:
     def simulate_paths(self, current_price, volatility, drift=0):
         """
         Simulate price paths using Geometric Brownian Motion.
-        Vectorized with PyTorch for GPU acceleration.
+        Supports BATCH processing (tensors of prices/volatilities).
         """
-        # Ensure inputs are tensors and moved to device
-        curr_p = torch.tensor(current_price, device=self.device, dtype=torch.float64)
-        vol = torch.tensor(volatility, device=self.device, dtype=torch.float64)
-        drft = torch.tensor(drift, device=self.device, dtype=torch.float64)
+        # Convert to tensors if scalars
+        if not isinstance(current_price, torch.Tensor):
+            curr_p = torch.tensor(current_price, device=self.device, dtype=torch.float64)
+        else: curr_p = current_price.to(self.device)
 
-        # random.normal_ equivalent in torch
-        returns = torch.randn((self.num_simulations, self.timeframe_candles), device=self.device) * vol + drft
+        if not isinstance(volatility, torch.Tensor):
+            vol = torch.tensor(volatility, device=self.device, dtype=torch.float64)
+        else: vol = volatility.to(self.device)
 
-        # Cumulative sum for path simulation
-        price_paths = curr_p * torch.exp(torch.cumsum(returns, dim=1))
+        if not isinstance(drift, torch.Tensor):
+            drft = torch.tensor(drift, device=self.device, dtype=torch.float64)
+        else: drft = drift.to(self.device)
 
-        # Prepend current price
-        ones = torch.ones((self.num_simulations, 1), device=self.device) * curr_p
-        price_paths = torch.cat((ones, price_paths), dim=1)
+        # Handle batch dimension
+        batch_size = curr_p.numel()
+        if batch_size > 1:
+             # Shape: (Batch, Sims, Candles)
+             curr_p = curr_p.view(-1, 1, 1)
+             vol = vol.view(-1, 1, 1)
+             drft = drft.view(-1, 1, 1)
+             returns = torch.randn((batch_size, self.num_simulations, self.timeframe_candles), device=self.device) * vol + drft
+             price_paths = curr_p * torch.exp(torch.cumsum(returns, dim=2))
+             ones = torch.ones((batch_size, self.num_simulations, 1), device=self.device) * curr_p
+             price_paths = torch.cat((ones, price_paths), dim=2)
+        else:
+             # Standard scalar logic (simpler shape for single price)
+             returns = torch.randn((self.num_simulations, self.timeframe_candles), device=self.device) * vol + drft
+             price_paths = curr_p * torch.exp(torch.cumsum(returns, dim=1))
+             ones = torch.ones((self.num_simulations, 1), device=self.device) * curr_p
+             price_paths = torch.cat((ones, price_paths), dim=1)
+
         return price_paths
 
     def estimate_hit_probability(self, current_price, target_price, volatility, drift=0, mode="above"):
         """
         Estimate the probability of price hitting a target within the timeframe.
+        Supports Batch processing.
         """
-        if volatility == 0:
+        # Quick exit for non-batch zero volatility
+        if not isinstance(volatility, torch.Tensor) and volatility == 0:
             return 1.0 if (mode == "above" and target_price <= current_price) or (mode == "below" and target_price >= current_price) else 0.0
 
         paths = self.simulate_paths(current_price, volatility, drift)
 
-        if mode == "above":
-            hits = torch.any(paths >= target_price, dim=1)
+        if paths.dim() == 3: # Batch mode
+            # target_price needs to match shape (Batch, 1, 1)
+            t_price = torch.tensor(target_price, device=self.device).view(-1, 1, 1)
+            if mode == "above":
+                hits = torch.any(paths >= t_price, dim=2)
+            else:
+                hits = torch.any(paths <= t_price, dim=2)
+            # Probability per batch item
+            return torch.mean(hits.double(), dim=1)
         else:
-            hits = torch.any(paths <= target_price, dim=1)
-
-        return torch.mean(hits.double()).item()
+            if mode == "above":
+                hits = torch.any(paths >= target_price, dim=1)
+            else:
+                hits = torch.any(paths <= target_price, dim=1)
+            return torch.mean(hits.double()).item()
 
     def validate_strategy(self, df):
         """
@@ -100,13 +128,22 @@ class MonteCarloEngine:
 
     def price_option(self, current_price, strike_price, volatility, drift=0, option_type="call"):
         """
-        Estimate option price using Monte Carlo.
+        Estimate option price using Monte Carlo. Supports Batch processing.
         """
         paths = self.simulate_paths(current_price, volatility, drift)
-        final_prices = paths[:, -1]
-        if option_type == "call":
-            payoffs = torch.maximum(final_prices - strike_price, torch.tensor(0.0, device=self.device))
-        else:
-            payoffs = torch.maximum(torch.tensor(strike_price, device=self.device) - final_prices, torch.tensor(0.0, device=self.device))
 
-        return torch.mean(payoffs).item()
+        if paths.dim() == 3: # Batch mode
+            final_prices = paths[:, :, -1]
+            s_price = torch.tensor(strike_price, device=self.device).view(-1, 1)
+            if option_type == "call":
+                payoffs = torch.maximum(final_prices - s_price, torch.tensor(0.0, device=self.device))
+            else:
+                payoffs = torch.maximum(s_price - final_prices, torch.tensor(0.0, device=self.device))
+            return torch.mean(payoffs, dim=1)
+        else:
+            final_prices = paths[:, -1]
+            if option_type == "call":
+                payoffs = torch.maximum(final_prices - strike_price, torch.tensor(0.0, device=self.device))
+            else:
+                payoffs = torch.maximum(torch.tensor(strike_price, device=self.device) - final_prices, torch.tensor(0.0, device=self.device))
+            return torch.mean(payoffs).item()

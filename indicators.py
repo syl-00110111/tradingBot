@@ -311,39 +311,53 @@ def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     return combined
 
 def handle_mc_strategies(df, strategy, config, is_backtest):
-    """Helper to run MC strategies only on necessary rows."""
+    """Helper to run MC strategies using batch vectorization."""
     df['buy_candidate'] = False
     df['sell_candidate'] = False
 
-    # Range of indices to calculate (all if backtest, only last if not)
-    # Actually backtest might need a window.
-    start_idx = 0 if is_backtest else len(df) - 1
+    device = config.get('device', torch.device('cpu'))
 
     if strategy == 'mc_mean_reversion':
-        df['sma_20'] = ta.sma(df['close'], length=20)
-        df['returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['volatility'] = df['returns'].rolling(window=20).std()
+        df['sma_20'] = ta.sma(df['close'], length=20).fillna(df['close'])
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
+        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
 
-        for i in range(start_idx, len(df)):
-            row = df.iloc[i]
-            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            prob = _mc_engine.estimate_hit_probability(row['close'], row['sma_20'], row['volatility'], mode='above' if row['close'] < row['sma_20'] else 'below')
-            df.at[df.index[i], 'buy_candidate'] = (row['close'] < row['sma_20']) and (prob > 0.7)
-            df.at[df.index[i], 'sell_candidate'] = (row['close'] > row['sma_20']) and (prob > 0.7)
+        # Batch MC for mean reversion
+        mask = (df['volatility'] > 0)
+        if mask.any():
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
+            targets = torch.tensor(df.loc[mask, 'sma_20'].values, device=device)
+            vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
+
+            # We estimate hit probability for both 'above' (buy) and 'below' (sell)
+            # based on whether price is currently below or above SMA.
+            # For simplicity, we just run the engine in batch.
+            probs = _mc_engine.estimate_hit_probability(prices, targets, vols)
+            df.loc[mask, 'mc_prob'] = probs.cpu().numpy()
+
+            df['buy_candidate'] = (df['close'] < df['sma_20']) & (df['mc_prob'] > 0.7)
+            df['sell_candidate'] = (df['close'] > df['sma_20']) & (df['mc_prob'] > 0.7)
 
     elif strategy == 'mc_momentum':
-        df['sma_20'] = ta.sma(df['close'], length=20)
-        df['returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['volatility'] = df['returns'].rolling(window=20).std()
-        df['drift'] = df['returns'].rolling(window=20).mean()
+        df['sma_20'] = ta.sma(df['close'], length=20).fillna(df['close'])
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
+        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+        df['drift'] = df['returns'].rolling(window=20).mean().fillna(0)
 
-        for i in range(start_idx, len(df)):
-            row = df.iloc[i]
-            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 1.02, row['volatility'], drift=row['drift'], mode='above')
-            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.98, row['volatility'], drift=row['drift'], mode='below')
-            df.at[df.index[i], 'buy_candidate'] = (row['close'] > row['sma_20']) and (prob_up > 0.6)
-            df.at[df.index[i], 'sell_candidate'] = (row['close'] < row['sma_20']) and (prob_down > 0.6)
+        mask = (df['volatility'] > 0)
+        if mask.any():
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
+            vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
+            drifts = torch.tensor(df.loc[mask, 'drift'].values, device=device)
+
+            probs_up = _mc_engine.estimate_hit_probability(prices, prices * 1.02, vols, drift=drifts, mode='above')
+            probs_down = _mc_engine.estimate_hit_probability(prices, prices * 0.98, vols, drift=drifts, mode='below')
+
+            df.loc[mask, 'mc_up'] = probs_up.cpu().numpy()
+            df.loc[mask, 'mc_down'] = probs_down.cpu().numpy()
+
+            df['buy_candidate'] = (df['close'] > df['sma_20']) & (df['mc_up'] > 0.6)
+            df['sell_candidate'] = (df['close'] < df['sma_20']) & (df['mc_down'] > 0.6)
 
     elif strategy == 'mc_dynamic_allocation':
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
@@ -353,35 +367,38 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
         df['sell_candidate'] = (df['volatility'] > threshold) & (df['volatility'].shift(1) <= threshold)
 
     elif strategy == 'mc_market_making':
-        df['returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['volatility'] = df['returns'].rolling(window=10).std()
-        for i in range(start_idx, len(df)):
-            row = df.iloc[i]
-            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 1.001, row['volatility'], mode='above')
-            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.999, row['volatility'], mode='below')
-            df.at[df.index[i], 'buy_candidate'] = prob_up > 0.8
-            df.at[df.index[i], 'sell_candidate'] = prob_down > 0.8
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
+        df['volatility'] = df['returns'].rolling(window=10).std().fillna(0)
+        mask = (df['volatility'] > 0)
+        if mask.any():
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
+            vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
+            prob_up = _mc_engine.estimate_hit_probability(prices, prices * 1.001, vols, mode='above')
+            prob_down = _mc_engine.estimate_hit_probability(prices, prices * 0.999, vols, mode='below')
+            df.loc[mask, 'buy_candidate'] = (prob_up.cpu().numpy() > 0.8)
+            df.loc[mask, 'sell_candidate'] = (prob_down.cpu().numpy() > 0.8)
 
     elif strategy == 'mc_stop_loss_eval':
-        df['returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['volatility'] = df['returns'].rolling(window=20).std()
-        for i in range(start_idx, len(df)):
-            row = df.iloc[i]
-            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            prob_sl = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.95, row['volatility'], mode='below')
-            df.at[df.index[i], 'sell_candidate'] = prob_sl > 0.4
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
+        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+        mask = (df['volatility'] > 0)
+        if mask.any():
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
+            vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
+            prob_sl = _mc_engine.estimate_hit_probability(prices, prices * 0.95, vols, mode='below')
+            df.loc[mask, 'sell_candidate'] = (prob_sl.cpu().numpy() > 0.4)
 
     elif strategy == 'mc_options_pricing':
-        df['returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['volatility'] = df['returns'].rolling(window=20).std()
-        for i in range(start_idx, len(df)):
-            row = df.iloc[i]
-            if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            call_p = _mc_engine.price_option(row['close'], row['close'] * 1.05, row['volatility'], option_type='call')
-            put_p = _mc_engine.price_option(row['close'], row['close'] * 0.95, row['volatility'], option_type='put')
-            df.at[df.index[i], 'buy_candidate'] = call_p > put_p * 1.5
-            df.at[df.index[i], 'sell_candidate'] = put_p > call_p * 1.5
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
+        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+        mask = (df['volatility'] > 0)
+        if mask.any():
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
+            vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
+            call_p = _mc_engine.price_option(prices, prices * 1.05, vols, option_type='call')
+            put_p = _mc_engine.price_option(prices, prices * 0.95, vols, option_type='put')
+            df.loc[mask, 'buy_candidate'] = (call_p.cpu().numpy() > put_p.cpu().numpy() * 1.5)
+            df.loc[mask, 'sell_candidate'] = (put_p.cpu().numpy() > call_p.cpu().numpy() * 1.5)
 
     return finalize_signals(df)
 
