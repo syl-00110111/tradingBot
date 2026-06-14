@@ -725,6 +725,11 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
 
 def load_ohlcv_cache():
+    # If not on disk, try loading from archive
+    if not os.path.exists('ohlcv_cache.pkl'):
+        from persistence import load_from_archive
+        load_from_archive('ohlcv_cache.pkl')
+
     if os.path.exists('ohlcv_cache.pkl'):
         try:
             with open('ohlcv_cache.pkl', 'rb') as f:
