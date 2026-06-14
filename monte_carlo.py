@@ -33,17 +33,20 @@ class MonteCarloEngine:
         Supports BATCH processing (tensors of prices/volatilities).
         """
         # Convert to tensors if scalars
-        if not isinstance(current_price, torch.Tensor):
+        if isinstance(current_price, torch.Tensor):
+            curr_p = current_price.detach().clone().to(self.device)
+        else:
             curr_p = torch.tensor(current_price, device=self.device, dtype=torch.float64)
-        else: curr_p = current_price.to(self.device)
 
-        if not isinstance(volatility, torch.Tensor):
+        if isinstance(volatility, torch.Tensor):
+            vol = volatility.detach().clone().to(self.device)
+        else:
             vol = torch.tensor(volatility, device=self.device, dtype=torch.float64)
-        else: vol = volatility.to(self.device)
 
-        if not isinstance(drift, torch.Tensor):
+        if isinstance(drift, torch.Tensor):
+            drft = drift.detach().clone().to(self.device)
+        else:
             drft = torch.tensor(drift, device=self.device, dtype=torch.float64)
-        else: drft = drift.to(self.device)
 
         # Handle batch dimension
         batch_size = curr_p.numel()
@@ -78,7 +81,11 @@ class MonteCarloEngine:
 
         if paths.dim() == 3: # Batch mode
             # target_price needs to match shape (Batch, 1, 1)
-            t_price = torch.tensor(target_price, device=self.device).view(-1, 1, 1)
+            if isinstance(target_price, torch.Tensor):
+                t_price = target_price.detach().clone().to(self.device).view(-1, 1, 1)
+            else:
+                t_price = torch.tensor(target_price, device=self.device).view(-1, 1, 1)
+
             if mode == "above":
                 hits = torch.any(paths >= t_price, dim=2)
             else:
@@ -134,7 +141,11 @@ class MonteCarloEngine:
 
         if paths.dim() == 3: # Batch mode
             final_prices = paths[:, :, -1]
-            s_price = torch.tensor(strike_price, device=self.device).view(-1, 1)
+            if isinstance(strike_price, torch.Tensor):
+                s_price = strike_price.detach().clone().to(self.device).view(-1, 1)
+            else:
+                s_price = torch.tensor(strike_price, device=self.device).view(-1, 1)
+
             if option_type == "call":
                 payoffs = torch.maximum(final_prices - s_price, torch.tensor(0.0, device=self.device))
             else:

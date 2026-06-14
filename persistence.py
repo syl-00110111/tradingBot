@@ -185,9 +185,15 @@ class DataManager:
                     data = json.load(f)
                     if "open_positions" not in data: data["open_positions"] = {}
                     if "trade_history" not in data: data["trade_history"] = []
+                    # Migration: convert single position (dict) to list of positions
                     for sym, pos in data["open_positions"].items():
-                        if "sell_signals_received" not in pos: pos["sell_signals_received"] = 0
-                        if "last_sell_signal_candle_ts" not in pos: pos["last_sell_signal_candle_ts"] = None
+                        if isinstance(pos, dict):
+                            data["open_positions"][sym] = [pos]
+
+                        # Add missing keys to all positions in the list
+                        for p in data["open_positions"][sym]:
+                            if "sell_signals_received" not in p: p["sell_signals_received"] = 0
+                            if "last_sell_signal_candle_ts" not in p: p["last_sell_signal_candle_ts"] = None
                     return data
             except json.JSONDecodeError:
                 return default_data
@@ -209,31 +215,40 @@ class DataManager:
             os.remove(self.filepath)
 
     def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
-        self.data["open_positions"][symbol] = {
+        if symbol not in self.data["open_positions"]:
+            self.data["open_positions"][symbol] = []
+
+        self.data["open_positions"][symbol].append({
             "entry_price": entry_price, "amount": amount, "entry_fee": fee,
             "entry_total_base": total_base, "trigger_data": trigger_data,
             "timestamp": timestamp, "sell_signals_received": 0, "last_sell_signal_candle_ts": None
-        }
+        })
         self._save_data()
 
     def increment_sell_signals(self, symbol, candle_ts):
         if symbol in self.data["open_positions"]:
-            pos = self.data["open_positions"][symbol]
-            if pos.get("last_sell_signal_candle_ts") != candle_ts:
-                pos["sell_signals_received"] = pos.get("sell_signals_received", 0) + 1
-                pos["last_sell_signal_candle_ts"] = candle_ts
+            updated = False
+            for pos in self.data["open_positions"][symbol]:
+                if pos.get("last_sell_signal_candle_ts") != candle_ts:
+                    pos["sell_signals_received"] = pos.get("sell_signals_received", 0) + 1
+                    pos["last_sell_signal_candle_ts"] = candle_ts
+                    updated = True
+            if updated:
                 self._save_data()
                 return True
         return False
 
-    def flag_ignore_sell(self, symbol):
-        if symbol in self.data["open_positions"]:
-            self.data["open_positions"][symbol]["ignore_sell"] = True
+    def flag_ignore_sell(self, symbol, position_idx=0):
+        if symbol in self.data["open_positions"] and len(self.data["open_positions"][symbol]) > position_idx:
+            self.data["open_positions"][symbol][position_idx]["ignore_sell"] = True
             self._save_data()
 
-    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0):
-        if symbol in self.data["open_positions"]:
-            position = self.data["open_positions"].pop(symbol)
+    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, position_idx=0):
+        if symbol in self.data["open_positions"] and len(self.data["open_positions"][symbol]) > position_idx:
+            position = self.data["open_positions"][symbol].pop(position_idx)
+            if not self.data["open_positions"][symbol]:
+                self.data["open_positions"].pop(symbol)
+
             trade = {
                 "symbol": symbol, "entry_price": position["entry_price"], "exit_price": exit_price,
                 "amount": position["amount"], "entry_fee": position.get("entry_fee", 0),
@@ -248,7 +263,11 @@ class DataManager:
         return None
 
     def get_open_positions(self): return self.data["open_positions"]
-    def get_position(self, symbol): return self.data["open_positions"].get(symbol)
+    def get_positions(self, symbol): return self.data["open_positions"].get(symbol, [])
+    def get_position(self, symbol):
+        # For legacy compatibility, return the first position or None
+        pos_list = self.get_positions(symbol)
+        return pos_list[0] if pos_list else None
 
     def get_win_streak(self, symbol):
         streak = 0
