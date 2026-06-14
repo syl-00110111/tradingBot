@@ -73,7 +73,8 @@ Store your credentials and preferred exchange:
 
 **Windows:**
 1. Create a virtual environment: `python -m venv venv`
-2. Activate it: `.\venv\Scripts\activate`
+2. Define an execution policy: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Current`
+2. Activate the virtual environment: `.\venv\Scripts\activate`
 3. Install dependencies: `pip install -r requirements.txt`
 
 **Any:**
@@ -81,6 +82,7 @@ Store your credentials and preferred exchange:
 
 *Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific llvmlite dependency requirements on this platform.*
 
+5. Work with the bot: `python bot.py --mode live`
 **Regular maintenance:**
 
 To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to trigger the entire dependency upgrade process.

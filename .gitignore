@@ -6,7 +6,7 @@ __pycache__/
 api.json
 trades_history_*.json
 benchmark_cache.json
-
+venv/
 ohlcv_cache.pkl
 cache/
 bot_data_backup.zip
