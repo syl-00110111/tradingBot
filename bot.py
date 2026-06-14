@@ -741,6 +741,43 @@ def save_ohlcv_cache(cache):
     with open('ohlcv_cache.pkl', 'wb') as f:
         pickle.dump(cache, f)
 
+def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
+    """
+    Retrieves candles incrementally using ohlcv_cache.
+    If candles exist in cache, only the gap is fetched from the exchange.
+    """
+    global ohlcv_cache
+    cache_key = f"{symbol}_{timeframe}"
+
+    cached_data = ohlcv_cache.get(cache_key, [])
+    if isinstance(cached_data, pd.DataFrame):
+         cached_data = cached_data.values.tolist()
+
+    if cached_data:
+        last_ts = cached_data[-1][0]
+        # Fetch gap candles starting from the last cached timestamp
+        # since parameter should be one ms after last_ts
+        try:
+            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=last_ts + 1)
+            if new_candles:
+                 logging.info(f"[{symbol}] Incremental fetch: retrieved {len(new_candles)} new candles to fill gap.")
+                 # Deduplicate and merge
+                 cached_data.extend([c for c in new_candles if c[0] > last_ts])
+                 # Keep only the last 100,000 for stability
+                 if len(cached_data) > 100000:
+                      cached_data = cached_data[-100000:]
+                 ohlcv_cache[cache_key] = cached_data
+        except Exception as e:
+            logging.warning(f"[{symbol}] Incremental fetch failed: {e}")
+    else:
+        # Fallback to standard fetch if no cache
+        new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        if new_candles:
+            ohlcv_cache[cache_key] = new_candles
+            cached_data = new_candles
+
+    return cached_data[-limit:] if limit and len(cached_data) > limit else cached_data
+
 def main():
     from persistence import load_from_archive, migrate_fresh_files_to_archive
     migrate_fresh_files_to_archive()
@@ -1003,7 +1040,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     patterns = pattern_manager.get_patterns(symbol)
     term = global_config.get('_active_term', 'short'); term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
     timeframe = term_cfg.get('timeframe', '5m')
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+    ohlcv = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500)
     if not ohlcv: return None
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     with bot_lock:
@@ -1514,7 +1551,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     if df_in is None:
         # Use a large buffer for indicator stability
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=limit)
         except Exception as e:
             console.print(f"[red]Error fetching OHLCV for {symbol} ({timeframe}): {e}[/]")
             return None
@@ -1876,7 +1913,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 best = cached_patterns[0]
                 try:
                     # Small limit to minimize bandwidth and rate-limit risk
-                    ohlcv_now = exchange.fetch_ohlcv(symbol, timeframe, limit=20)
+                    ohlcv_now = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=20)
                     if ohlcv_now:
                         df_now = pd.DataFrame(ohlcv_now, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                         df_now = get_signals(df_now, {"device": device}, is_backtest=False)
@@ -1915,28 +1952,39 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
              except Exception: console.print(f"[red]Invalid --since format. Use YYYY-MM-DD HH:MM[/]")
 
         for i, symbol in enumerate(symbols_to_bench):
-            all_ohlcv = []
-            target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
-            current_since = since_ts if since_ts else target_ts
             if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching history for {symbol}...")
             try:
-                cache_key = f"{symbol}_{timeframe}_deep"
-                if cache_key in ohlcv_cache:
-                    symbol_data_map[symbol] = ohlcv_cache[cache_key]; continue
-                while True:
-                    try:
-                        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
-                    except Exception as e:
-                        logging.warning(f"[{symbol}] Failed to fetch OHLCV at {current_since}: {e}")
-                        break
-                    if not ohlcv or len(ohlcv) == 0: break
-                    all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
-                    if len(all_ohlcv) > 40000: break
-                    if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching {symbol}: {len(all_ohlcv)} candles...")
-                if all_ohlcv:
-                    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                # Use incremental fetching to fill the gap
+                target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
+                current_since = since_ts if since_ts else target_ts
+
+                # Fetch base data if cache is empty or older than target_ts
+                cache_key = f"{symbol}_{timeframe}"
+                existing = ohlcv_cache.get(cache_key, [])
+                if isinstance(existing, pd.DataFrame):
+                     existing = existing.values.tolist()
+
+                if not existing or (existing[0][0] > current_since):
+                    all_ohlcv = []
+                    while True:
+                        try:
+                            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1000)
+                        except Exception as e:
+                            logging.warning(f"[{symbol}] Failed to fetch OHLCV at {current_since}: {e}")
+                            break
+                        if not ohlcv or len(ohlcv) == 0: break
+                        all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
+                        if len(all_ohlcv) > 40000: break
+                        if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Initial history for {symbol}: {len(all_ohlcv)} candles...")
+                    if all_ohlcv: ohlcv_cache[cache_key] = all_ohlcv
+
+                # Now perform incremental gap filling
+                full_history = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=40000)
+
+                if full_history:
+                    df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    symbol_data_map[symbol] = df; ohlcv_cache[cache_key] = df
+                    symbol_data_map[symbol] = df
             except Exception as e:
                 if not status: console.print(f"[red]Failed to fetch {symbol}: {e}")
 
