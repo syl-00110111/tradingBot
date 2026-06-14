@@ -1,4 +1,4 @@
-# Binance Trading Bot
+# Crypto-Currencies MultiPlatform Trading Bot
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify
@@ -462,7 +462,7 @@ def make_dashboard(global_mode, config):
 
     layout = Layout()
     layout.split(
-        Layout(Panel(Text("Binance Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
+        Layout(Panel(Text("Crypto-Currencies MultiPlatform Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
         Layout(log_panel, size=log_height+2),
         Layout(pairs_panel, name="main"),
         Layout(Panel(status_display, title="Status", border_style="cyan"), size=3)
@@ -822,7 +822,7 @@ def main():
         except Exception as e:
             logging.error(f"Migration failed: {e}")
 
-    parser = argparse.ArgumentParser(description='Binance Trading Bot')
+    parser = argparse.ArgumentParser(description='Crypto-Currencies MultiPlatform Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
@@ -903,7 +903,7 @@ def main():
         except Exception as e:
             console.print(f"[bold red]Error parsing api.json: {e}[/]")
 
-    with console.status("[bold green]Initializing Binance Trading Bot...", spinner="dots") as status:
+    with console.status("[bold green]Initializing Crypto-Currencies MultiPlatform Trading Bot...", spinner="dots") as status:
 
         # MMX, SSE, AVX Gradation Check (Instruction 6)
         try:

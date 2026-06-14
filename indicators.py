@@ -1,4 +1,4 @@
-# Binance Trading Bot - Technical Strategies
+# Crypto-Currencies MultiPlatform Trading Bot - Technical Strategies
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify

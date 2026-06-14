@@ -1,4 +1,4 @@
-# Binance Trading Bot - Complete Technical Workflow
+# Crypto-Currencies MultiPlatform Trading Bot - Complete Technical Workflow
 
 This document outlines the execution paths, trading concepts, and mathematical algorithms used by the bot across its different operating modes.
 
