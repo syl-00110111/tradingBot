@@ -65,7 +65,7 @@ def create_consolidated_archive(delete_after=True):
     Ensures that existing data in the archive is preserved if not present on disk.
     """
     files_to_archive = [
-        'success_patterns.json',
+        'success_pattern.json',
         'benchmark_cache.json',
         'trades_history_live.json',
         'trades_history_simulation.json',
@@ -165,7 +165,7 @@ def migrate_fresh_files_to_archive():
     Compares disk files with the archive and consolidates if disk is newer.
     """
     files_to_check = [
-        'success_patterns.json',
+        'success_pattern.json',
         'benchmark_cache.json',
         'trades_history_live.json',
         'trades_history_simulation.json',
@@ -264,7 +264,7 @@ class OHLCVCacheManager:
                 logging.error(f"Failed to save OHLCV cache for {symbol}: {e}")
 
 class PatternManager:
-    def __init__(self, filename='success_patterns.json'):
+    def __init__(self, filename='success_pattern.json'):
         self.filename = filename
         self.data = self._load()
 
@@ -405,58 +405,53 @@ class DataManager:
 
 class CacheManager:
     """
-    Manages benchmark results using individual files.
+    Manages benchmark results using a single JSON file.
     """
-    def __init__(self):
-        if not os.path.exists(CACHE_DIR):
-            load_from_archive()
-            with persistence_lock:
-                os.makedirs(CACHE_DIR, exist_ok=True)
+    def __init__(self, filename='benchmark_cache.json'):
+        self.filename = filename
+        self.data = self._load()
 
-    def _get_path(self, symbol, term):
-        safe_symbol = symbol.replace('/', '_')
-        return os.path.join(CACHE_DIR, f"bench_{safe_symbol}_{term}.json")
+    def _load(self):
+        if not os.path.exists(self.filename):
+            load_from_archive(self.filename)
+
+        with persistence_lock:
+            if os.path.exists(self.filename):
+                try:
+                    with open(self.filename, 'r') as f:
+                        return json.load(f)
+                except Exception: return {}
+        return {}
+
+    def _save(self):
+        with persistence_lock:
+            with open(self.filename, 'w') as f:
+                json.dump(self.data, f, indent=4)
+        archiver.trigger()
 
     def get(self, symbol, term, max_age_seconds=None):
         """
         Retrieves cached benchmark patterns.
-        If max_age_seconds is None, returns the raw entry (data + timestamp) for custom validation.
         """
-        path = self._get_path(symbol, term)
-        if not os.path.exists(path):
-            load_from_archive(path)
-
-        with persistence_lock:
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r') as f:
-                        entry = json.load(f)
-                        if max_age_seconds is None:
-                            return entry
-                        if time.time() - entry['timestamp'] < max_age_seconds:
-                            return entry['data']
-                except Exception: pass
+        key = f"{symbol}_{term}"
+        entry = self.data.get(key)
+        if entry:
+            if max_age_seconds is None:
+                return entry
+            if time.time() - entry['timestamp'] < max_age_seconds:
+                return entry['data']
         return None
 
     def set(self, symbol, term, data):
-        path = self._get_path(symbol, term)
-        with persistence_lock:
-            try:
-                os.makedirs(CACHE_DIR, exist_ok=True)
-                with open(path, 'w') as f:
-                    json.dump({'timestamp': time.time(), 'data': data}, f, indent=4)
-                archiver.trigger()
-            except Exception as e:
-                logging.error(f"Failed to set cache for {symbol}/{term}: {e}")
+        key = f"{symbol}_{term}"
+        self.data[key] = {'timestamp': time.time(), 'data': data}
+        self._save()
 
     def delete(self, symbol, term):
-        path = self._get_path(symbol, term)
-        with persistence_lock:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                    archiver.trigger()
-                except: pass
+        key = f"{symbol}_{term}"
+        if key in self.data:
+            del self.data[key]
+            self._save()
 
 class MonteCarloCacheManager:
     """

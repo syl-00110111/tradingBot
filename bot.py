@@ -704,17 +704,19 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                      # Prioritize by benchmark profit (casted to float for robust sorting)
                      potential_buys.sort(key=lambda x: float(x[1].get('expected_profit', 0)), reverse=True)
                      balance = exchange.fetch_balance()
-                     for i in range(min(len(potential_buys), slots_available)):
-                          if shutdown_event.is_set(): break
-                          symbol, data = potential_buys[i]
-                          if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
-                               with bot_lock:
-                                   data['last_action'] = 'BUY'
-                                   data['positions'] = data_manager.get_positions(symbol)
-                                   data['position'] = data_manager.get_position(symbol)
-                               play_sound("buy", config)
-                               # Update balance for next iteration
-                               balance = exchange.fetch_balance()
+            if balance:
+                for i in range(min(len(potential_buys), slots_available)):
+                     if shutdown_event.is_set(): break
+                     symbol, data = potential_buys[i]
+                     if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
+                          with bot_lock:
+                              data['last_action'] = 'BUY'
+                              data['positions'] = data_manager.get_positions(symbol)
+                              data['position'] = data_manager.get_position(symbol)
+                          play_sound("buy", config)
+                          # Refresh balance for next buy
+                          balance = exchange.fetch_balance()
+                          if not balance: break
 
             # Proactive Sell Proposal (Instruction 6)
             now = time.time()
@@ -863,6 +865,30 @@ def main():
     load_from_archive()
     ohlcv_cache_manager = OHLCVCacheManager()
 
+    # Migrate individual benchmark cache files to consolidated benchmark_cache.json if they exist
+    if os.path.exists('cache'):
+        temp_mgr = CacheManager()
+        migrated = False
+        for f in os.listdir('cache'):
+            if f.startswith('bench_') and f.endswith('.json'):
+                try:
+                    parts = f[6:-5].split('_')
+                    if len(parts) >= 2:
+                        term = parts[-1]
+                        symbol = '/'.join(parts[:-1])
+                        with open(os.path.join('cache', f), 'r') as cf:
+                            cdata = json.load(cf)
+                            # Only migrate if not already in consolidated cache or if newer
+                            key = f"{symbol}_{term}"
+                            if key not in temp_mgr.data or cdata.get('timestamp', 0) > temp_mgr.data[key].get('timestamp', 0):
+                                temp_mgr.data[key] = cdata
+                                migrated = True
+                        os.remove(os.path.join('cache', f))
+                except Exception: pass
+        if migrated:
+            logging.info("Migrated individual benchmark cache files to consolidated benchmark_cache.json")
+            temp_mgr._save()
+
     # Migration path for old consolidated ohlcv_cache.pkl
     if os.path.exists('ohlcv_cache.pkl'):
         try:
@@ -879,7 +905,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Crypto-Currencies MultiPlatform Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
-    parser.add_argument('--exchange', choices=list(EXCHANGE_MAPPING.keys()), default='binance', help='Exchange to use')
+    parser.add_argument('--exchange', choices=list(EXCHANGE_MAPPING.keys()), default='binance', help='Exchange to use (e.g. binance, kraken, bitvavo, etc.)')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
     parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/USDT)')
@@ -1214,6 +1240,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 def execute_buy(exchange, data_manager, engine, symbol, data, config, balance=None):
     if balance is None:
         balance = exchange.fetch_balance()
+    if not balance:
+        logging.error(f"[{symbol}] Buy aborted: Failed to fetch balance.")
+        return False
     win_streak = data_manager.get_win_streak(symbol)
 
     # Refresh price for Spot market accuracy (prevent NOTIONAL filters)
@@ -1286,6 +1315,9 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
         is_simulation = isinstance(exchange, MockExchange)
 
         balance = exchange.fetch_balance()
+        if not balance:
+            logging.error(f"[{symbol}] Sell aborted: Failed to fetch balance.")
+            return False
         free_balance = balance.get(base_asset, {}).get('free', 0) if 'free' in balance else balance.get(base_asset, 0)
         base_currency = symbol.split('/')[1]
 
@@ -1333,22 +1365,27 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
             # Prioritize by benchmark profit
             potential_buys.sort(key=lambda x: float(x[1].get('expected_profit', 0)), reverse=True)
             balance = exchange.fetch_balance()
-            for i in range(min(len(potential_buys), slots_available)):
-                symbol, data = potential_buys[i]
-                if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
-                    with bot_lock:
-                        bot_state[symbol]['positions'] = data_manager.get_positions(symbol)
-                        bot_state[symbol]['position'] = data_manager.get_position(symbol)
-                        bot_state[symbol]['price'] = data['price']
-                        bot_state[symbol]['last_action'] = 'BUY'
-                    # Refresh balance for next buy
-                    balance = exchange.fetch_balance()
+            if balance:
+                for i in range(min(len(potential_buys), slots_available)):
+                    symbol, data = potential_buys[i]
+                    if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
+                        with bot_lock:
+                            bot_state[symbol]['positions'] = data_manager.get_positions(symbol)
+                            bot_state[symbol]['position'] = data_manager.get_position(symbol)
+                            bot_state[symbol]['price'] = data['price']
+                            bot_state[symbol]['last_action'] = 'BUY'
+                        # Refresh balance for next buy
+                        balance = exchange.fetch_balance()
+                        if not balance: break
 
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
     logging.info(f"Syncing positions from {exchange.__class__.__name__} API...")
     balance = exchange.fetch_balance()
+    if not balance:
+        logging.error("Failed to fetch balance during position sync.")
+        return
     free_balances = balance.get('free', balance)
     base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR'])
 
@@ -1415,6 +1452,8 @@ def get_sellable_assets_sim(data_manager):
 
 def get_sellable_assets(exchange, config=None):
     balance = exchange.fetch_balance()
+    if not balance:
+        return []
     assets = []
     base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR']) if config else ['USDT', 'USDC', 'EUR']
     free_balances = balance.get('free', balance)
@@ -1449,6 +1488,9 @@ def get_sellable_assets(exchange, config=None):
 def interactive_sell(exchange, data_manager, engine, config):
     console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
     balance = exchange.fetch_balance()
+    if not balance:
+        console.print("[red]Error: Failed to fetch balance.[/]")
+        return
     free_balances = balance.get('free', balance)
     base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR'])
 
@@ -1525,6 +1567,9 @@ def interactive_sell(exchange, data_manager, engine, config):
 def show_balance(exchange, config):
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
     balance = exchange.fetch_balance()
+    if not balance:
+        console.print("[red]Error: Failed to fetch balance.[/]")
+        return
 
     table = Table(title="Asset Inventory", expand=True)
     base_bet_curr = get_base_currency(None, config)
