@@ -800,7 +800,6 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500, since=None):
         try:
             new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=last_ts + 1)
             if new_candles:
-                 logging.info(f"[{symbol}] Incremental fetch: retrieved {len(new_candles)} new candles to fill gap.")
                  # Deduplicate and merge
                  cached_data.extend([c for c in new_candles if c[0] > last_ts])
                  # Keep only the last 100,000 for stability
@@ -2053,7 +2052,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                     sym, patterns = future.result()
                     if patterns:
                         msg_target = status.console if status else console
-                        if len(patterns) < 10: msg_target.print(f'[bold yellow]Warning: {sym} has only {len(patterns)} successful patterns (history too short).[/]')
                         # Instruction 4: Bench is average of techniques >= 0.22 base_bet_curr
                         winning_patterns = [p for p in patterns if p['profit'] >= 0.22]
                         if winning_patterns:
