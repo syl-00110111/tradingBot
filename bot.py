@@ -1884,19 +1884,24 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
                 'strategy': strategy,
                 'aggr': aggr,
                 'symbol': symbol,
-                'start_time': full_df['timestamp'].iloc[start_idx].strftime("%Y-%m-%d %H:%M"),
-                'end_time': full_df['timestamp'].iloc[end_idx-1].strftime("%Y-%m-%d %H:%M"),
+                'start_idx': start_idx,
+                'end_idx': end_idx,
                 'start_ts': window_ts,
-                'prices': full_df['close'].iloc[start_idx:end_idx].tolist(),
-                'tech_state': tech_state
+                'tech_state': tech_state,
+                'full_df_ref': full_df # Temporary reference for final data population
             })
 
     # Keep top 5 patterns per pair (overlapping allowed)
     patterns.sort(key=lambda x: x['score'], reverse=True)
+    top_patterns_raw = patterns[:5]
     top_patterns = []
 
-    for p in patterns:
-        if len(top_patterns) >= 5: break
+    for p in top_patterns_raw:
+        df = p.pop('full_df_ref')
+        s_idx, e_idx = p.pop('start_idx'), p.pop('end_idx')
+        p['start_time'] = df['timestamp'].iloc[s_idx].strftime("%Y-%m-%d %H:%M")
+        p['end_time'] = df['timestamp'].iloc[e_idx-1].strftime("%Y-%m-%d %H:%M")
+        p['prices'] = df['close'].iloc[s_idx:e_idx].tolist()
         top_patterns.append(p)
 
     return symbol, top_patterns
@@ -1968,10 +1973,15 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                     if not ohlcv or len(ohlcv) == 0: break
                     all_ohlcv.extend(ohlcv); current_since = ohlcv[-1][0] + 1
                     if len(all_ohlcv) > 40000: break
-                    if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Initial history for {symbol}: {len(all_ohlcv)} candles...")
+                    if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Initial history for {symbol}: Downloading {len(all_ohlcv)}/40000 candles...")
                 if all_ohlcv: ohlcv_cache_manager.set(symbol, timeframe, all_ohlcv)
 
             full_history, new_count = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=40000)
+            if new_count > 0:
+                msg = f"[bold cyan][{i+1}/{len(symbols)}] Downloading {new_count} new candles for {symbol} (Total: {len(full_history)})"
+                if status: status.update(msg)
+                else: console.print(msg)
+
             if full_history:
                 df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
