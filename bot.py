@@ -1669,6 +1669,13 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
+    # Ensure hardware optimization is active in worker process
+    if device and device.type == 'cpu' and torch.backends.mkldnn.is_available():
+        torch.backends.mkldnn.enabled = True
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        torch.set_num_threads(1)
+
     if df_in is None or len(df_in) < 100: return symbol, []
 
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})

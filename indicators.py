@@ -109,8 +109,13 @@ def get_signals(df, mode_config, is_backtest=False):
 
     # Common indicators for tendency and background analysis (Expert Mode)
     if df.empty: return finalize_signals(df)
-    # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
-    use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
+
+    # Standardize hardware acceleration: enable MKLDNN if on CPU and supported
+    if device.type == 'cpu' and torch.backends.mkldnn.is_available():
+        torch.backends.mkldnn.enabled = True
+
+    use_acceleration = (device.type != 'cpu') or (device.type == 'cpu' and torch.backends.mkldnn.enabled)
+
     if use_acceleration:
         close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
         high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)

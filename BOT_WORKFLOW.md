@@ -100,3 +100,10 @@ Functional equivalent of Live mode but with virtual execution.
 - **Base Amount**: `base_trade_amount` (e.g., 20.0 EUR/USDT)
 - **Win Streak Bonus**: 1.3x multiplier after 2 consecutive wins.
 - **Global Risk Multiplier**: Scaled by `global_risk_multiplier` (default 1.2).
+
+### Hardware Optimization & Acceleration
+The bot is architected to maximize hardware utilization:
+- **GPU Acceleration**: Uses PyTorch with **CUDA** (NVIDIA), **MPS** (Apple Silicon), or **Vulkan** for technical indicators, Pearson correlation (SPM), and Monte Carlo simulations.
+- **CPU Optimization**: Leveraging **Intel oneDNN (MKLDNN)** and **AVX/AVX-512** instructions when running on CPU.
+- **Multi-Processing**: Benchmark mode uses `ProcessPoolExecutor` to parallelize strategy evaluation across all CPU cores.
+- **Vectorized Operations**: Indicators and Similarity scoring are implemented as vectorized PyTorch kernels to minimize loop overhead.
