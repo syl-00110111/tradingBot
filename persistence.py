@@ -65,7 +65,7 @@ def create_consolidated_archive(delete_after=True):
     Ensures that existing data in the archive is preserved if not present on disk.
     """
     files_to_archive = [
-        'success_pattern.json',
+        'success_patterns.json',
         'benchmark_cache.json',
         'trades_history_live.json',
         'trades_history_simulation.json',
@@ -165,7 +165,7 @@ def migrate_fresh_files_to_archive():
     Compares disk files with the archive and consolidates if disk is newer.
     """
     files_to_check = [
-        'success_pattern.json',
+        'success_patterns.json',
         'benchmark_cache.json',
         'trades_history_live.json',
         'trades_history_simulation.json',
@@ -264,7 +264,7 @@ class OHLCVCacheManager:
                 logging.error(f"Failed to save OHLCV cache for {symbol}: {e}")
 
 class PatternManager:
-    def __init__(self, filename='success_pattern.json'):
+    def __init__(self, filename='success_patterns.json'):
         self.filename = filename
         self.data = self._load()
 
