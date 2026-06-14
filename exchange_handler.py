@@ -1,4 +1,4 @@
-# Binance Trading Bot - Exchange Interface
+# Crypto-Currencies MultiPlatform Trading Bot - Exchange Interface
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import ccxt

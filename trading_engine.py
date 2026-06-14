@@ -1,4 +1,4 @@
-# Binance Trading Bot - Trading Engine
+# Crypto-Currencies MultiPlatform Trading Bot - Trading Engine
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import logging
