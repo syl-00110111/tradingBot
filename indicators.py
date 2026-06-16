@@ -276,54 +276,88 @@ def normalize_series(series):
 def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     """
     Calculates similarity between current buffer and a success pattern.
-    Combines shape correlation (price) and technical state distance.
+    Combines price shape correlation, volume shape correlation (scaled), and technical state distance.
     Uses GPU acceleration via PyTorch if available.
     """
-    if len(buffer_df) != len(pattern['prices']):
+    p_prices = pattern.get('prices', [])
+    if len(buffer_df) != len(p_prices) or not p_prices:
         return 0.0
 
-    # GPU-accelerated Shape Correlation
+    # GPU-accelerated Similarity
     try:
-        # Convert to tensors for fast computation
+        # 1. Price Similarity (Shape Correlation with Scaling)
         c_vals = torch.tensor(buffer_df['average'].values, device=device, dtype=torch.float64)
-        p_vals = torch.tensor(pattern['prices'], device=device, dtype=torch.float64)
+        p_vals = torch.tensor(p_prices, device=device, dtype=torch.float64)
 
-        # Min-max normalization on GPU
-        c_min, c_max = c_vals.min(), c_vals.max()
-        if c_max > c_min:
-            c_norm = (c_vals - c_min) / (c_max - c_min)
+        # Proportional scaling of price to current levels
+        c_p_mean = c_vals.mean()
+        p_p_mean = p_vals.mean()
+        if p_p_mean > 0 and c_p_mean > 0:
+            p_vals_scaled = p_vals * (c_p_mean / p_p_mean)
         else:
-            c_norm = c_vals * 0
+            p_vals_scaled = p_vals
 
-        p_min, p_max = p_vals.min(), p_vals.max()
-        if p_max > p_min:
-            p_norm = (p_vals - p_min) / (p_max - p_min)
-        else:
-            p_norm = p_vals * 0
+        # Pearson Correlation (Price)
+        stacked_p = torch.stack([c_vals, p_vals_scaled])
+        corr_mat_p = torch.corrcoef(stacked_p)
+        price_corr = float(corr_mat_p[0, 1].item())
+        if np.isnan(price_corr): price_corr = 0.0
 
-        # Pearson Correlation using torch.corrcoef
-        stacked = torch.stack([c_norm, p_norm])
-        corr_mat = torch.corrcoef(stacked)
-        shape_corr = float(corr_mat[0, 1].item())
-        if np.isnan(shape_corr): shape_corr = 0.0
+        # 2. Volume Similarity (Scaling and Volume-Driver)
+        vol_corr = 0.0
+        p_vols = pattern.get('volumes', [])
+        if p_vols and 'volume' in buffer_df.columns:
+            c_vol = torch.tensor(buffer_df['volume'].values, device=device, dtype=torch.float64)
+            p_vol = torch.tensor(p_vols, device=device, dtype=torch.float64)
+
+            # Proportional scaling of volume to current levels
+            c_vol_mean = c_vol.mean()
+            p_vol_mean = p_vol.mean()
+            if p_vol_mean > 0 and c_vol_mean > 0:
+                p_vol_scaled = p_vol * (c_vol_mean / p_vol_mean)
+            else:
+                p_vol_scaled = p_vol
+
+            # Pearson Correlation (Volume)
+            stacked_v = torch.stack([c_vol, p_vol_scaled])
+            corr_mat_v = torch.corrcoef(stacked_v)
+            vol_corr = float(corr_mat_v[0, 1].item())
+            if np.isnan(vol_corr): vol_corr = 0.0
+
     except Exception:
-        # Fallback to CPU/Pandas if torch fails
-        current_prices = normalize_series(buffer_df['average'])
-        pattern_prices = pd.Series(pattern['prices'])
-        shape_corr = current_prices.corr(pattern_prices)
-        if np.isnan(shape_corr): shape_corr = 0.0
+        # Fallback to CPU/Pandas
+        c_p = buffer_df['average']
+        p_p = pd.Series(p_prices)
+        if p_p.mean() > 0:
+            p_p_scaled = p_p * (c_p.mean() / p_p.mean())
+        else:
+            p_p_scaled = p_p
+        price_corr = c_p.corr(p_p_scaled)
+        if np.isnan(price_corr): price_corr = 0.0
 
-    # 2. Technical State Distance (Euclidean)
-    # We compare RSI and ADX states at the end of the window
+        vol_corr = 0.0
+        p_vols = pattern.get('volumes', [])
+        if p_vols and 'volume' in buffer_df.columns:
+            c_vol = buffer_df['volume']
+            p_vol = pd.Series(p_vols)
+            if p_vol.mean() > 0:
+                p_vol_scaled = p_vol * (c_vol.mean() / p_vol.mean())
+            else:
+                p_vol_scaled = p_vol
+            vol_corr = c_vol.corr(p_vol_scaled)
+            if np.isnan(vol_corr): vol_corr = 0.0
+
+    # 3. Technical State Distance
     curr_rsi = buffer_df['rsi'].iloc[-1]
     curr_adx = buffer_df['adx'].iloc[-1]
+    p_tech = pattern.get('tech_state', {'rsi': 50, 'adx': 0})
 
-    dist_rsi = abs(curr_rsi - pattern['tech_state']['rsi']) / 100.0
-    dist_adx = abs(curr_adx - pattern['tech_state']['adx']) / 100.0
+    dist_rsi = abs(curr_rsi - p_tech.get('rsi', 50)) / 100.0
+    dist_adx = abs(curr_adx - p_tech.get('adx', 0)) / 100.0
     tech_sim = 1.0 - (dist_rsi + dist_adx) / 2.0
 
-    # Combined Score (Weight: 70% Shape, 30% Tech)
-    combined = (0.7 * max(0, shape_corr)) + (0.3 * max(0, tech_sim))
+    # Combined Score (Weights: 50% Price, 20% Volume, 30% Tech)
+    combined = (0.5 * max(0, price_corr)) + (0.2 * max(0, vol_corr)) + (0.3 * max(0, tech_sim))
     return combined
 
 def handle_mc_strategies(df, strategy, config, is_backtest):

@@ -1299,7 +1299,35 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         candidates.append(item)
 
     # Filter for valid candidates (neither expired nor shifted)
-    valid_candidates = [c for c in candidates if not c['expired'] and not c['regime_shift']]
+    valid_candidates = []
+    if candidates:
+        def validate_candidate_mc(c):
+            # If not expired and no regime shift, it's already valid
+            if not c['expired'] and not c['regime_shift']:
+                return c, True
+
+            # Instruction: Monte Carlo tests must be done prior to re-benchmarking.
+            # If any candidate passes MC test, it can be reused even if expired/shifted.
+            p = c['pattern']
+            mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
+            mc_engine.set_device(device)
+            # Run MC on the current DF using this candidate's strategy
+            from indicators import get_signals
+            temp_cfg = {'strategy': p['strategy'], 'device': device}
+            df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
+            score = mc_engine.validate_strategy(df_mc)
+            hurdle = global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
+            # score is 0.5 + profit_prob. We want prob > 0.55-0.6 for reuse.
+            # Using 1.0 + hurdle as a proxy for "likely profitable"
+            return c, (score > 1.0 + hurdle)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), 10)) as mc_executor:
+            mc_futures = [mc_executor.submit(validate_candidate_mc, c) for c in candidates]
+            for f in concurrent.futures.as_completed(mc_futures):
+                c_res, is_valid = f.result()
+                if is_valid:
+                    valid_candidates.append(c_res)
+
     if valid_candidates:
         # Pick the best valid one
         valid_candidates.sort(key=lambda x: x['sim'], reverse=True)
@@ -2022,16 +2050,96 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
+def run_benchmark_for_strategy(symbol, strategy, config, term_to_test, aggr, df_with_common, engine, device, eval_window, profit_threshold, now_ts):
+    """Benchmarks a single strategy for a symbol."""
+    from indicators import get_signals
+
+    # Prepare settings
+    if engine:
+        mode_settings = engine.get_dynamic_settings(25.0, 0.001)
+    else:
+        mode_settings = {
+            "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+        }
+    mode_settings['strategy'] = strategy
+    mode_settings['device'] = device if device is not None else torch.device("cpu")
+
+    # 1. Calculate signals once for the entire dataset
+    try:
+        full_df = get_signals(df_with_common.copy(), mode_settings, is_backtest=True)
+    except Exception:
+        return []
+
+    # 2. Run a single backtest for the entire dataset
+    full_term_config = copy.deepcopy(config)
+    full_term_name = f"full_{strategy}"
+    full_term_config['expected_profit_terms'][full_term_name] = {
+        'eval_candles': len(full_df),
+        'timeframe': config['expected_profit_terms'][term_to_test]['timeframe']
+    }
+
+    res_full = run_backtest_logic(None, symbol, strategy, aggr, full_term_config,
+                                 term=full_term_name, df_in=full_df, engine=engine,
+                                 device=device, skip_mc=True, return_full_df=True, copy_df=False)
+
+    if not res_full or not res_full.get('equity_curve'):
+        return []
+
+    equity = res_full['equity_curve']
+    patterns = []
+
+    # 3. Slide window
+    max_offset = len(full_df) - eval_window
+    step = 5
+
+    for offset in range(0, max_offset, step):
+        start_idx = offset
+        end_idx = offset + eval_window
+        win_profit = equity[end_idx-1] - equity[start_idx]
+        if win_profit < profit_threshold: continue
+
+        window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
+        age_hours = (now_ts - window_ts) / 3600
+        recency_score = 1.0
+        if term_to_test == 'short':
+             if age_hours > 24: recency_score = 0.8
+             if age_hours > 168: recency_score = 0.5
+             if age_hours > 720: recency_score = 0.2
+        elif term_to_test == 'medium':
+             if age_hours > 168: recency_score = 0.8
+             if age_hours > 720: recency_score = 0.5
+
+        final_score = win_profit * recency_score
+        latest_row = full_df.iloc[end_idx-1]
+
+        patterns.append({
+            'profit': win_profit,
+            'score': final_score,
+            'strategy': strategy,
+            'aggr': aggr,
+            'symbol': symbol,
+            'start_time': full_df['timestamp'].iloc[start_idx].strftime("%Y-%m-%d %H:%M"),
+            'end_time': full_df['timestamp'].iloc[end_idx-1].strftime("%Y-%m-%d %H:%M"),
+            'prices': full_df['close'].iloc[start_idx:end_idx].tolist(),
+            'volumes': full_df['volume'].iloc[start_idx:end_idx].tolist(),
+            'tech_state': {
+                'rsi': float(latest_row.get('rsi', 50)),
+                'adx': float(latest_row.get('adx', 0)),
+                'volatility': float(latest_row.get('volatility', 0)),
+                'ema_f': float(latest_row.get('ema_f', 0)),
+                'ema_s': float(latest_row.get('ema_s', 0))
+            }
+        })
+    return patterns
+
 def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None, threshold_conv=1.0):
     """
-    Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
+    Scans historical data for success patterns using multithreaded strategy evaluation.
     """
     # Ensure hardware optimization is active in worker process
     if device and device.type == 'cpu' and torch.backends.mkldnn.is_available():
         torch.backends.mkldnn.enabled = True
-        os.environ['OMP_NUM_THREADS'] = '1'
-        os.environ['MKL_NUM_THREADS'] = '1'
-        torch.set_num_threads(1)
+        torch.set_num_threads(1) # Torch should be restricted within process pool workers
 
     if df_in is None or len(df_in) < 100: return symbol, []
 
@@ -2039,118 +2147,21 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     eval_window_base = term_cfg.get('eval_candles', 60)
     max_rand = max(1, int(eval_window_base * 0.1))
     eval_window = eval_window_base + random.randint(-max_rand, max_rand)
-    patterns = []
+
+    from indicators import get_common_indicators
+    worker_device = device if device is not None else torch.device("cpu")
+    df_with_common = get_common_indicators(df_in, device=worker_device)
+    aggr = aggrs[0] if aggrs else 'dynamic'
+    profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015) * threshold_conv
     now_ts = time.time()
 
-    from indicators import get_signals, get_common_indicators
+    patterns = []
+    # Use ThreadPoolExecutor for multithreaded Monte Carlo / Strategy tests within the symbol benchmark
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(strategies), os.cpu_count() or 4)) as executor:
+        futures = [executor.submit(run_benchmark_for_strategy, symbol, strat, config, term_to_test, aggr, df_with_common, engine, device, eval_window, profit_threshold, now_ts) for strat in strategies]
+        for future in concurrent.futures.as_completed(futures):
+            patterns.extend(future.result())
 
-    # Pre-calculate common indicators once for all strategies
-    worker_device = device if device is not None else torch.device("cpu")
-    # No need to copy df_in as it's already a worker-local copy in the process pool
-    df_with_common = get_common_indicators(df_in, device=worker_device)
-
-    # We use 'dynamic' as the default aggr for benchmarking
-    aggr = aggrs[0] if aggrs else 'dynamic'
-
-    # Instruction 8: Convert thresholds to base currency
-    # threshold_conv is now passed from the main process
-
-    profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015) * threshold_conv
-
-    for strategy in strategies:
-        # Prepare settings
-        if engine:
-            mode_settings = engine.get_dynamic_settings(25.0, 0.001)
-        else:
-            mode_settings = {
-                "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-            }
-        mode_settings['strategy'] = strategy
-        mode_settings['device'] = device if device is not None else torch.device("cpu")
-
-        # 1. Calculate signals once for the entire dataset
-        try:
-            # Re-use the common indicators pre-calculated above. We copy to avoid signal bleed between strategies.
-            full_df = get_signals(df_with_common.copy(), mode_settings, is_backtest=True)
-        except Exception:
-            continue
-
-        # 2. Run a single backtest for the entire dataset
-        # We set eval_candles to the whole length to get a continuous equity curve
-        full_term_config = copy.deepcopy(config)
-        # Create a temporary term that covers the whole DF
-        full_term_name = f"full_{strategy}"
-        full_term_config['expected_profit_terms'][full_term_name] = {
-            'eval_candles': len(full_df),
-            'timeframe': term_cfg.get('timeframe', '5m')
-        }
-
-        res_full = run_backtest_logic(None, symbol, strategy, aggr, full_term_config,
-                                     term=full_term_name, df_in=full_df, engine=engine,
-                                     device=device, skip_mc=True, return_full_df=True, copy_df=False)
-
-        if not res_full or not res_full.get('equity_curve'):
-            continue
-
-        equity = res_full['equity_curve']
-
-        # 3. Slide window over the equity curve to find profitable periods
-        # Complexity is now O(N) instead of O(N*W) backtest runs
-        max_offset = len(full_df) - eval_window
-        step = 5
-
-        for offset in range(0, max_offset, step):
-            start_idx = offset
-            end_idx = offset + eval_window
-
-            # Profit in this window
-            win_profit = equity[end_idx-1] - equity[start_idx]
-
-            if win_profit < profit_threshold:
-                continue
-
-            # Score with Recency Pondering
-            window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
-            age_hours = (now_ts - window_ts) / 3600
-            recency_score = 1.0
-            if term_to_test == 'short':
-                 if age_hours > 24: recency_score = 0.8
-                 if age_hours > 168: recency_score = 0.5
-                 if age_hours > 720: recency_score = 0.2
-            elif term_to_test == 'medium':
-                 if age_hours > 168: recency_score = 0.8
-                 if age_hours > 720: recency_score = 0.5
-
-            final_score = win_profit * recency_score
-
-            # For technical state, we take the values at the end of the window
-            latest_row = full_df.iloc[end_idx-1]
-            tech_state = {
-                'rsi': float(latest_row.get('rsi', 50)),
-                'adx': float(latest_row.get('adx', 0)),
-                'volatility': float(latest_row.get('volatility', 0)),
-                'ema_f': float(latest_row.get('ema_f', 0)),
-                'ema_s': float(latest_row.get('ema_s', 0))
-            }
-
-            patterns.append({
-                'profit': win_profit,
-                'score': final_score,
-                'strategy': strategy,
-                'aggr': aggr,
-                'symbol': symbol,
-                'start_time': full_df['timestamp'].iloc[start_idx].strftime("%Y-%m-%d %H:%M"),
-                'end_time': full_df['timestamp'].iloc[end_idx-1].strftime("%Y-%m-%d %H:%M"),
-                'prices': full_df['close'].iloc[start_idx:end_idx].tolist(),
-                'tech_state': tech_state
-            })
-
-        # Memory optimization: only keep the best candidates to avoid building a massive list
-        if len(patterns) > 500:
-             patterns.sort(key=lambda x: x['score'], reverse=True)
-             patterns = patterns[:200]
-
-    # Keep top 5 patterns per pair (overlapping allowed)
     patterns.sort(key=lambda x: x['score'], reverse=True)
     return symbol, patterns[:5]
 
@@ -2373,16 +2384,33 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
     if not found_any:
         # Instruction 8: Convert message threshold to base currency
-        # We take the first pair's quote currency as a representative
         base_bet_curr = get_base_currency(None, config)
-        msg_threshold = f"0.022 {base_bet_curr}"
+
+        # Calculate threshold based on 1% of the current balance (as per user request: 1% per base asset)
+        # We try to fetch real balance if available
+        try:
+            balance_data = exchange.fetch_balance()
+            total_balance = balance_data.get(base_bet_curr, {}).get('total', 0) if isinstance(balance_data.get(base_bet_curr), dict) else balance_data.get(base_bet_curr, 0)
+        except:
+            total_balance = 0
+
+        # Default 1% of total balance or fallback to 0.022 if balance unknown
+        threshold_pct = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold_pct', 0.01)
+
+        if total_balance > 0:
+            msg_threshold_val = total_balance * threshold_pct
+        else:
+            # Fallback to configured absolute threshold if balance cannot be determined
+            msg_threshold_val = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.022)
+
+        msg_threshold = f"{msg_threshold_val:.4g} {base_bet_curr}"
         if symbols:
             quote = symbols[0].split('/')[1]
             if quote != base_bet_curr:
                 try:
                     ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
                     if ticker and ticker.get('last'):
-                        msg_threshold = f"{config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.022) * ticker['last']:.3} {quote}"
+                        msg_threshold = f"{msg_threshold_val * ticker['last']:.4g} {quote}"
                 except: pass
 
         console.print(f"[yellow]No successful patterns (> {msg_threshold}) were found in the scanned historical data.[/]")
