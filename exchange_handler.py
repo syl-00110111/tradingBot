@@ -243,12 +243,20 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, li
     # 3. Fallback: if cache still empty and since was not provided
     if not cached_data:
         try:
+            target_limit = limit if limit else 500
             fetch_since = int(since) if since is not None else None
-            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=fetch_since, limit=limit if limit else 500)
-            if new_candles:
-                new_count = len(new_candles)
-                cached_data = new_candles
+
+            while len(cached_data) < target_limit:
+                current_limit = min(1000, target_limit - len(cached_data))
+                new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=fetch_since, limit=current_limit)
+                if not new_candles: break
+
+                cached_data.extend(new_candles)
+                new_count += len(new_candles)
+                fetch_since = new_candles[-1][0] + 1
                 updated = True
+
+                if len(new_candles) < 10: break # Probably reached the end or limit
         except Exception as e:
              logging.warning(f"[{symbol}] Initial fetch failed: {e}")
 

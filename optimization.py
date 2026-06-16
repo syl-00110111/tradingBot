@@ -272,7 +272,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 if now_ts - best_cached.get('last_bench_ts', 0) < 3600:
                     return sym, None, cached_patterns, best_cached
 
-            limit = 5000 if term_to_test == 'short' else 10000 if term_to_test == 'medium' else 20000
+            limit = 20000 if term_to_test == 'short' else 40000
             ohlcv, _ = fetch_ohlcv_incremental(exchange, sym, timeframe, ohlcv_cache_manager, limit=limit)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
