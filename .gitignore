@@ -8,4 +8,6 @@ cache/
 api.json
 bot_data_backup.zip
 bot_data_backup.zip.tmp
+success_patterns.json
+benchmark_cache.json
 PROMPT.txt
