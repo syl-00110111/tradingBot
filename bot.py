@@ -144,6 +144,10 @@ def get_base_currency(symbol, config):
     base_currencies = config.get('base_currencies', ['USDT'])
     return base_currencies[0] if base_currencies else 'USDT'
 
+def silent_worker_init():
+    """Initializer to ignore SIGINT in worker processes."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
 class DashboardHandler(logging.Handler):
     def __init__(self, duration=5):
         super().__init__()
@@ -2234,14 +2238,14 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         def handle_bench_shutdown(sig, frame):
              shutdown_event.set()
              executor.shutdown(wait=False, cancel_futures=True)
-             sys.exit(0)
+             raise KeyboardInterrupt
 
         if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
         # On CPU with oneDNN, ThreadPoolExecutor might be more efficient for many small torch tasks
         # than ProcessPoolExecutor which has pickling overhead.
         # We limit max_workers to prevent massive memory spikes when processing large history.
         executor_class = concurrent.futures.ProcessPoolExecutor
-        with executor_class(max_workers=min(os.cpu_count() or 1, 4)) as executor:
+        with executor_class(max_workers=min(os.cpu_count() or 1, 4), initializer=silent_worker_init) as executor:
             # Register signal handler during optimization
             original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
