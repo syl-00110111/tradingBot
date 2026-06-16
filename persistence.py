@@ -53,7 +53,10 @@ class AsyncArchiver(threading.Thread):
             # Final consolidation on stop - here we CAN delete after archiving
             logging.info("Async Archiver: Finalizing archive before exit...")
             create_consolidated_archive(delete_after=True)
-            self.join(timeout=5)
+            try:
+                self.join(timeout=5)
+            except RuntimeError:
+                pass
 
 # Global archiver instance
 archiver = AsyncArchiver()
@@ -68,441 +71,304 @@ def create_consolidated_archive(delete_after=True):
         'success_patterns.json',
         'benchmark_cache.json',
         'trades_history_live.json',
-        'trades_history_simulation.json',
-        'trades_history_sell.json'
+        'trades_history_simulation.json'
     ]
-    temp_archive = ARCHIVE_NAME + '.tmp'
 
     with persistence_lock:
         try:
-            # Determine what's on disk
-            on_disk = {}
+            # 1. Collect what we currently have on disk
+            present_on_disk = []
             for f in files_to_archive:
                 if os.path.exists(f):
-                    on_disk[f] = f
+                    present_on_disk.append(f)
 
-            if os.path.exists(CACHE_DIR):
-                for root, dirs, files in os.walk(CACHE_DIR):
-                    for file in files:
-                        filepath = os.path.join(root, file)
-                        # Normalize path for zip comparison
-                        norm_path = filepath.replace('\\', '/')
-                        on_disk[norm_path] = filepath
+            # Also include everything in cache/ohlcv/
+            if os.path.exists(OHLCV_DIR):
+                for f in os.listdir(OHLCV_DIR):
+                    if f.endswith('.pkl'):
+                        present_on_disk.append(os.path.join(OHLCV_DIR, f))
 
-            if not on_disk and not os.path.exists(ARCHIVE_NAME):
+            if not present_on_disk and not os.path.exists(ARCHIVE_NAME):
                 return
 
-            # Implementation of Merge/Update logic to avoid data loss
-            if os.path.exists(ARCHIVE_NAME):
-                with zipfile.ZipFile(ARCHIVE_NAME, 'r') as old_zip:
-                    with zipfile.ZipFile(temp_archive, 'w', zipfile.ZIP_DEFLATED) as new_zip:
-                        # 1. Copy everything from old zip that is NOT being updated from disk
-                        for item in old_zip.infolist():
-                            if item.filename not in on_disk:
-                                new_zip.writestr(item, old_zip.read(item.filename))
+            # 2. Create temporary archive
+            tmp_archive = ARCHIVE_NAME + '.tmp'
 
-                        # 2. Add/Update everything from disk
-                        for norm_path, real_path in on_disk.items():
-                            new_zip.write(real_path, norm_path)
-
-                # Atomic swap
+            with zipfile.ZipFile(tmp_archive, 'w', zipfile.ZIP_DEFLATED) as z_new:
+                # First, copy EVERYTHING from the old archive that is NOT currently on disk
                 if os.path.exists(ARCHIVE_NAME):
-                    os.remove(ARCHIVE_NAME)
-                os.rename(temp_archive, ARCHIVE_NAME)
-            else:
-                # Fresh archive
-                with zipfile.ZipFile(ARCHIVE_NAME, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for norm_path, real_path in on_disk.items():
-                        zipf.write(real_path, norm_path)
+                    with zipfile.ZipFile(ARCHIVE_NAME, 'r') as z_old:
+                        for item in z_old.infolist():
+                            if item.filename not in present_on_disk:
+                                z_new.writestr(item, z_old.read(item.filename))
 
+                # Then, add everything currently on disk (this overwrites if it was in the old zip)
+                for f in present_on_disk:
+                    z_new.write(f)
+
+            # 3. Atomic replacement
+            if os.path.exists(ARCHIVE_NAME):
+                os.remove(ARCHIVE_NAME)
+            os.rename(tmp_archive, ARCHIVE_NAME)
+
+            # 4. Cleanup disk if requested
             if delete_after:
-                # Standard Bot Design: archive then clean disk
-                for f in files_to_archive:
-                    if os.path.exists(f):
-                        try: os.remove(f)
-                        except: pass
-
-                if os.path.exists(CACHE_DIR):
-                    try: shutil.rmtree(CACHE_DIR)
+                for f in present_on_disk:
+                    try:
+                        os.remove(f)
                     except: pass
-
-                # Re-ensure directories exist for next disk write phase
-                os.makedirs(OHLCV_DIR, exist_ok=True)
-
-        except Exception as e:
-            logging.error(f"Failed to create consolidated archive: {e}")
-            if os.path.exists(temp_archive):
-                try: os.remove(temp_archive)
+                # Try to remove empty directories
+                try:
+                    if os.path.exists(OHLCV_DIR) and not os.listdir(OHLCV_DIR):
+                        os.rmdir(OHLCV_DIR)
+                    if os.path.exists(CACHE_DIR) and not os.listdir(CACHE_DIR):
+                        os.rmdir(CACHE_DIR)
                 except: pass
 
-def load_from_archive(filename=None):
-    """
-    Extracts files from the archive.
-    """
+        except Exception as e:
+            logging.error(f"Failed to consolidate archive: {e}")
+            if os.path.exists(tmp_archive):
+                try: os.remove(tmp_archive)
+                except: pass
+
+def load_from_archive():
+    """Extracts files from the consolidated archive back to disk."""
     if not os.path.exists(ARCHIVE_NAME):
-        return False
-    with persistence_lock:
-        try:
-            with zipfile.ZipFile(ARCHIVE_NAME, 'r') as zipf:
-                if filename:
-                    # Handle filename being a path inside the zip
-                    norm_filename = filename.replace('\\', '/')
-                    if norm_filename in zipf.namelist():
-                        zipf.extract(norm_filename)
-                        return True
-                    return False
-
-                # Extract everything
-                zipf.extractall()
-                # Re-ensure directory structure
-                os.makedirs(OHLCV_DIR, exist_ok=True)
-                return True
-        except:
-            return False
-
-def migrate_fresh_files_to_archive():
-    """
-    Compares disk files with the archive and consolidates if disk is newer.
-    """
-    files_to_check = [
-        'success_patterns.json',
-        'benchmark_cache.json',
-        'trades_history_live.json',
-        'trades_history_simulation.json',
-        'trades_history_sell.json'
-    ]
-
-    if not os.path.exists(ARCHIVE_NAME):
-        any_file = any(os.path.exists(f) for f in files_to_check) or os.path.exists(CACHE_DIR)
-        if any_file:
-            logging.info("Initializing bot archive from disk files...")
-            create_consolidated_archive(delete_after=True)
         return
 
     with persistence_lock:
         try:
-            updated = False
-            all_disk_files = []
-            for f in files_to_check:
-                if os.path.exists(f): all_disk_files.append(f)
-
-            if os.path.exists(CACHE_DIR):
-                for root, dirs, files in os.walk(CACHE_DIR):
-                    for file in files:
-                        all_disk_files.append(os.path.join(root, file))
-
-            if not all_disk_files: return
-
-            with zipfile.ZipFile(ARCHIVE_NAME, 'r') as zipf:
-                archive_members = {info.filename: info for info in zipf.infolist()}
-
-                for disk_file in all_disk_files:
-                    norm_path = disk_file.replace('\\', '/')
-                    disk_mtime = os.path.getmtime(disk_file)
-
-                    if norm_path not in archive_members:
-                        updated = True; break
-
-                    z_time = archive_members[norm_path].date_time
-                    archive_mtime = time.mktime((*z_time, 0, 0, -1))
-
-                    if disk_mtime > (archive_mtime + 2):
-                        updated = True; break
-
-            if updated:
-                logging.info("Found fresher or new data files on disk. Consolidating into archive...")
-                create_consolidated_archive(delete_after=True)
-            else:
-                # Disk matches archive, clean up to avoid confusion
-                for f in all_disk_files:
-                     try: os.remove(f)
-                     except: pass
-                if os.path.exists(CACHE_DIR):
-                     try: shutil.rmtree(CACHE_DIR)
-                     except: pass
-                os.makedirs(OHLCV_DIR, exist_ok=True)
+            with zipfile.ZipFile(ARCHIVE_NAME, 'r') as z:
+                z.extractall()
+            logging.info(f"Successfully restored data from {ARCHIVE_NAME}")
         except Exception as e:
-            logging.error(f"Error during archive consolidation: {e}")
+            logging.error(f"Failed to load from archive: {e}")
+
+def migrate_fresh_files_to_archive():
+    """One-time migration at startup to ensure disk files are in the zip and cleaned up."""
+    logging.info("Syncing disk files to archive...")
+    create_consolidated_archive(delete_after=True)
+
+class DataManager:
+    def __init__(self, mode='simulation'):
+        self.mode = mode
+        self.history_file = f'trades_history_{mode}.json'
+        self.positions = {}
+        self.history = []
+        self._load()
+
+    def _load(self):
+        with persistence_lock:
+            if os.path.exists(self.history_file):
+                try:
+                    with open(self.history_file, 'r') as f:
+                        data = json.load(f)
+                        self.positions = data.get('positions', {})
+                        self.history = data.get('history', [])
+                except Exception as e:
+                    logging.error(f"Failed to load history: {e}")
+
+    def _save(self):
+        with persistence_lock:
+            try:
+                with open(self.history_file, 'w') as f:
+                    json.dump({'positions': self.positions, 'history': self.history}, f, indent=4)
+                # Request async archival
+                archiver.trigger()
+            except Exception as e:
+                logging.error(f"Failed to save history: {e}")
+
+    def add_position(self, symbol, entry_price, amount, entry_fee, trigger_data, timestamp, total_base=0):
+        if symbol not in self.positions:
+            self.positions[symbol] = []
+
+        pos = {
+            'entry_price': entry_price,
+            'amount': amount,
+            'entry_fee': entry_fee,
+            'entry_total_base': total_base if total_base > 0 else (entry_price * amount),
+            'trigger_data': trigger_data,
+            'timestamp': timestamp,
+            'ignore_sell': False
+        }
+        self.positions[symbol].append(pos)
+        self._save()
+
+    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, position_idx=0):
+        if symbol in self.positions and position_idx < len(self.positions[symbol]):
+            pos = self.positions[symbol].pop(position_idx)
+
+            trade = {
+                'symbol': symbol,
+                'entry_price': pos['entry_price'],
+                'exit_price': exit_price,
+                'amount': pos['amount'],
+                'entry_fee': pos['entry_fee'],
+                'exit_fee': exit_fee,
+                'entry_total_base': pos['entry_total_base'],
+                'exit_total_base': total_base if total_base > 0 else (exit_price * pos['amount']),
+                'profit': profit,
+                'trigger_data': trigger_data,
+                'entry_timestamp': pos['timestamp'],
+                'exit_timestamp': timestamp
+            }
+            self.history.append(trade)
+            if not self.positions[symbol]:
+                del self.positions[symbol]
+            self._save()
+            return True
+        return False
+
+    def get_positions(self, symbol):
+        return self.positions.get(symbol, [])
+
+    def get_position(self, symbol):
+        pos_list = self.get_positions(symbol)
+        return pos_list[0] if pos_list else None
+
+    def get_open_positions(self):
+        return self.positions
+
+    def flag_ignore_sell(self, symbol, position_idx=0):
+        if symbol in self.positions and position_idx < len(self.positions[symbol]):
+            self.positions[symbol][position_idx]['ignore_sell'] = True
+            self._save()
+
+    def get_win_streak(self, symbol):
+        streak = 0
+        for trade in reversed(self.history):
+            if trade['symbol'] == symbol:
+                if trade['profit'] > 0:
+                    streak += 1
+                else:
+                    break
+        return streak
+
+    def clear_history(self):
+        self.history = []
+        self._save()
+
+class PatternManager:
+    def __init__(self, filename='success_patterns.json'):
+        self.filename = filename
+        self.patterns = {}
+        self._load()
+
+    def _load(self):
+        with persistence_lock:
+            if os.path.exists(self.filename):
+                try:
+                    with open(self.filename, 'r') as f:
+                        self.patterns = json.load(f)
+                except Exception as e:
+                    logging.error(f"Failed to load patterns: {e}")
+
+    def _save(self):
+        with persistence_lock:
+            try:
+                with open(self.filename, 'w') as f:
+                    json.dump(self.patterns, f, indent=4)
+                archiver.trigger()
+            except Exception as e:
+                logging.error(f"Failed to save patterns: {e}")
+
+    def get_patterns(self, symbol):
+        return self.patterns.get(symbol, [])
+
+    def set_patterns(self, symbol, patterns):
+        self.patterns[symbol] = patterns
+        self._save()
+
+class CacheManager:
+    def __init__(self, filename='benchmark_cache.json'):
+        self.filename = filename
+        self.cache = {}
+        self._load()
+
+    def _load(self):
+        with persistence_lock:
+            if os.path.exists(self.filename):
+                try:
+                    with open(self.filename, 'r') as f:
+                        self.cache = json.load(f)
+                except Exception as e:
+                    logging.error(f"Failed to load benchmark cache: {e}")
+
+    def _save(self):
+        with persistence_lock:
+            try:
+                with open(self.filename, 'w') as f:
+                    json.dump(self.cache, f, indent=4)
+                archiver.trigger()
+            except Exception as e:
+                logging.error(f"Failed to save benchmark cache: {e}")
+
+    def get(self, symbol, term):
+        key = f"{symbol}_{term}"
+        return self.cache.get(key)
+
+    def set(self, symbol, term, data):
+        key = f"{symbol}_{term}"
+        self.cache[key] = data
+        self._save()
 
 class OHLCVCacheManager:
-    """
-    Manages individual OHLCV cache files per pair/timeframe.
-    """
-    def __init__(self):
-        with persistence_lock:
-            os.makedirs(OHLCV_DIR, exist_ok=True)
+    def __init__(self, directory=OHLCV_DIR):
+        self.directory = directory
+        if not os.path.exists(self.directory):
+            os.makedirs(self.directory, exist_ok=True)
 
     def _get_path(self, symbol, timeframe):
-        safe_symbol = symbol.replace('/', '_')
-        return os.path.join(OHLCV_DIR, f"{safe_symbol}_{timeframe}.pkl")
+        safe_sym = symbol.replace('/', '_')
+        return os.path.join(self.directory, f"{safe_sym}_{timeframe}.pkl")
 
     def get(self, symbol, timeframe):
-        """
-        Retrieves individual candle data for a pair/timeframe.
-        """
         path = self._get_path(symbol, timeframe)
-        if not os.path.exists(path):
-            load_from_archive(path)
-
         with persistence_lock:
             if os.path.exists(path):
                 try:
                     with open(path, 'rb') as f:
                         return pickle.load(f)
-                except Exception: return []
-        return []
+                except Exception as e:
+                    logging.error(f"Failed to load OHLCV cache for {symbol}: {e}")
+        return None
 
     def set(self, symbol, timeframe, data):
         path = self._get_path(symbol, timeframe)
         with persistence_lock:
             try:
-                os.makedirs(OHLCV_DIR, exist_ok=True)
                 with open(path, 'wb') as f:
                     pickle.dump(data, f)
                 archiver.trigger()
             except Exception as e:
                 logging.error(f"Failed to save OHLCV cache for {symbol}: {e}")
 
-class PatternManager:
-    def __init__(self, filename='success_patterns.json'):
-        self.filename = filename
-        self.data = self._load()
-
-    def _load(self):
-        if not os.path.exists(self.filename):
-            load_from_archive(self.filename)
-
-        with persistence_lock:
-            if os.path.exists(self.filename):
-                try:
-                    with open(self.filename, 'r') as f:
-                        return json.load(f)
-                except Exception: return {}
-        return {}
-
-    def save(self):
-        with persistence_lock:
-            with open(self.filename, 'w') as f:
-                json.dump(self.data, f, indent=4)
-        archiver.trigger()
-
-    def set_patterns(self, symbol, patterns):
-        self.data[symbol] = patterns[:5]
-        self.save()
-
-    def get_patterns(self, symbol):
-        return self.data.get(symbol, [])
-
-class DataManager:
-    def __init__(self, mode='simulation'):
-        self.filepath = f'trades_history_{mode}.json'
-        self.data = self._load_data()
-
-    def _load_data(self):
-        default_data = {"open_positions": {}, "trade_history": []}
-        if not os.path.exists(self.filepath):
-            load_from_archive(self.filepath)
-
-        with persistence_lock:
-            if os.path.exists(self.filepath):
-                try:
-                    with open(self.filepath, 'r') as f:
-                        data = json.load(f)
-                        if "open_positions" not in data: data["open_positions"] = {}
-                        if "trade_history" not in data: data["trade_history"] = []
-                        for sym, pos in data["open_positions"].items():
-                            if isinstance(pos, dict):
-                                data["open_positions"][sym] = [pos]
-                            for p in data["open_positions"][sym]:
-                                if "sell_signals_received" not in p: p["sell_signals_received"] = 0
-                                if "last_sell_signal_candle_ts" not in p: p["last_sell_signal_candle_ts"] = None
-                        return data
-                except json.JSONDecodeError:
-                    return default_data
-            else:
-                return default_data
-
-    def _save_data(self):
-        with persistence_lock:
-            if not self.data["open_positions"] and not self.data["trade_history"]:
-                if os.path.exists(self.filepath):
-                    os.remove(self.filepath)
-                archiver.trigger()
-                return
-
-            with open(self.filepath, 'w') as f:
-                json.dump(self.data, f, indent=4)
-        archiver.trigger()
-
-    def clear_history(self):
-        with persistence_lock:
-            self.data = {"open_positions": {}, "trade_history": []}
-            if os.path.exists(self.filepath):
-                os.remove(self.filepath)
-        archiver.trigger()
-
-    def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
-        if symbol not in self.data["open_positions"]:
-            self.data["open_positions"][symbol] = []
-
-        self.data["open_positions"][symbol].append({
-            "entry_price": entry_price, "amount": amount, "entry_fee": fee,
-            "entry_total_base": total_base, "trigger_data": trigger_data,
-            "timestamp": timestamp, "sell_signals_received": 0, "last_sell_signal_candle_ts": None
-        })
-        self._save_data()
-
-    def increment_sell_signals(self, symbol, candle_ts):
-        if symbol in self.data["open_positions"]:
-            updated = False
-            for pos in self.data["open_positions"][symbol]:
-                if pos.get("last_sell_signal_candle_ts") != candle_ts:
-                    pos["sell_signals_received"] = pos.get("sell_signals_received", 0) + 1
-                    pos["last_sell_signal_candle_ts"] = candle_ts
-                    updated = True
-            if updated:
-                self._save_data()
-                return True
-        return False
-
-    def flag_ignore_sell(self, symbol, position_idx=0):
-        if symbol in self.data["open_positions"] and len(self.data["open_positions"][symbol]) > position_idx:
-            self.data["open_positions"][symbol][position_idx]["ignore_sell"] = True
-            self._save_data()
-
-    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, position_idx=0):
-        if symbol in self.data["open_positions"] and len(self.data["open_positions"][symbol]) > position_idx:
-            position = self.data["open_positions"][symbol].pop(position_idx)
-            if not self.data["open_positions"][symbol]:
-                self.data["open_positions"].pop(symbol)
-
-            trade = {
-                "symbol": symbol, "entry_price": position["entry_price"], "exit_price": exit_price,
-                "amount": position["amount"], "entry_fee": position.get("entry_fee", 0),
-                "entry_total_base": position.get("entry_total_base", 0), "exit_fee": exit_fee,
-                "exit_total_base": total_base, "profit": profit, "entry_trigger": position.get("trigger_data", {}),
-                "exit_trigger": trigger_data, "entry_timestamp": position["timestamp"], "exit_timestamp": timestamp,
-                "sell_signals_received": position.get("sell_signals_received", 0)
-            }
-            self.data["trade_history"].append(trade)
-            self._save_data()
-            return trade
-        return None
-
-    def get_open_positions(self): return self.data["open_positions"]
-    def get_positions(self, symbol): return self.data["open_positions"].get(symbol, [])
-    def get_position(self, symbol):
-        pos_list = self.get_positions(symbol)
-        return pos_list[0] if pos_list else None
-
-    def get_win_streak(self, symbol):
-        streak = 0
-        history = [t for t in self.data.get("trade_history", []) if t.get("symbol") == symbol]
-        for trade in reversed(history):
-            if trade.get("profit", 0) > 0: streak += 1
-            else: break
-        return streak
-
-class CacheManager:
-    """
-    Manages benchmark results using a single JSON file.
-    """
-    def __init__(self, filename='benchmark_cache.json'):
-        self.filename = filename
-        self.data = self._load()
-
-    def _load(self):
-        if not os.path.exists(self.filename):
-            load_from_archive(self.filename)
-
-        with persistence_lock:
-            if os.path.exists(self.filename):
-                try:
-                    with open(self.filename, 'r') as f:
-                        return json.load(f)
-                except Exception: return {}
-        return {}
-
-    def _save(self):
-        with persistence_lock:
-            with open(self.filename, 'w') as f:
-                json.dump(self.data, f, indent=4)
-        archiver.trigger()
-
-    def get(self, symbol, term, max_age_seconds=None):
-        """
-        Retrieves cached benchmark patterns.
-        """
-        key = f"{symbol}_{term}"
-        entry = self.data.get(key)
-        if entry:
-            if max_age_seconds is None:
-                return entry
-            if time.time() - entry['timestamp'] < max_age_seconds:
-                return entry['data']
-        return None
-
-    def set(self, symbol, term, data):
-        key = f"{symbol}_{term}"
-        self.data[key] = {'timestamp': time.time(), 'data': data}
-        self._save()
-
-    def delete(self, symbol, term):
-        key = f"{symbol}_{term}"
-        if key in self.data:
-            del self.data[key]
-            self._save()
-
 class MonteCarloCacheManager:
-    """
-    Manages Monte Carlo validation results using individual files.
-    """
-    def __init__(self):
-        if not os.path.exists(CACHE_DIR):
-            load_from_archive()
-            with persistence_lock:
-                os.makedirs(CACHE_DIR, exist_ok=True)
+    def __init__(self, directory=os.path.join(CACHE_DIR, 'mc')):
+        self.directory = directory
+        if not os.path.exists(self.directory):
+            os.makedirs(self.directory, exist_ok=True)
 
-    def _get_path(self, symbol, timeframe, timestamp):
-        safe_symbol = symbol.replace('/', '_')
-        return os.path.join(CACHE_DIR, f"mc_{safe_symbol}_{timeframe}_{timestamp}.json")
+    def _get_path(self, strategy_id):
+        return os.path.join(self.directory, f"{strategy_id}.pkl")
 
-    def get(self, symbol, timeframe, timestamp):
-        path = self._get_path(symbol, timeframe, timestamp)
-        if not os.path.exists(path):
-            load_from_archive(path)
-
+    def get(self, strategy_id):
+        path = self._get_path(strategy_id)
         with persistence_lock:
             if os.path.exists(path):
                 try:
-                    with open(path, 'r') as f:
-                        return json.load(f).get('score')
-                except Exception: pass
+                    with open(path, 'rb') as f:
+                        return pickle.load(f)
+                except Exception as e:
+                    logging.error(f"Failed to load MC cache for {strategy_id}: {e}")
         return None
 
-    def set(self, symbol, timeframe, timestamp, score):
-        path = self._get_path(symbol, timeframe, timestamp)
+    def set(self, strategy_id, data):
+        path = self._get_path(strategy_id)
         with persistence_lock:
             try:
-                os.makedirs(CACHE_DIR, exist_ok=True)
-                with open(path, 'w') as f:
-                    json.dump({'score': score, 'timestamp': time.time()}, f)
-                self.cleanup_old_cache(symbol, timeframe)
+                with open(path, 'wb') as f:
+                    pickle.dump(data, f)
                 archiver.trigger()
-            except Exception: pass
-
-    def cleanup_old_cache(self, symbol, timeframe, keep=5):
-        try:
-            safe_symbol = symbol.replace('/', '_')
-            prefix = f"mc_{safe_symbol}_{timeframe}_"
-            with persistence_lock:
-                files = [f for f in os.listdir(CACHE_DIR) if f.startswith(prefix) and f.endswith(".json")]
-                if len(files) <= keep:
-                    return
-                full_paths = [os.path.join(CACHE_DIR, f) for f in files]
-                full_paths.sort(key=os.path.getmtime, reverse=True)
-                for old_file in full_paths[keep:]:
-                    try:
-                        os.remove(old_file)
-                    except: pass
-        except Exception: pass
+            except Exception as e:
+                logging.error(f"Failed to save MC cache for {strategy_id}: {e}")
