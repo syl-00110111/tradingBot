@@ -437,12 +437,24 @@ def main():
             pos_list = data_manager.get_positions(symbol)
             bot_state[symbol] = {'aggr': config['pairs'][symbol].get('aggr', 'normal'), 'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'), 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': config['pairs'][symbol].get('expected_profit', 0)}
 
+    # Identify RichHandler to silence it during Dashboard execution
+    rich_handlers = [h for h in logging.root.handlers if isinstance(h, RichHandler)]
+
     with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock), refresh_per_second=2, screen=True) as live:
-        threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
-        threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
-        while not shutdown_event.is_set():
-            live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
-            time.sleep(0.5)
+        # Silence console output once dashboard is live
+        for rh in rich_handlers:
+            logging.root.removeHandler(rh)
+
+        try:
+            threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
+            threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
+            while not shutdown_event.is_set():
+                live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
+                time.sleep(0.5)
+        finally:
+            # Restore console logging on exit
+            for rh in rich_handlers:
+                logging.root.addHandler(rh)
 
     archiver.stop()
     shutdown_msg = "Bot shutdown gracefully."

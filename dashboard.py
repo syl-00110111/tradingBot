@@ -91,11 +91,8 @@ class DashboardUI:
                  f"Hurdle: {config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)}"
             ]
 
-            # Marquee for status items
-            if should_step and len(status_items) > 3:
-                 self.status_scroll_index = (self.status_scroll_index + 1) % len(status_items)
+            visible_status = status_items
 
-            visible_status = status_items[self.status_scroll_index:self.status_scroll_index+3]
             footer_cols.append(" | ".join(visible_status))
 
             layout["footer"].update(Panel(Columns(footer_cols, expand=True), border_style="bright_blue"))
@@ -485,5 +482,6 @@ class DashboardHandler(logging.Handler):
                            return
 
             self.ui.all_logs.append({'msg': f"[{timestamp}] {msg}", 'expiry': expiry})
+            self.ui.logs_scroll_offset = 0  # Auto-scroll to latest
             if len(self.ui.all_logs) > 500:
                 self.ui.all_logs.pop(0)
