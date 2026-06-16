@@ -1,4 +1,4 @@
-# Cryptocurrencies multiplatform Trading Bot - Persistence & State Management
+# Cryptocurrencies multiplatform trading bot - Persistence & State Management
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import json

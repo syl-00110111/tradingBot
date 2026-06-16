@@ -1,4 +1,4 @@
-# Cryptocurrencies multiplatform Trading Bot - Monte Carlo Engine
+# Cryptocurrencies multiplatform trading bot - Monte Carlo Engine
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify
@@ -106,7 +106,7 @@ class MonteCarloEngine:
         """
         if len(df) < 20: return 1.0
 
-        close = df["close"].values
+        close = df["average"].values
         valid_indices = ~np.isnan(close)
         close = close[valid_indices]
 

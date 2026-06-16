@@ -1,4 +1,4 @@
-# Cryptocurrencies multiplatform Trading Bot - Exchange Interface
+# Cryptocurrencies multiplatform trading bot - Exchange Interface
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import ccxt

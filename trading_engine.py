@@ -1,4 +1,4 @@
-# Cryptocurrencies multiplatform Trading Bot - Trading Engine
+# Cryptocurrencies multiplatform trading bot - Trading Engine
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import logging

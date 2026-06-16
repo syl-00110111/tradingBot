@@ -1,4 +1,4 @@
-# Cryptocurrencies multiplatform Trading Bot
+#Cryptocurrencies multiplatform trading bot
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify
@@ -95,7 +95,7 @@ def format_price(price):
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
     if price == 0: return "0.000000"
-
+    
     abs_price = abs(price)
     # Use g format with 8 significant digits to ensure 10000.01 is preserved
     # and 0.03565 is preserved without unacceptable rounding.
@@ -299,20 +299,34 @@ def make_dashboard(global_mode, config):
             data = bot_state.get(symbol, {})
             candles_text = Text()
             time_left = max(0, int(61 - (now_ts - sell_proposal_time)))
-            # If multiple positions exist, propose selling the most profitable one
             candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(sell_proposal_profit)} profit?\n", style="bold yellow")
             candles_text.append(f"Confirm sell? [Y/n] (Auto-exec in {time_left}s)\n\n", style="dim")
             if 'last_20_candles' in data:
-                prices = data['last_20_candles']
+                prices = data['last_20_candles']['prices']
+                volumes = data['last_20_candles']['volumes']
                 min_p, max_p = min(prices), max(prices)
                 diff = max_p - min_p if max_p > min_p else 1.0
                 chart_height = 5
                 for h in reversed(range(chart_height)):
                     for p in prices:
-                        threshold = min_p + (h / chart_height) * diff
-                        if p >= threshold: candles_text.append("█ ", style="red")
+                        norm_p = (p - min_p) / diff
+                        scaled_p = norm_p * chart_height
+                        if scaled_p >= h: candles_text.append("█ ", style="red")
                         else: candles_text.append("  ")
                     candles_text.append("\n")
+
+                if volumes:
+                    min_v, max_v = min(volumes), max(volumes)
+                    diff_v = max_v - min_v if max_v > min_v else 1.0
+                    vol_height = 2
+                    candles_text.append("\n")
+                    for vh in reversed(range(vol_height)):
+                        for v in volumes:
+                            norm_v = (v - min_v) / diff_v
+                            scaled_v = norm_v * vol_height
+                            if scaled_v >= vh: candles_text.append("█ ", style="blue")
+                            else: candles_text.append("  ")
+                        candles_text.append("\n")
             pairs_panel = Panel(candles_text, title="[bold red]SELL PROPOSAL[/]", border_style="bold red")
         elif show_candles_for_pair:
             symbol = show_candles_for_pair
@@ -320,19 +334,34 @@ def make_dashboard(global_mode, config):
             candles_text = Text()
             candles_text.append(f"Last 20 candles for {symbol}:\n\n", style="bold cyan")
             if 'last_20_candles' in data:
-                prices = data['last_20_candles']
+                prices = data['last_20_candles']['prices']
+                volumes = data['last_20_candles']['volumes']
                 min_p, max_p = min(prices), max(prices)
                 diff = max_p - min_p if max_p > min_p else 1.0
                 chart_height = 8
                 for h in reversed(range(chart_height)):
                     for p in prices:
-                        threshold = min_p + (h / chart_height) * diff
-                        if p >= threshold: candles_text.append("█ ", style="red")
+                        norm_p = (p - min_p) / diff
+                        scaled_p = norm_p * chart_height
+                        if scaled_p >= h: candles_text.append("█ ", style="red")
                         else: candles_text.append("  ")
                     candles_text.append("\n")
+
+                if volumes:
+                    min_v, max_v = min(volumes), max(volumes)
+                    diff_v = max_v - min_v if max_v > min_v else 1.0
+                    vol_height = 4
+                    candles_text.append("\n")
+                    for vh in reversed(range(vol_height)):
+                        for v in volumes:
+                            norm_v = (v - min_v) / diff_v
+                            scaled_v = norm_v * vol_height
+                            if scaled_v >= vh: candles_text.append("█ ", style="blue")
+                            else: candles_text.append("  ")
+                        candles_text.append("\n")
+                candles_text.append("\nPress any key to return...", style="dim")
             else:
                 candles_text.append("Candle data not available yet.\n", style="dim")
-            candles_text.append("\nPress any key to return...", style="dim")
             pairs_panel = Panel(candles_text, title=f"[bold cyan]{symbol} Candles[/]", border_style="bold cyan")
         else:
             pairs_height = console.height - 20
@@ -346,23 +375,21 @@ def make_dashboard(global_mode, config):
                                pairs_scroll_offset += 1
                            if pairs_scroll_offset >= max_pairs_offset:
                                pairs_marquee_dir = -1
-                               pairs_pause_until = now_ts + 1
+                               pairs_pause_until = now_ts + 2
                       else:
                            if pairs_scroll_offset > 0:
                                pairs_scroll_offset -= 1
-                           if pairs_scroll_offset <= 0:
+                           else:
                                pairs_marquee_dir = 1
-                               pairs_pause_until = now_ts + 1
+                               pairs_pause_until = now_ts + 2
 
             pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
             visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
-
             for i, symbol in enumerate(visible_symbols):
                 data = bot_state[symbol]
                 is_selected = (pairs_scroll_offset + i) == selected_pair_index
                 positions = data.get('positions', [])
                 has_position = len(positions) > 0
-
                 current_signal = "Waiting"
                 buy_count = data.get('consecutive_buys', 0)
                 sell_count = data.get('consecutive_sells', 0)
@@ -448,23 +475,29 @@ def make_dashboard(global_mode, config):
         max_status_offset = max(0, len(status_text) - display_width)
 
         if max_status_offset > 0:
+             # Ensure index is valid if content or window size changed
+             if status_scroll_index > max_status_offset:
+                 status_scroll_index = 0
+                 status_marquee_dir = 1
+
              if should_step and now_ts > status_pause_until:
                   if status_marquee_dir == 1:
                        if status_scroll_index < max_status_offset:
                             status_scroll_index += 1
-                       if status_scroll_index >= max_status_offset:
+                       else:
                             status_marquee_dir = -1
-                            status_pause_until = now_ts + 1
+                            status_pause_until = now_ts + 2 # 2s pause as per memory
                   else:
                        if status_scroll_index > 0:
                             status_scroll_index -= 1
-                       if status_scroll_index <= 0:
+                       else:
                             status_marquee_dir = 1
-                            status_pause_until = now_ts + 1
+                            status_pause_until = now_ts + 2
 
              status_scroll_index = max(0, min(status_scroll_index, max_status_offset))
              status_display = status_text[status_scroll_index : status_scroll_index + display_width]
         else:
+             status_scroll_index = 0
              status_display = status_text
              status_display.justify = "center"
 
@@ -482,7 +515,7 @@ def make_dashboard(global_mode, config):
 
     layout = Layout()
     layout.split(
-        Layout(Panel(Text(" Cryptocurrencies multiplatform Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
+        Layout(Panel(Text("Cryptocurrencies multiplatform trading bot dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
         Layout(log_panel, size=log_height+2),
         Layout(pairs_panel, name="main"),
         Layout(Panel(status_display, title="Status", border_style="cyan"), size=3)
@@ -663,6 +696,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             potential_buys = []
 
             # Parallelize pair analysis
+            
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(pair_keys)) as executor:
                 future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pair_keys}
                 for future in concurrent.futures.as_completed(future_to_sym):
@@ -673,7 +707,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                         data = future.result()
                         if data:
                             # API Health Check (Instruction 5)
-                            candles = data.get('last_20_candles', [])
+                            candles_data = data.get('last_20_candles', {})
+                            candles = candles_data.get('prices', [])
                             if len(candles) >= 2:
                                 is_variable = any(candles[i] != candles[i-1] for i in range(1, len(candles)))
                                 if not is_variable:
@@ -686,7 +721,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                             suspended_pairs.add(symbol)
                                 else:
                                     inconsistent_pairs.pop(symbol, None)
-
+    
                             with bot_lock:
                                 data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
                                 # Instruction 3: Bold and bright new signals
@@ -695,7 +730,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             if (data.get('buy') and not old_buy) or (data.get('sell') and not old_sell):
                                 signal_arrival_times[symbol] = time.time()
                             bot_state[symbol] = data
-
+    
                             if data.get('sell_triggered'):
                                  # Close ALL triggered positions
                                  positions = data_manager.get_positions(symbol)
@@ -710,14 +745,21 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                  with bot_lock:
                                      data['positions'] = data_manager.get_positions(symbol)
                                      data['position'] = data_manager.get_position(symbol)
-
+    
                             if data.get('buy'):
                                  potential_buys.append((symbol, data))
                     except Exception as e:
-                        logging.error(f"Error analyzing {symbol}: {e}")
+                        logging.info(f"Analyzed {symbol}")
 
+            with bot_lock:
+                if benchmarking_pairs:
+                    rebench_syms = list(benchmarking_pairs)
+                    msg = f"Re-benchmarking {len(rebench_syms)} pairs due to expiration/shift..." 
+                    logging.info(msg)
+                    mode_term = config.get("_active_term", "short")
+                    run_benchmark_mode(exchange, config, args, term_override=mode_term, status=None, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             if potential_buys and not shutdown_event.is_set():
-                max_open = int(config.get('max_open_positions', 5))
+                max_open = int(config.get("max_open_positions", 5))
                 current_open = len(data_manager.get_open_positions())
                 slots_available = max_open - current_open
                 if slots_available > 0:
@@ -924,7 +966,7 @@ def main():
         except Exception as e:
             logging.error(f"Migration failed: {e}")
 
-    parser = argparse.ArgumentParser(description=' Cryptocurrencies multiplatform Trading Bot')
+    parser = argparse.ArgumentParser(description='Cryptocurrencies multiplatform trading bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', choices=list(EXCHANGE_MAPPING.keys()), default='binance', help='Exchange to use (e.g. binance, kraken, bitvavo, etc.)')
     parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
@@ -1013,7 +1055,7 @@ def main():
         except Exception as e:
             console.print(f"[bold red]Error parsing api.json: {e}[/]")
 
-    with console.status("[bold green]Initializing Cryptocurrencies multiplatform Trading Bot...", spinner="dots") as status:
+    with console.status("[bold green]InitializingCryptocurrencies multiplatform trading bot...", spinner="dots") as status:
 
         # MMX, SSE, AVX Gradation Check (Instruction 6)
         try:
@@ -1186,10 +1228,10 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     timeframe = term_cfg.get('timeframe', '5m')
     ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500)
     if not ohlcv: return None
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
     with bot_lock:
-        if symbol in bot_state: bot_state[symbol]['last_20_candles'] = df['close'].tail(20).tolist()
-    df = get_signals(df, {"device": device}, is_backtest=False); latest_row_base = df.iloc[-1]
+        if symbol in bot_state: bot_state[symbol]['last_20_candles'] = {"prices": df['average'].tail(20).tolist(), "volumes": df['volume'].tail(20).tolist()}
+    df = get_signals(df, {"device": device}, is_backtest=False); latest_row_base = df.iloc[-1].copy()
 
     # Cross-pair pattern matching (Instruction 1 & 2)
     search_pool = patterns + global_pattern_pool; active_patterns = []
@@ -1206,7 +1248,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         if engine: mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
         else: mode_settings = {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70}
         mode_settings['strategy'] = strategy_name; mode_settings['device'] = device
-        df = get_signals(df, mode_settings, is_backtest=False); latest_row = df.iloc[-1]
+        df = get_signals(df, mode_settings, is_backtest=False); latest_row = df.iloc[-1].copy()
 
         # Instruction 2b: New Monte Carlo tests pondering with pattern score
         mc_cache = MonteCarloCacheManager()
@@ -1251,7 +1293,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     elif term == 'long': buy_threshold = 3
 
     return {
-        'price': latest_row['close'], 'ema_f': latest_row.get('ema_f', 0), 'ema_s': latest_row.get('ema_s', 0),
+        'price': latest_row['average'], 'ema_f': latest_row.get('ema_f', 0), 'ema_s': latest_row.get('ema_s', 0),
         'macd_hist': latest_row.get('macd_hist', 0), 'rsi': latest_row.get('rsi', 0), 'adx': latest_row.get('adx', 0),
         'volatility': latest_row.get('volatility', 0), 'score': latest_row.get('score', 0),
         'whale_active': bool(latest_row.get('whale_active', 0)), 'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
@@ -1445,7 +1487,7 @@ def sync_live_positions(exchange, data_manager, config):
                 ticker = exchange.fetch_ticker(symbol)
                 if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
                     is_dust = True
-            elif amount <= 0.000001: is_dust = True
+            elif amount <= 0.25: is_dust = True
         except: pass
 
         if is_dust: continue
@@ -1508,10 +1550,10 @@ def get_sellable_assets(exchange, config=None):
                 min_cost = market['limits']['cost']['min'] or 10
                 ticker = exchange.fetch_ticker(symbol)
                 if ticker and (amount < min_amount or (amount * ticker['last']) < min_cost): continue
-            elif amount <= 0.000001: continue
+            elif amount <= 0.25: continue
             assets.append(asset)
         except Exception:
-            if amount > 0.000001: assets.append(asset)
+            if amount > 0.25: assets.append(asset)
     return sorted(assets)
 
 def interactive_sell(exchange, data_manager, engine, config):
@@ -1735,7 +1777,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
             console.print(f"[red]No OHLCV returned for {symbol} ({timeframe}).[/]")
             return None
 
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     else:
         df = df_in.copy()
@@ -1848,7 +1890,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         'start_time': start_time_dt.strftime("%Y-%m-%d %H:%M"),
         'end_time': end_time_dt.strftime("%Y-%m-%d %H:%M"),
         'start_ts': start_time_dt.timestamp(),
-        'prices': eval_df['close'].tolist(),
+        'prices': eval_df['average'].tolist(), 'volumes': eval_df['volume'].tolist(),
         'tech_state': tech_state,
         'equity_curve': equity_curve if return_full_df else []
     }
@@ -2093,7 +2135,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 else: console.print(msg)
 
             if full_history:
-                df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 symbol_data_map[symbol] = df
                 incremental_info[symbol] = (new_count, len(full_history))
@@ -2179,7 +2221,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         best_for_symbol = patterns[0].copy()
                         best_for_symbol['avg_bench_profit'] = avg_profit
                         best_per_symbol[sym] = best_for_symbol
-
                         # Store patterns in DataManager for real-time matching
                         if data_manager:
                              pattern_manager.set_patterns(sym, patterns)
@@ -2214,6 +2255,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             for sym in optimization_map:
                 patterns = pattern_manager.get_patterns(sym)
                 global_pattern_pool.extend(patterns)
+        with bot_lock: benchmarking_pairs.clear()
         return optimization_map
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
