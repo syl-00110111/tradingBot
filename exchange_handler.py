@@ -6,6 +6,7 @@ import time
 import logging
 import threading
 import requests
+import pandas as pd
 from requests.adapters import HTTPAdapter
 
 class ThrottledExchange:
@@ -180,6 +181,94 @@ class IndependentReserveExchange(CCXTExchange):
 class BTCMarketsExchange(CCXTExchange):
     def __init__(self, api_key, api_secret):
         super().__init__('btcmarkets', api_key, api_secret)
+
+
+def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=500, since=None):
+    """
+    Retrieves candles incrementally using ohlcv_cache_manager.
+    If candles exist in cache, it bridges gaps both forwards and backwards.
+    Returns (data, new_candles_count)
+    """
+    cached_data = ohlcv_cache_manager.get(symbol, timeframe)
+    if isinstance(cached_data, pd.DataFrame):
+         cached_data = cached_data.values.tolist()
+    if not cached_data: cached_data = []
+
+    new_count = 0
+    updated = False
+
+    # 1. Forward Update (New candles since last cache)
+    if cached_data:
+        last_ts = cached_data[-1][0]
+        try:
+            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=int(last_ts + 1))
+            if new_candles:
+                 new_count += len(new_candles)
+                 cached_data.extend([c for c in new_candles if c[0] > last_ts])
+                 updated = True
+        except Exception as e:
+            logging.warning(f"[{symbol}] Forward incremental fetch failed: {e}")
+
+    # 2. Backward Update (If 'since' is earlier than cache start)
+    if since and (not cached_data or cached_data[0][0] > since):
+        target_since = since
+        backward_candles = []
+        while True:
+            try:
+                limit_back = 1000
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=int(target_since), limit=limit_back)
+                if not ohlcv: break
+
+                reach_cache = False
+                if cached_data:
+                    first_cached_ts = cached_data[0][0]
+                    filtered = [c for c in ohlcv if c[0] < first_cached_ts]
+                    if len(filtered) < len(ohlcv): reach_cache = True
+                    ohlcv = filtered
+
+                if not ohlcv: break
+                backward_candles.extend(ohlcv)
+                new_count += len(ohlcv)
+                target_since = ohlcv[-1][0] + 1
+
+                if reach_cache or len(backward_candles) > 100000: break
+            except Exception as e:
+                logging.warning(f"[{symbol}] Backward incremental fetch failed: {e}")
+                break
+
+        if backward_candles:
+            cached_data = backward_candles + cached_data
+            updated = True
+
+    # 3. Fallback: if cache still empty and since was not provided
+    if not cached_data:
+        try:
+            fetch_since = int(since) if since is not None else None
+            new_candles = exchange.fetch_ohlcv(symbol, timeframe, since=fetch_since, limit=limit if limit else 500)
+            if new_candles:
+                new_count = len(new_candles)
+                cached_data = new_candles
+                updated = True
+        except Exception as e:
+             logging.warning(f"[{symbol}] Initial fetch failed: {e}")
+
+    # Final maintenance
+    if updated:
+         df_tmp = pd.DataFrame(cached_data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+         df_tmp.drop_duplicates(subset='ts', keep='first', inplace=True)
+         df_tmp.sort_values('ts', inplace=True)
+         cached_data = df_tmp.values.tolist()
+
+         if len(cached_data) > 150000:
+              cached_data = cached_data[-150000:]
+
+         ohlcv_cache_manager.set(symbol, timeframe, cached_data)
+
+    if limit is None or limit <= 0:
+        return cached_data, new_count
+
+    data = cached_data[-limit:] if len(cached_data) > limit else cached_data
+    return data, new_count
 
 EXCHANGE_MAPPING = {
     'binance': BinanceExchange, 'kraken': KrakenExchange, 'bitvavo': BitvavoExchange,
