@@ -83,7 +83,7 @@ class DashboardUI:
             header_right.append(" | ")
             header_right.append("[H] Hide Help" if self.show_help else "[H] Help", style="bold yellow" if self.show_help else "dim")
 
-            layout["header"].update(Panel(Columns([header_left, header_right], expand=True), border_style="bright_blue"))
+            layout["header"].update(Panel(Columns([header_left, header_right], expand=True, align="center"), border_style="bright_blue"))
 
             # Footer: Quick actions and Status Bar
             footer_cols = []
@@ -473,7 +473,7 @@ class DashboardHandler(logging.Handler):
                            return
 
             # Deduplication for specific log types (Profitability check or Stop-loss)
-            dedup_triggers = ["Profitability check failed", "Stop-loss triggered", "SELL signal received at non-profitable price"]
+            dedup_triggers = ["Profitability check failed", "Stop-loss triggered", "SELL signal received at non-profitable price", "Benchmarking all strategies"]
             matching_trigger = next((t for t in dedup_triggers if t in msg), None)
 
             if matching_trigger:
