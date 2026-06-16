@@ -36,7 +36,7 @@ from rich.table import Table
 
 import dashboard
 from exchange_handler import EXCHANGE_MAPPING, MockExchange, fetch_ohlcv_incremental
-from indicators import get_signals, calculate_similarity, STRATEGIES
+from indicators import get_signals, get_common_indicators, calculate_similarity, STRATEGIES
 from persistence import DataManager, CacheManager, PatternManager, OHLCVCacheManager, archiver, migrate_fresh_files_to_archive, load_from_archive
 import trading_engine
 from trading_engine import TradingEngine
@@ -87,6 +87,8 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             return None
 
         df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+        device = global_config.get('device', torch.device('cpu'))
+        df = get_common_indicators(df, device)
 
         with bot_lock:
             current_data = bot_state.get(symbol, {})

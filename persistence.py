@@ -91,6 +91,9 @@ def create_consolidated_archive(delete_after=True):
             if not present_on_disk and not os.path.exists(ARCHIVE_NAME):
                 return
 
+            # Normalize present_on_disk to forward slashes for membership check
+            present_normalized = [f.replace('\\', '/') for f in present_on_disk]
+
             # 2. Create temporary archive
             tmp_archive = ARCHIVE_NAME + '.tmp'
 
@@ -99,12 +102,14 @@ def create_consolidated_archive(delete_after=True):
                 if os.path.exists(ARCHIVE_NAME):
                     with zipfile.ZipFile(ARCHIVE_NAME, 'r') as z_old:
                         for item in z_old.infolist():
-                            if item.filename not in present_on_disk:
+                            # Zip files ALWAYS use forward slashes
+                            if item.filename not in present_normalized:
                                 z_new.writestr(item, z_old.read(item.filename))
 
                 # Then, add everything currently on disk (this overwrites if it was in the old zip)
                 for f in present_on_disk:
-                    z_new.write(f)
+                    # Explicitly use forward slashes for the archive name
+                    z_new.write(f, arcname=f.replace('\\', '/'))
 
             # 3. Atomic replacement
             if os.path.exists(ARCHIVE_NAME):
@@ -337,6 +342,7 @@ class OHLCVCacheManager:
         path = self._get_path(symbol, timeframe)
         with persistence_lock:
             try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, 'wb') as f:
                     pickle.dump(data, f)
                 archiver.trigger()
@@ -367,6 +373,7 @@ class MonteCarloCacheManager:
         path = self._get_path(strategy_id)
         with persistence_lock:
             try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, 'wb') as f:
                     pickle.dump(data, f)
                 archiver.trigger()
