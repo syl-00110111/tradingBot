@@ -1200,10 +1200,10 @@ def main():
 
     play_sound("startup")
     try:
-        with Live(make_dashboard(args.mode, config), refresh_per_second=10, console=console, auto_refresh=True) as live:
+        with Live(make_dashboard(args.mode, config), refresh_per_second=2, console=console, auto_refresh=True) as live:
             while not shutdown_event.is_set():
                 live.update(make_dashboard(args.mode, config))
-                time.sleep(0.1)
+                time.sleep(1.0)
     except (KeyboardInterrupt, SystemExit):
         shutdown_event.set()
     finally:
@@ -1260,46 +1260,82 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             p_len = len(p['prices'])
             if len(df) < p_len: continue
             buffer_window = df.iloc[-p_len:]; sim = calculate_similarity(buffer_window, p, device=device)
-            if sim > 0.70: active_patterns.append((sim, p))
-    active_patterns.sort(key=lambda x: x[0], reverse=True); active_pattern = active_patterns[0][1] if active_patterns else None
+            if sim > 0.70: active_patterns.append({'sim': sim, 'pattern': p})
 
-    # Expiration & Regime Shift Detection
+    # Enhanced selection: prioritize patterns that haven't expired and aren't in regime shift
+    # instead of just taking the highest similarity one.
+    active_pattern = None
     prev_data = bot_state.get(symbol, {})
     pattern_match_ts = prev_data.get('pattern_match_ts')
     current_pattern_id = prev_data.get('active_pattern_id')
 
+    tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+    tf_secs = tf_map.get(timeframe, 300)
+
+    candidates = []
+    for item in active_patterns:
+        p = item['pattern']
+        p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
+
+        # Determine start time for expiration check
+        p_match_ts = pattern_match_ts if p_id == current_pattern_id else candle_ts
+        p_len = len(p['prices'])
+        p_expired = (abs(candle_ts - p_match_ts) // tf_secs) >= p_len
+
+        # Regime Shift (50% threshold as per user request to reduce noise)
+        p_tech = p.get('tech_state', {})
+        curr_adx = latest_row_base.get('adx', 0)
+        curr_vol = latest_row_base.get('volatility', 0)
+        p_adx = p_tech.get('adx', curr_adx)
+        p_vol = p_tech.get('volatility', curr_vol)
+
+        p_regime_shift = False
+        if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: p_regime_shift = True
+        if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: p_regime_shift = True
+
+        item['expired'] = p_expired
+        item['regime_shift'] = p_regime_shift
+        item['id'] = p_id
+        candidates.append(item)
+
+    # Filter for valid candidates (neither expired nor shifted)
+    valid_candidates = [c for c in candidates if not c['expired'] and not c['regime_shift']]
+    if valid_candidates:
+        # Pick the best valid one
+        valid_candidates.sort(key=lambda x: x['sim'], reverse=True)
+        active_pattern = valid_candidates[0]['pattern']
+        active_pattern_id = valid_candidates[0]['id']
+    elif candidates:
+        # If no valid ones, still pick the best similarity one but it will trigger re-benchmark below
+        candidates.sort(key=lambda x: x['sim'], reverse=True)
+        active_pattern = candidates[0]['pattern']
+        active_pattern_id = candidates[0]['id']
+
     if active_pattern:
-        active_pattern_id = f"{active_pattern.get('symbol')}_{active_pattern.get('start_time')}_{active_pattern.get('strategy')}"
         if active_pattern_id != current_pattern_id:
             pattern_match_ts = candle_ts
             current_pattern_id = active_pattern_id
 
-        # Check for expiration
-        pattern_len = len(active_pattern['prices'])
-        tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
-        tf_secs = tf_map.get(timeframe, 300)
-        elapsed_candles = abs(candle_ts - pattern_match_ts) // tf_secs
+        # Re-eval expiration and regime for the SELECTED pattern for logging/triggering
+        p_len = len(active_pattern['prices'])
+        expired = (abs(candle_ts - pattern_match_ts) // tf_secs) >= p_len
 
-        expired = elapsed_candles >= pattern_len
-
-        # Regime Shift
-        pattern_tech = active_pattern.get('tech_state', {})
+        p_tech = active_pattern.get('tech_state', {})
         curr_adx = latest_row_base.get('adx', 0)
         curr_vol = latest_row_base.get('volatility', 0)
-        p_adx = pattern_tech.get('adx', curr_adx)
-        p_vol = pattern_tech.get('volatility', curr_vol)
+        p_adx = p_tech.get('adx', curr_adx)
+        p_vol = p_tech.get('volatility', curr_vol)
 
         regime_shift = False
-        if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.25:
-            regime_shift = True
-        if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.25:
-            regime_shift = True
+        if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: regime_shift = True
+        if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: regime_shift = True
 
-        if (expired or regime_shift) and symbol not in benchmarking_pairs:
+        # Trigger re-benchmark ONLY if NO compatible pattern is valid anymore
+        if (expired or regime_shift) and not valid_candidates and symbol not in benchmarking_pairs:
             with bot_lock:
                 benchmarking_pairs.add(symbol)
-            if expired: logging.info(f"[{symbol}] Success pattern expired ({elapsed_candles}/{pattern_len} candles). Triggering re-benchmark.")
-            else: logging.info(f"[{symbol}] Market regime shift detected (ADX/Vol deviation > 25%). Triggering re-benchmark.")
+            if expired: logging.info(f"[{symbol}] All compatible SPM expired. Triggering re-benchmark.")
+            else: logging.info(f"[{symbol}] All compatible SPM in regime shift (ADX/Vol deviation > 50%). Triggering re-benchmark.")
 
     if active_pattern:
         strategy_name = active_pattern['strategy']; mode_name = active_pattern['aggr']
@@ -2245,9 +2281,9 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
         # On CPU with oneDNN, ThreadPoolExecutor might be more efficient for many small torch tasks
         # than ProcessPoolExecutor which has pickling overhead.
-        # We limit max_workers to prevent massive memory spikes when processing large history.
+        # We use all available CPU cores for parallelized benchmarking
         executor_class = concurrent.futures.ProcessPoolExecutor
-        with executor_class(max_workers=min(os.cpu_count() or 1, 4), initializer=silent_worker_init) as executor:
+        with executor_class(max_workers=os.cpu_count() or 1, initializer=silent_worker_init) as executor:
             # Register signal handler during optimization ONLY if in main thread
             original_handler = None
             if threading.current_thread() == threading.main_thread():
