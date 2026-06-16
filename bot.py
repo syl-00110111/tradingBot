@@ -1241,193 +1241,217 @@ def play_sound(action, config=None):
     threading.Thread(target=_play, daemon=True).start()
 
 def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, global_config, engine=None):
-    patterns = pattern_manager.get_patterns(symbol)
-    term = global_config.get('_active_term', 'short'); term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
-    timeframe = term_cfg.get('timeframe', '5m')
-    ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500)
-    if not ohlcv: return None
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-    with bot_lock:
-        if symbol in bot_state: bot_state[symbol]['last_20_candles'] = {"prices": df['average'].tail(20).tolist(), "volumes": df['volume'].tail(20).tolist()}
-    df = get_signals(df, {"device": device}, is_backtest=False); latest_row_base = df.iloc[-1].copy()
-    candle_ts = int(latest_row_base['timestamp']) if not isinstance(latest_row_base['timestamp'], (pd.Timestamp, datetime)) else int(latest_row_base['timestamp'].timestamp())
-    if candle_ts > 1000000000000: candle_ts //= 1000 # Convert MS to Seconds
+    try:
+        patterns = pattern_manager.get_patterns(symbol)
+        term = global_config.get('_active_term', 'short'); term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
+        timeframe = term_cfg.get('timeframe', '5m')
 
-    # Cross-pair pattern matching (Instruction 1 & 2)
-    search_pool = patterns + global_pattern_pool; active_patterns = []
-    if search_pool:
-        for p in search_pool:
+        ohlcv_data = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=500)
+        if not ohlcv_data or not isinstance(ohlcv_data, tuple) or not ohlcv_data[0]:
+            return None
+
+        ohlcv = ohlcv_data[0]
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        if df.empty:
+            return None
+
+        df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+
+        with bot_lock:
+            if symbol in bot_state:
+                bot_state[symbol]['last_20_candles'] = {
+                    "prices": df['average'].tail(20).tolist(),
+                    "volumes": df['volume'].tail(20).tolist()
+                }
+
+        df = get_signals(df, {"device": device}, is_backtest=False)
+        if df.empty:
+            return None
+
+        latest_row_base = df.iloc[-1].copy()
+        candle_ts = int(latest_row_base['timestamp']) if not isinstance(latest_row_base['timestamp'], (pd.Timestamp, datetime)) else int(latest_row_base['timestamp'].timestamp())
+        if candle_ts > 1000000000000: candle_ts //= 1000 # Convert MS to Seconds
+
+        # Cross-pair pattern matching (Instruction 1 & 2)
+        with bot_lock:
+            current_global_pool = list(global_pattern_pool)
+        search_pool = patterns + current_global_pool; active_patterns = []
+        if search_pool:
+            for p in search_pool:
+                p_len = len(p['prices'])
+                if len(df) < p_len: continue
+                buffer_window = df.iloc[-p_len:]; sim = calculate_similarity(buffer_window, p, device=device)
+                if sim > 0.70: active_patterns.append({'sim': sim, 'pattern': p})
+
+        # Enhanced selection: prioritize patterns that haven't expired and aren't in regime shift
+        # instead of just taking the highest similarity one.
+        active_pattern = None
+        prev_data = bot_state.get(symbol, {})
+        pattern_match_ts = prev_data.get('pattern_match_ts')
+        current_pattern_id = prev_data.get('active_pattern_id')
+
+        tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+        tf_secs = tf_map.get(timeframe, 300)
+
+        candidates = []
+        for item in active_patterns:
+            p = item['pattern']
+            p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
+
+            # Determine start time for expiration check
+            p_match_ts = pattern_match_ts if p_id == current_pattern_id else candle_ts
             p_len = len(p['prices'])
-            if len(df) < p_len: continue
-            buffer_window = df.iloc[-p_len:]; sim = calculate_similarity(buffer_window, p, device=device)
-            if sim > 0.70: active_patterns.append({'sim': sim, 'pattern': p})
+            p_expired = (abs(candle_ts - p_match_ts) // tf_secs) >= p_len
 
-    # Enhanced selection: prioritize patterns that haven't expired and aren't in regime shift
-    # instead of just taking the highest similarity one.
-    active_pattern = None
-    prev_data = bot_state.get(symbol, {})
-    pattern_match_ts = prev_data.get('pattern_match_ts')
-    current_pattern_id = prev_data.get('active_pattern_id')
+            # Regime Shift (50% threshold as per user request to reduce noise)
+            p_tech = p.get('tech_state', {})
+            curr_adx = latest_row_base.get('adx', 0)
+            curr_vol = latest_row_base.get('volatility', 0)
+            p_adx = p_tech.get('adx', curr_adx)
+            p_vol = p_tech.get('volatility', curr_vol)
 
-    tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
-    tf_secs = tf_map.get(timeframe, 300)
+            p_regime_shift = False
+            if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: p_regime_shift = True
+            if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: p_regime_shift = True
 
-    candidates = []
-    for item in active_patterns:
-        p = item['pattern']
-        p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
+            item['expired'] = p_expired
+            item['regime_shift'] = p_regime_shift
+            item['id'] = p_id
+            candidates.append(item)
 
-        # Determine start time for expiration check
-        p_match_ts = pattern_match_ts if p_id == current_pattern_id else candle_ts
-        p_len = len(p['prices'])
-        p_expired = (abs(candle_ts - p_match_ts) // tf_secs) >= p_len
+        # Filter for valid candidates (neither expired nor shifted)
+        valid_candidates = []
+        if candidates:
+            def validate_candidate_mc(c):
+                # If not expired and no regime shift, it's already valid
+                if not c['expired'] and not c['regime_shift']:
+                    return c, True
 
-        # Regime Shift (50% threshold as per user request to reduce noise)
-        p_tech = p.get('tech_state', {})
-        curr_adx = latest_row_base.get('adx', 0)
-        curr_vol = latest_row_base.get('volatility', 0)
-        p_adx = p_tech.get('adx', curr_adx)
-        p_vol = p_tech.get('volatility', curr_vol)
+                # Instruction: Monte Carlo tests must be done prior to re-benchmarking.
+                # If any candidate passes MC test, it can be reused even if expired/shifted.
+                p = c['pattern']
+                mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
+                mc_engine.set_device(device)
+                # Run MC on the current DF using this candidate's strategy
+                from indicators import get_signals
+                temp_cfg = {'strategy': p['strategy'], 'device': device}
+                df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
+                score = mc_engine.validate_strategy(df_mc)
+                hurdle = global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
+                # score is 0.5 + profit_prob. We want prob > 0.55-0.6 for reuse.
+                # Using 1.0 + hurdle as a proxy for "likely profitable"
+                return c, (score > 1.0 + hurdle)
 
-        p_regime_shift = False
-        if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: p_regime_shift = True
-        if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: p_regime_shift = True
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), 10)) as mc_executor:
+                mc_futures = [mc_executor.submit(validate_candidate_mc, c) for c in candidates]
+                for f in concurrent.futures.as_completed(mc_futures):
+                    c_res, is_valid = f.result()
+                    if is_valid:
+                        valid_candidates.append(c_res)
 
-        item['expired'] = p_expired
-        item['regime_shift'] = p_regime_shift
-        item['id'] = p_id
-        candidates.append(item)
+        if valid_candidates:
+            # Pick the best valid one
+            valid_candidates.sort(key=lambda x: x['sim'], reverse=True)
+            active_pattern = valid_candidates[0]['pattern']
+            active_pattern_id = valid_candidates[0]['id']
+        elif candidates:
+            # If no valid ones, still pick the best similarity one but it will trigger re-benchmark below
+            candidates.sort(key=lambda x: x['sim'], reverse=True)
+            active_pattern = candidates[0]['pattern']
+            active_pattern_id = candidates[0]['id']
 
-    # Filter for valid candidates (neither expired nor shifted)
-    valid_candidates = []
-    if candidates:
-        def validate_candidate_mc(c):
-            # If not expired and no regime shift, it's already valid
-            if not c['expired'] and not c['regime_shift']:
-                return c, True
+        if active_pattern:
+            if active_pattern_id != current_pattern_id:
+                pattern_match_ts = candle_ts
+                current_pattern_id = active_pattern_id
 
-            # Instruction: Monte Carlo tests must be done prior to re-benchmarking.
-            # If any candidate passes MC test, it can be reused even if expired/shifted.
-            p = c['pattern']
-            mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
-            mc_engine.set_device(device)
-            # Run MC on the current DF using this candidate's strategy
-            from indicators import get_signals
-            temp_cfg = {'strategy': p['strategy'], 'device': device}
-            df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
-            score = mc_engine.validate_strategy(df_mc)
-            hurdle = global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
-            # score is 0.5 + profit_prob. We want prob > 0.55-0.6 for reuse.
-            # Using 1.0 + hurdle as a proxy for "likely profitable"
-            return c, (score > 1.0 + hurdle)
+            # Re-eval expiration and regime for the SELECTED pattern for logging/triggering
+            p_len = len(active_pattern['prices'])
+            expired = (abs(candle_ts - pattern_match_ts) // tf_secs) >= p_len
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), 10)) as mc_executor:
-            mc_futures = [mc_executor.submit(validate_candidate_mc, c) for c in candidates]
-            for f in concurrent.futures.as_completed(mc_futures):
-                c_res, is_valid = f.result()
-                if is_valid:
-                    valid_candidates.append(c_res)
+            p_tech = active_pattern.get('tech_state', {})
+            curr_adx = latest_row_base.get('adx', 0)
+            curr_vol = latest_row_base.get('volatility', 0)
+            p_adx = p_tech.get('adx', curr_adx)
+            p_vol = p_tech.get('volatility', curr_vol)
 
-    if valid_candidates:
-        # Pick the best valid one
-        valid_candidates.sort(key=lambda x: x['sim'], reverse=True)
-        active_pattern = valid_candidates[0]['pattern']
-        active_pattern_id = valid_candidates[0]['id']
-    elif candidates:
-        # If no valid ones, still pick the best similarity one but it will trigger re-benchmark below
-        candidates.sort(key=lambda x: x['sim'], reverse=True)
-        active_pattern = candidates[0]['pattern']
-        active_pattern_id = candidates[0]['id']
+            regime_shift = False
+            if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: regime_shift = True
+            if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: regime_shift = True
 
-    if active_pattern:
-        if active_pattern_id != current_pattern_id:
-            pattern_match_ts = candle_ts
-            current_pattern_id = active_pattern_id
+            # Trigger re-benchmark ONLY if NO compatible pattern is valid anymore
+            if (expired or regime_shift) and not valid_candidates and symbol not in benchmarking_pairs:
+                with bot_lock:
+                    benchmarking_pairs.add(symbol)
+                if expired: logging.info(f"[{symbol}] All compatible SPM expired. Triggering re-benchmark.")
+                else: logging.info(f"[{symbol}] All compatible SPM in regime shift (ADX/Vol deviation > 50%). Triggering re-benchmark.")
 
-        # Re-eval expiration and regime for the SELECTED pattern for logging/triggering
-        p_len = len(active_pattern['prices'])
-        expired = (abs(candle_ts - pattern_match_ts) // tf_secs) >= p_len
+        if active_pattern:
+            strategy_name = active_pattern['strategy']; mode_name = active_pattern['aggr']
+            if engine: mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
+            else: mode_settings = {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70}
+            mode_settings['strategy'] = strategy_name; mode_settings['device'] = device
+            df = get_signals(df, mode_settings, is_backtest=False); latest_row = df.iloc[-1].copy()
 
-        p_tech = active_pattern.get('tech_state', {})
-        curr_adx = latest_row_base.get('adx', 0)
-        curr_vol = latest_row_base.get('volatility', 0)
-        p_adx = p_tech.get('adx', curr_adx)
-        p_vol = p_tech.get('volatility', curr_vol)
+            # Instruction 2b: New Monte Carlo tests pondering with pattern score
+            mc_cache = MonteCarloCacheManager()
+            mc_score = mc_cache.get(symbol, timeframe, candle_ts)
 
-        regime_shift = False
-        if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: regime_shift = True
-        if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: regime_shift = True
+            if mc_score is None:
+                mc = MonteCarloEngine(num_simulations=1000, timeframe_candles=20); mc.set_device(device); mc_score = mc.validate_strategy(df)
+                mc_cache.set(symbol, timeframe, candle_ts, mc_score)
 
-        # Trigger re-benchmark ONLY if NO compatible pattern is valid anymore
-        if (expired or regime_shift) and not valid_candidates and symbol not in benchmarking_pairs:
-            with bot_lock:
-                benchmarking_pairs.add(symbol)
-            if expired: logging.info(f"[{symbol}] All compatible SPM expired. Triggering re-benchmark.")
-            else: logging.info(f"[{symbol}] All compatible SPM in regime shift (ADX/Vol deviation > 50%). Triggering re-benchmark.")
+            pattern_score = active_pattern.get('score', 1.0); combined_mc_score = mc_score * (1 + pattern_score)
+            if combined_mc_score < 0.5: latest_row['buy_signal'] = False; latest_row['sell_signal'] = False
+        else:
+            strategy_name = "N/A"; mode_name = "N/A"; latest_row = latest_row_base.copy()
+            latest_row['buy_signal'] = False; latest_row['sell_signal'] = False
 
-    if active_pattern:
-        strategy_name = active_pattern['strategy']; mode_name = active_pattern['aggr']
-        if engine: mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
-        else: mode_settings = {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70}
-        mode_settings['strategy'] = strategy_name; mode_settings['device'] = device
-        df = get_signals(df, mode_settings, is_backtest=False); latest_row = df.iloc[-1].copy()
+        exclude = ['open', 'high', 'low', 'close', 'volume', 'buy_candidate', 'sell_candidate', 'ema_up_win', 'macd_up_win', 'rsi_up_win', 'ema_down_win', 'macd_down_win', 'rsi_down_win', 'ema_up', 'ema_down', 'macd_up', 'macd_down', 'rsi_up', 'rsi_down']
+        trigger_data = {k: v for k, v in latest_row.to_dict().items() if k not in exclude and not isinstance(v, (pd.Timestamp, datetime))}
+        trigger_data['candle_ts'] = candle_ts; prev_data = bot_state.get(symbol, {}); last_candle_ts = prev_data.get('_last_candle_ts')
+        consecutive_buys = prev_data.get('consecutive_buys', 0); consecutive_sells = prev_data.get('consecutive_sells', 0)
+        if last_candle_ts is None:
+            buy_hist = df['buy_signal'].tolist(); sell_hist = df['sell_signal'].tolist()
+            c_buys = 0;
+            for s in reversed(buy_hist[-10:]):
+                if s: c_buys += 1
+                else: break
+            c_sells = 0;
+            for s in reversed(sell_hist[-10:]):
+                if s: c_sells += 1
+                else: break
+            consecutive_buys = c_buys; consecutive_sells = c_sells
+        elif last_candle_ts != candle_ts:
+            if latest_row['buy_signal']: consecutive_buys += 1; consecutive_sells = 0
+            elif latest_row['sell_signal']: consecutive_sells += 1; consecutive_buys = 0
+            else: consecutive_buys = 0; consecutive_sells = 0
+        else:
+            if not latest_row['buy_signal'] and not latest_row['sell_signal']: consecutive_buys = 0; consecutive_sells = 0
 
-        # Instruction 2b: New Monte Carlo tests pondering with pattern score
-        mc_cache = MonteCarloCacheManager()
-        mc_score = mc_cache.get(symbol, timeframe, candle_ts)
+        buy_threshold = 1
+        if term == 'medium': buy_threshold = 2
+        elif term == 'long': buy_threshold = 3
 
-        if mc_score is None:
-            mc = MonteCarloEngine(num_simulations=1000, timeframe_candles=20); mc.set_device(device); mc_score = mc.validate_strategy(df)
-            mc_cache.set(symbol, timeframe, candle_ts, mc_score)
-
-        pattern_score = active_pattern.get('score', 1.0); combined_mc_score = mc_score * (1 + pattern_score)
-        if combined_mc_score < 0.5: latest_row['buy_signal'] = False; latest_row['sell_signal'] = False
-    else:
-        strategy_name = "N/A"; mode_name = "N/A"; latest_row = latest_row_base.copy()
-        latest_row['buy_signal'] = False; latest_row['sell_signal'] = False
-
-    exclude = ['open', 'high', 'low', 'close', 'volume', 'buy_candidate', 'sell_candidate', 'ema_up_win', 'macd_up_win', 'rsi_up_win', 'ema_down_win', 'macd_down_win', 'rsi_down_win', 'ema_up', 'ema_down', 'macd_up', 'macd_down', 'rsi_up', 'rsi_down']
-    trigger_data = {k: v for k, v in latest_row.to_dict().items() if k not in exclude and not isinstance(v, (pd.Timestamp, datetime))}
-    trigger_data['candle_ts'] = candle_ts; prev_data = bot_state.get(symbol, {}); last_candle_ts = prev_data.get('_last_candle_ts')
-    consecutive_buys = prev_data.get('consecutive_buys', 0); consecutive_sells = prev_data.get('consecutive_sells', 0)
-    if last_candle_ts is None:
-        buy_hist = df['buy_signal'].tolist(); sell_hist = df['sell_signal'].tolist()
-        c_buys = 0;
-        for s in reversed(buy_hist[-10:]):
-            if s: c_buys += 1
-            else: break
-        c_sells = 0;
-        for s in reversed(sell_hist[-10:]):
-            if s: c_sells += 1
-            else: break
-        consecutive_buys = c_buys; consecutive_sells = c_sells
-    elif last_candle_ts != candle_ts:
-        if latest_row['buy_signal']: consecutive_buys += 1; consecutive_sells = 0
-        elif latest_row['sell_signal']: consecutive_sells += 1; consecutive_buys = 0
-        else: consecutive_buys = 0; consecutive_sells = 0
-    else:
-        if not latest_row['buy_signal'] and not latest_row['sell_signal']: consecutive_buys = 0; consecutive_sells = 0
-
-    buy_threshold = 1
-    if term == 'medium': buy_threshold = 2
-    elif term == 'long': buy_threshold = 3
-
-    return {
-        'price': latest_row['average'], 'ema_f': latest_row.get('ema_f', 0), 'ema_s': latest_row.get('ema_s', 0),
-        'macd_hist': latest_row.get('macd_hist', 0), 'rsi': latest_row.get('rsi', 0), 'adx': latest_row.get('adx', 0),
-        'volatility': latest_row.get('volatility', 0), 'score': latest_row.get('score', 0),
-        'whale_active': bool(latest_row.get('whale_active', 0)), 'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
-        'aggr': mode_name, 'strategy': strategy_name,
-        'all_matching_strategies': [ap['pattern']['strategy'] for ap in active_patterns] if active_patterns else [strategy_name],
-        'tendency': latest_row.get('tendency', 'Neutral'), 'buy': consecutive_buys >= buy_threshold, 'sell': consecutive_sells >= 3,
-        'consecutive_buys': consecutive_buys, 'consecutive_sells': consecutive_sells, '_last_candle_ts': candle_ts,
-        'active_pattern_id': current_pattern_id, 'pattern_match_ts': pattern_match_ts,
-        'sell_triggered': consecutive_sells >= 3 and len(data_manager.get_positions(symbol)) > 0,
-        'positions': data_manager.get_positions(symbol),
-        'position': data_manager.get_position(symbol),
-        'expected_profit': float(pair_config.get('expected_profit', 0)),
-        'trigger_data': trigger_data
-    }
+        return {
+            'price': latest_row['average'], 'ema_f': latest_row.get('ema_f', 0), 'ema_s': latest_row.get('ema_s', 0),
+            'macd_hist': latest_row.get('macd_hist', 0), 'rsi': latest_row.get('rsi', 0), 'adx': latest_row.get('adx', 0),
+            'volatility': latest_row.get('volatility', 0), 'score': latest_row.get('score', 0),
+            'whale_active': bool(latest_row.get('whale_active', 0)), 'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
+            'aggr': mode_name, 'strategy': strategy_name,
+            'all_matching_strategies': [ap['pattern']['strategy'] for ap in active_patterns] if active_patterns else [strategy_name],
+            'tendency': latest_row.get('tendency', 'Neutral'), 'buy': consecutive_buys >= buy_threshold, 'sell': consecutive_sells >= 3,
+            'consecutive_buys': consecutive_buys, 'consecutive_sells': consecutive_sells, '_last_candle_ts': candle_ts,
+            'active_pattern_id': current_pattern_id, 'pattern_match_ts': pattern_match_ts,
+            'sell_triggered': consecutive_sells >= 3 and len(data_manager.get_positions(symbol)) > 0,
+            'positions': data_manager.get_positions(symbol),
+            'position': data_manager.get_position(symbol),
+            'expected_profit': float(pair_config.get('expected_profit', 0)) if pair_config else 0.0,
+            'trigger_data': trigger_data
+        }
+    except Exception as e:
+        logging.error(f"Error in analyze_pair for {symbol}: {e}", exc_info=True)
+        return None
 
 def execute_buy(exchange, data_manager, engine, symbol, data, config, balance=None):
     if balance is None:
