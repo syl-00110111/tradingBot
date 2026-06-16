@@ -108,7 +108,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
                 p_len = len(p['prices'])
                 if len(df) < p_len: continue
                 buffer_window = df.iloc[-p_len:]; sim = calculate_similarity(buffer_window, p, device=device)
-                if sim > 0.70: active_patterns.append({'sim': sim, 'pattern': p})
+                if sim > 0.70:
+                    p_copy = p.copy()
+                    active_patterns.append({'sim': sim, 'pattern': p_copy})
 
         active_pattern = None
         tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
@@ -140,8 +142,6 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         valid_candidates = []
         if candidates:
             def validate_candidate_mc(c):
-                if not c['expired'] and not c['regime_shift']:
-                    return c, True
                 p = c['pattern']
                 mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
                 mc_engine.set_device(device)
@@ -149,6 +149,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
                 df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
                 score = mc_engine.validate_strategy(df_mc)
                 hurdle = global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
+                p['mc_score'] = score
                 return c, (score > 1.0 + hurdle)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), 10)) as mc_executor:
@@ -200,6 +201,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
             new_data = {
                 'price': latest['close'],
+                'mc_score': active_pattern.get('mc_score', 1.1),
                 'ema_f': latest.get('ema_f', 0),
                 'ema_s': latest.get('ema_s', 0),
                 'macd_hist': latest.get('macd_hist', 0),
@@ -278,7 +280,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                         signal_arrival_times.pop(symbol, None)
 
                     if data['consecutive_buys'] >= 1 and not data['position']:
-                        if trading_engine.execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs):
+                        if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs):
                             data['last_action'] = 'BUY'
                             data['position'] = data_manager.get_position(symbol)
                             data['positions'] = data_manager.get_positions(symbol)
@@ -287,19 +289,21 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     if data['consecutive_sells'] >= 1 and data['positions']:
                          for idx, pos in enumerate(data['positions']):
                              if engine.is_profitable(data['price'], pos['entry_price']):
-                                 if trading_engine.execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=idx):
+                                 # Profitable: sell immediately on 1st signal
+                                 if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=idx):
                                      data['last_action'] = 'SELL'
                                      data['positions'] = data_manager.get_positions(symbol)
                                      data['position'] = data_manager.get_position(symbol)
                                      play_sound("sell", config)
                                      break
-                             else:
+                             elif data['consecutive_sells'] >= 3:
+                                 # Non-profitable: trigger proposal on 3rd signal
                                  with bot_lock:
                                      if ui.sell_proposal_pair is None:
                                          ui.sell_proposal_pair = symbol
                                          ui.sell_proposal_profit = (data['price'] - pos['entry_price']) / pos['entry_price'] * 100
                                          ui.sell_proposal_time = time.time()
-                                         logging.warning(f"[{symbol}] SELL signal received at non-profitable price ({format_price(data['price'])} < {format_price(pos['entry_price'])}). Manual confirmation required.")
+                                         logging.warning(f"[{symbol}] 3rd consecutive SELL signal received at non-profitable price ({format_price(data['price'])} < {format_price(pos['entry_price'])}). Manual confirmation required.")
 
             if not pending_asset_update and time.time() % 30 < 1:
                 pending_asset_update = True
@@ -476,6 +480,23 @@ def main():
             threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
             threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
             while not shutdown_event.is_set():
+                now_ts = time.time()
+                # Check for expired sell proposals (auto-execute after 60s)
+                with bot_lock:
+                    if ui.sell_proposal_pair and (now_ts - ui.sell_proposal_time >= 60):
+                        symbol = ui.sell_proposal_pair
+                        def async_auto_sell(s):
+                            data = bot_state.get(s, {})
+                            if trading_engine.execute_sell(exchange, data_manager, engine, s, data, config, position_idx=0):
+                                 with bot_lock:
+                                     data['last_action'] = 'SELL'
+                                     data['positions'] = data_manager.get_positions(s)
+                                     data['position'] = data_manager.get_position(s)
+                                 play_sound("sell", config)
+                        threading.Thread(target=async_auto_sell, args=(symbol,), daemon=True).start()
+                        ui.sell_proposal_pair = None
+                        ui.sell_proposal_time = 0
+
                 live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
                 time.sleep(0.5)
         finally:

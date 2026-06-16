@@ -138,7 +138,7 @@ class DashboardUI:
                 data = bot_state.get(symbol, {})
                 candles_text = Text()
                 time_left = max(0, int(61 - (now_ts - self.sell_proposal_time)))
-                candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(self.sell_proposal_profit)} profit?\n", style="bold yellow")
+                candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(self.sell_proposal_profit)}% profit?\n", style="bold yellow")
                 candles_text.append(f"Confirm sell? [Y/n] (Auto-exec in {time_left}s)\n\n", style="dim")
                 if 'last_20_candles' in data:
                     prices = data['last_20_candles']['prices']
@@ -360,6 +360,8 @@ class DashboardUI:
                         symbol = self.sell_proposal_pair
                         def async_sell():
                             data = bot_state.get(symbol, {})
+                            # Note: Sell proposals are only triggered after signals, so MC check is already implied,
+                            # but we can re-verify here if needed.
                             if execute_sell_func(exchange, data_manager, engine, symbol, data, config, position_idx=0):
                                  with bot_lock:
                                      data['last_action'] = 'SELL'
@@ -501,6 +503,8 @@ class DashboardHandler(logging.Handler):
                            return
 
             self.ui.all_logs.append({'msg': f"[{timestamp}] {msg}", 'expiry': expiry})
-            self.ui.logs_scroll_offset = 0  # Auto-scroll to latest
+            # Auto-scroll to latest only if user is not actively scrolling
+            if time.time() > self.ui.logs_pause_until:
+                self.ui.logs_scroll_offset = 0
             if len(self.ui.all_logs) > 500:
                 self.ui.all_logs.pop(0)

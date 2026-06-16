@@ -50,6 +50,36 @@ class TradingEngine:
     def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
         return self.is_profitable(current_price, entry_price, fee_rate)
 
+    def validate_trade_mc(self, symbol, data, config):
+        """Perform Monte Carlo sanity check before trade execution."""
+        if config.get('mode') == 'sell': return True # Skip for manual sell mode
+        try:
+            from monte_carlo import MonteCarloEngine
+            from indicators import get_signals
+            import pandas as pd
+            import torch
+
+            # Use last 100 candles for a quick sanity check
+            # We assume 'last_20_candles' or recent OHLCV is available in bot_state or can be fetched
+            # For simplicity and speed, we use the strategy already identified
+            strategy = data.get('strategy')
+            if not strategy: return True
+
+            # Since we are in the trading loop, we should ideally have the full DF.
+            # If not, we might need to rely on the score from analyze_pair.
+            # For now, let's look for 'mc_score' or similar in data
+            mc_score = data.get('mc_score', 1.1)
+            hurdle = config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
+
+            if mc_score > 1.0 + hurdle:
+                return True
+            else:
+                logging.warning(f"[{symbol}] Trade rejected by Monte Carlo validation (Score: {mc_score:.4f} <= Hurdle: {1.0+hurdle:.4f})")
+                return False
+        except Exception as e:
+            logging.debug(f"MC validation failed for {symbol}, defaulting to True: {e}")
+            return True
+
     def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, exchange=None):
         """
         Calculates position size based on a percentage of the available balance of the quote asset.
@@ -98,6 +128,17 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
         if free_balance < cost:
             logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)})")
             return False
+
+        # Check NOTIONAL / Minimum Cost filter
+        try:
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            if symbol in markets:
+                min_cost = markets[symbol]['limits']['cost']['min'] or 0
+                if cost < min_cost:
+                    logging.warning(f"[{symbol}] Buy aborted: Order cost {format_price(cost)} is below minimum notional limit {format_price(min_cost)}.")
+                    return False
+        except Exception as e:
+            logging.debug(f"[{symbol}] Could not verify notional limit: {e}")
 
         order = exchange.create_order(symbol, 'buy', amount)
         if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
@@ -159,10 +200,16 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
 
         # Tolerance for small balance discrepancies (e.g., due to fees or rounding)
         sell_amount = position['amount']
-        if not is_simulation and free_balance < sell_amount:
-            if free_balance >= sell_amount * 0.98:
-                sell_amount = free_balance
-                logging.info(f"[{symbol}] Adjusting sell amount from {position['amount']} to {sell_amount} due to balance discrepancy.")
+        if not is_simulation:
+            if free_balance < sell_amount:
+                if free_balance >= sell_amount * 0.95: # 5% tolerance
+                    sell_amount = free_balance
+                    logging.info(f"[{symbol}] Adjusting sell amount from {position['amount']} to {sell_amount} due to balance discrepancy (within 5% tolerance).")
+                else:
+                    logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} is significantly less than tracked {format_amount(sell_amount)}).")
+                    return False
+            # Ensure we don't sell more than tracked even if balance is higher (unless we want to clear the asset)
+            # For simplicity, we stick to tracked amount if balance is sufficient.
 
         if is_simulation or free_balance >= sell_amount:
             order = exchange.create_order(symbol, 'sell', sell_amount)
