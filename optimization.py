@@ -285,7 +285,9 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
 
     msg = f"Preparing history and validating cache for {len(symbols)} symbol(s)..."
     if status: status.update(f"[bold blue]{msg}")
-    else: console.print(f"[bold blue]{msg}")
+    else:
+        console.print(f"[bold blue]{msg}")
+    logging.info(msg)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(fetch_and_validate, sym): sym for sym in symbols}
@@ -298,7 +300,9 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 best_per_symbol[sym] = best.copy()
                 optimization_map[sym] = best
                 period_str = f" [dim](From {best.get('start_time')} to {best.get('end_time')})[/]"
-                console.print(f"[bold green][{sym}][/] Reusing cached benchmark: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Bench: {format_price(best.get('avg_bench_profit', best['profit']))} {base_bet_curr}{period_str}")
+                bench_msg = f"[{sym}] Reusing cached benchmark: {best['strategy']} ({best['aggr']}) | Bench: {format_price(best.get('avg_bench_profit', best['profit']))} {base_bet_curr}{period_str}"
+                console.print(f"[bold green]{bench_msg}")
+                logging.info(bench_msg)
                 if data_manager:
                     pattern_manager.set_patterns(sym, cached_patterns)
             else:
@@ -310,7 +314,9 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
     if symbols_to_bench:
         msg = f"Benchmarking all strategies for {len(symbols_to_bench)} symbol(s) using multi-processing..."
         if status: status.update(f"[bold blue]{msg}")
-        else: console.print(f"[bold blue]{msg}")
+        else:
+            console.print(f"[bold blue]{msg}")
+        logging.info(msg)
 
         def handle_bench_shutdown(sig, frame):
              shutdown_event.set()
