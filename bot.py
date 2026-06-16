@@ -1775,7 +1775,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config)
     console.print(f"[bold green]Backtest plot saved as {filename}[/]")
     plt.close()
 
-def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=True, return_full_df=False):
+def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=True, return_full_df=False, copy_df=True):
     """Core backtesting simulation logic."""
     from indicators import get_signals
 
@@ -1824,7 +1824,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     else:
-        df = df_in.copy()
+        df = df_in.copy() if copy_df else df_in
 
     if 'buy_signal' not in df.columns:
         try:
@@ -1996,7 +1996,8 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
     # Pre-calculate common indicators once for all strategies
     worker_device = device if device is not None else torch.device("cpu")
-    df_with_common = get_common_indicators(df_in.copy(), device=worker_device)
+    # No need to copy df_in as it's already a worker-local copy in the process pool
+    df_with_common = get_common_indicators(df_in, device=worker_device)
 
     # We use 'dynamic' as the default aggr for benchmarking
     aggr = aggrs[0] if aggrs else 'dynamic'
@@ -2027,7 +2028,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
         # 1. Calculate signals once for the entire dataset
         try:
-            # Re-use the common indicators pre-calculated above
+            # Re-use the common indicators pre-calculated above. We copy to avoid signal bleed between strategies.
             full_df = get_signals(df_with_common.copy(), mode_settings, is_backtest=True)
         except Exception:
             continue
@@ -2044,7 +2045,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
         res_full = run_backtest_logic(None, symbol, strategy, aggr, full_term_config,
                                      term=full_term_name, df_in=full_df, engine=engine,
-                                     device=device, skip_mc=True, return_full_df=True)
+                                     device=device, skip_mc=True, return_full_df=True, copy_df=False)
 
         if not res_full or not res_full.get('equity_curve'):
             continue
@@ -2096,27 +2097,20 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
                 'strategy': strategy,
                 'aggr': aggr,
                 'symbol': symbol,
-                'start_idx': start_idx,
-                'end_idx': end_idx,
-                'start_ts': window_ts,
-                'tech_state': tech_state,
-                'full_df_ref': full_df # Temporary reference for final data population
+                'start_time': full_df['timestamp'].iloc[start_idx].strftime("%Y-%m-%d %H:%M"),
+                'end_time': full_df['timestamp'].iloc[end_idx-1].strftime("%Y-%m-%d %H:%M"),
+                'prices': full_df['close'].iloc[start_idx:end_idx].tolist(),
+                'tech_state': tech_state
             })
+
+        # Memory optimization: only keep the best candidates to avoid building a massive list
+        if len(patterns) > 500:
+             patterns.sort(key=lambda x: x['score'], reverse=True)
+             patterns = patterns[:200]
 
     # Keep top 5 patterns per pair (overlapping allowed)
     patterns.sort(key=lambda x: x['score'], reverse=True)
-    top_patterns_raw = patterns[:5]
-    top_patterns = []
-
-    for p in top_patterns_raw:
-        df = p.pop('full_df_ref')
-        s_idx, e_idx = p.pop('start_idx'), p.pop('end_idx')
-        p['start_time'] = df['timestamp'].iloc[s_idx].strftime("%Y-%m-%d %H:%M")
-        p['end_time'] = df['timestamp'].iloc[e_idx-1].strftime("%Y-%m-%d %H:%M")
-        p['prices'] = df['close'].iloc[s_idx:e_idx].tolist()
-        top_patterns.append(p)
-
-    return symbol, top_patterns
+    return symbol, patterns[:5]
 
 def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
 
@@ -2245,13 +2239,15 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
         # On CPU with oneDNN, ThreadPoolExecutor might be more efficient for many small torch tasks
         # than ProcessPoolExecutor which has pickling overhead.
+        # We limit max_workers to prevent massive memory spikes when processing large history.
         executor_class = concurrent.futures.ProcessPoolExecutor
-        with executor_class() as executor:
+        with executor_class(max_workers=min(os.cpu_count() or 1, 4)) as executor:
             # Register signal handler during optimization
             original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
+                # Fix: ONLY submit symbols that actually need re-benchmarking
                 futures = [executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device)
-                           for sym in symbol_data_map]
+                           for sym in symbols_to_bench if sym in symbol_data_map]
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
@@ -2289,6 +2285,8 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
                 signal.signal(signal.SIGINT, original_handler)
+                # Free up OHLCV data immediately after benchmarking
+                symbol_data_map.clear()
 
     # If we are in optimization mode for live/sim, return the map
     if term_override:
