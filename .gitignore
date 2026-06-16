@@ -10,4 +10,5 @@ bot_data_backup.zip
 bot_data_backup.zip.tmp
 success_patterns.json
 benchmark_cache.json
+trades_history.json
 PROMPT.txt
