@@ -91,7 +91,7 @@ class DashboardUI:
             footer_cols.append("[B] Buy  [S] Sell  [X] Expert  [TAB] Switch Panel  [M] Marquee  [Q] Quit")
 
             status_items = [
-                 f"Device: {config.get('device', 'cpu')}",
+                 f"Accel: {config.get('gpu_accel', 'CPU')}",
                  f"Risk: {config.get('global_risk_multiplier', 1.2)}x",
                  f"Hurdle: {config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)}"
             ]
@@ -202,7 +202,7 @@ class DashboardUI:
                     candles_text.append("Candle data not available yet.\n", style="dim")
                 pairs_panel = Panel(candles_text, title=f"[bold cyan]{symbol} Candles[/]", border_style="bold cyan")
             else:
-                pairs_height = self.console.height - 20
+                pairs_height = self.console.height - 8
                 if pairs_height < 3: pairs_height = 3
                 max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
 
@@ -270,7 +270,7 @@ class DashboardUI:
                             f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
                             f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0)}",
                             f"{data.get('rsi', 0)}",
-                            f"{data.get('volatility', 0)}/{data.get('adx', 0):.1}",
+                            f"{data.get('volatility', 0)}/{float(data.get('adx', 0)):.1f}",
                             f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
                             f"{data.get('score', 0)}",
                             data.get('aggr', 'N/A'),
@@ -293,7 +293,7 @@ class DashboardUI:
             layout["pairs"].update(pairs_panel)
 
             # Logs Panel
-            log_height = self.console.height - 10
+            log_height = self.console.height - 4
             if log_height < 3: log_height = 3
             max_logs_offset = max(0, len(self.all_logs) - log_height)
 
@@ -394,7 +394,7 @@ class DashboardUI:
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = min(len(sorted_symbols) - 1, self.selected_pair_index + 1)
-                        pairs_height = self.console.height - 20
+                        pairs_height = self.console.height - 8
                         if self.selected_pair_index >= self.pairs_scroll_offset + pairs_height:
                             self.pairs_scroll_offset = self.selected_pair_index - pairs_height + 1
                         self.pairs_pause_until = time.time() + 5

@@ -52,7 +52,7 @@ available_assets = []
 benchmarking_pairs = set()
 suspended_pairs = set()
 signal_arrival_times = {}
-bot_lock = threading.Lock()
+bot_lock = threading.RLock()
 shutdown_event = threading.Event()
 pending_asset_update = False
 
@@ -333,23 +333,25 @@ def main():
     os.environ['OMP_NUM_THREADS'] = str(num_cores)
     os.environ['MKL_NUM_THREADS'] = str(num_cores)
 
-    global device, gpu_enabled
+    global device, gpu_enabled, gpu_accel
     gpu_enabled = False
+    gpu_accel = "CPU"
     if args.no_gpu:
         device = torch.device('cpu')
     else:
         if torch.cuda.is_available():
-            device = torch.device('cuda'); gpu_enabled = True
+            device = torch.device('cuda'); gpu_enabled = True; gpu_accel = "CUDA"
         elif torch.backends.mkldnn.is_available():
-            device = torch.device('cpu'); gpu_enabled = True; torch.backends.mkldnn.enabled = True
+            device = torch.device('cpu'); gpu_enabled = True; torch.backends.mkldnn.enabled = True; gpu_accel = "oneDNN"
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            device = torch.device('mps'); gpu_enabled = True
+            device = torch.device('mps'); gpu_enabled = True; gpu_accel = "MPS"
         else:
             device = torch.device('cpu')
 
     if args.config: config = load_config_from_path(args.config)
     else: config = load_config()
     config['device'] = device
+    config['gpu_accel'] = gpu_accel
 
     if os.path.exists('pairs.txt'):
         with open('pairs.txt', 'r') as f:
@@ -362,13 +364,31 @@ def main():
     if os.path.exists('api.json'):
         try:
             with open('api.json', 'r') as f: api_creds = json.load(f)
-        except Exception as e: console.print(f"[bold red]Error parsing api.json: {e}[/]")
+        except Exception as e:
+            err_msg = f"Error parsing api.json: {e}"
+            console.print(f"[bold red]{err_msg}[/]")
+            logging.error(err_msg)
 
     with console.status("[bold green]Initializing Cryptocurrencies multiplatform bot...", spinner="dots") as status:
         try:
             import cpuinfo
             info = cpuinfo.get_cpu_info()
-            console.print(f"[bold green]Hardware optimization level: {info.get('brand_raw', 'Unknown CPU')}[/]")
+            flags = info.get('flags', [])
+            opt_level = "Unknown"
+            if 'avx512f' in flags: opt_level = "AVX-512"
+            elif 'avx2' in flags: opt_level = "AVX2"
+            elif 'avx' in flags: opt_level = "AVX"
+            elif 'sse4_2' in flags: opt_level = "SSE4.2"
+            elif 'sse4_1' in flags: opt_level = "SSE4.1"
+            elif 'ssse3' in flags: opt_level = "SSSE3"
+            elif 'sse3' in flags: opt_level = "SSE3"
+            elif 'sse2' in flags: opt_level = "SSE2"
+            elif 'sse' in flags: opt_level = "SSE"
+            elif 'mmx' in flags: opt_level = "MMX"
+
+            hw_msg = f"Hardware optimization level: {opt_level} ({info.get('brand_raw', 'Unknown CPU')})"
+            console.print(f"[bold green]{hw_msg}[/]")
+            logging.info(hw_msg)
         except: pass
 
         data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation', 'sell'] else None
@@ -422,7 +442,9 @@ def main():
             time.sleep(0.5)
 
     archiver.stop()
-    console.print("[bold green]Bot shutdown gracefully.[/]")
+    shutdown_msg = "Bot shutdown gracefully."
+    console.print(f"[bold green]{shutdown_msg}[/]")
+    logging.info(shutdown_msg)
 
 if __name__ == "__main__":
     main()
