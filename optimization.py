@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from rich.console import Console
 
 from utils import format_price, format_amount, parse_base_bet, get_base_currency, silent_worker_init
-from indicators import get_signals, STRATEGIES
+from indicators import get_signals, get_common_indicators, STRATEGIES
 from exchange_handler import fetch_ohlcv_incremental
 from monte_carlo import MonteCarloEngine
 from persistence import CacheManager
@@ -63,7 +63,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
             pass
 
     if engine and df_in is not None and not df_in.empty:
-         base_df = get_signals(df_in.copy(), {"device": device if device is not None else torch.device("cpu")}, is_backtest=True)
+         base_df = get_common_indicators(df_in.copy(), device if device is not None else torch.device("cpu"))
          latest = base_df.iloc[-1]
          aggr_settings = engine.get_dynamic_settings(latest.get('adx', 0), latest.get('volatility', 0))
     else:
@@ -232,7 +232,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     now_ts = time.time()
     patterns = []
 
-    df_with_common = get_signals(df_in, {'device': device}, is_backtest=True)
+    df_with_common = get_common_indicators(df_in.copy(), device)
 
     for strategy in strategies:
         for aggr in aggrs:
