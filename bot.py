@@ -1,4 +1,4 @@
-#Cryptocurrencies multiplatform trading bot
+# Cryptocurrencies multiplatform trading bot
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify
@@ -84,6 +84,7 @@ status_pause_until = 0
 # State shared between threads
 bot_state = {}
 available_assets = []
+benchmarking_pairs = set()
 bot_lock = threading.Lock()
 pending_asset_update = False
 
@@ -97,23 +98,26 @@ def format_price(price):
     if price == 0: return "0.000000"
     
     abs_price = abs(price)
-    # Use g format with 8 significant digits to ensure 10000.01 is preserved
-    # and 0.03565 is preserved without unacceptable rounding.
-    formatted = f"{price:.8g}"
-    # If it's in scientific notation, convert back to fixed point
+    # Standard: Use g format with 10 significant digits
+    if abs_price < 0.0001:
+        # For very small prices, use more precision
+        formatted = f"{price:.12f}".rstrip('0').rstrip('.')
+    else:
+        formatted = f"{price:.10g}"
+
     if 'e' in formatted:
         formatted = f"{price:.12f}".rstrip('0').rstrip('.')
     return formatted
 
 def format_amount(amount):
     """
-    Formats amount avoiding excessive zeros.
+    Formats amount avoiding excessive zeros and maintaining precision for small assets.
     """
     if amount is None: return "-"
     if not isinstance(amount, (int, float)): return str(amount)
     if amount == 0: return "0"
-    # Format with many decimals then strip trailing zeros
-    return f"{amount:.10}".rstrip('0').rstrip('.')
+    # Format with high precision then strip trailing zeros
+    return f"{amount:.18f}".rstrip('0').rstrip('.')
 
 def parse_base_bet(config):
     """
@@ -824,7 +828,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                            sell_proposal_profit = 0
                  time.sleep(0.1)
         except Exception as e:
-            logging.error(f"Error in trading thread: {e}")
+            logging.exception("Error in trading thread:")
             time.sleep(5)
 
 
@@ -1055,7 +1059,7 @@ def main():
         except Exception as e:
             console.print(f"[bold red]Error parsing api.json: {e}[/]")
 
-    with console.status("[bold green]InitializingCryptocurrencies multiplatform trading bot...", spinner="dots") as status:
+    with console.status("[bold green]Initializing Cryptocurrencies multiplatform trading bot...", spinner="dots") as status:
 
         # MMX, SSE, AVX Gradation Check (Instruction 6)
         try:
@@ -1232,6 +1236,8 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     with bot_lock:
         if symbol in bot_state: bot_state[symbol]['last_20_candles'] = {"prices": df['average'].tail(20).tolist(), "volumes": df['volume'].tail(20).tolist()}
     df = get_signals(df, {"device": device}, is_backtest=False); latest_row_base = df.iloc[-1].copy()
+    candle_ts = int(latest_row_base['timestamp']) if not isinstance(latest_row_base['timestamp'], (pd.Timestamp, datetime)) else int(latest_row_base['timestamp'].timestamp())
+    if candle_ts > 1000000000000: candle_ts //= 1000 # Convert MS to Seconds
 
     # Cross-pair pattern matching (Instruction 1 & 2)
     search_pool = patterns + global_pattern_pool; active_patterns = []
@@ -1243,6 +1249,44 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             if sim > 0.70: active_patterns.append((sim, p))
     active_patterns.sort(key=lambda x: x[0], reverse=True); active_pattern = active_patterns[0][1] if active_patterns else None
 
+    # Expiration & Regime Shift Detection
+    prev_data = bot_state.get(symbol, {})
+    pattern_match_ts = prev_data.get('pattern_match_ts')
+    current_pattern_id = prev_data.get('active_pattern_id')
+
+    if active_pattern:
+        active_pattern_id = f"{active_pattern.get('symbol')}_{active_pattern.get('start_time')}_{active_pattern.get('strategy')}"
+        if active_pattern_id != current_pattern_id:
+            pattern_match_ts = candle_ts
+            current_pattern_id = active_pattern_id
+
+        # Check for expiration
+        pattern_len = len(active_pattern['prices'])
+        tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+        tf_secs = tf_map.get(timeframe, 300)
+        elapsed_candles = abs(candle_ts - pattern_match_ts) // tf_secs
+
+        expired = elapsed_candles >= pattern_len
+
+        # Regime Shift
+        pattern_tech = active_pattern.get('tech_state', {})
+        curr_adx = latest_row_base.get('adx', 0)
+        curr_vol = latest_row_base.get('volatility', 0)
+        p_adx = pattern_tech.get('adx', curr_adx)
+        p_vol = pattern_tech.get('volatility', curr_vol)
+
+        regime_shift = False
+        if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.25:
+            regime_shift = True
+        if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.25:
+            regime_shift = True
+
+        if (expired or regime_shift) and symbol not in benchmarking_pairs:
+            with bot_lock:
+                benchmarking_pairs.add(symbol)
+            if expired: logging.info(f"[{symbol}] Success pattern expired ({elapsed_candles}/{pattern_len} candles). Triggering re-benchmark.")
+            else: logging.info(f"[{symbol}] Market regime shift detected (ADX/Vol deviation > 25%). Triggering re-benchmark.")
+
     if active_pattern:
         strategy_name = active_pattern['strategy']; mode_name = active_pattern['aggr']
         if engine: mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
@@ -1252,7 +1296,6 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
         # Instruction 2b: New Monte Carlo tests pondering with pattern score
         mc_cache = MonteCarloCacheManager()
-        candle_ts = int(df.iloc[-1]['timestamp']) if not isinstance(df.iloc[-1]['timestamp'], (pd.Timestamp, datetime)) else int(df.iloc[-1]['timestamp'].timestamp())
         mc_score = mc_cache.get(symbol, timeframe, candle_ts)
 
         if mc_score is None:
@@ -1267,7 +1310,6 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
     exclude = ['open', 'high', 'low', 'close', 'volume', 'buy_candidate', 'sell_candidate', 'ema_up_win', 'macd_up_win', 'rsi_up_win', 'ema_down_win', 'macd_down_win', 'rsi_down_win', 'ema_up', 'ema_down', 'macd_up', 'macd_down', 'rsi_up', 'rsi_down']
     trigger_data = {k: v for k, v in latest_row.to_dict().items() if k not in exclude and not isinstance(v, (pd.Timestamp, datetime))}
-    candle_ts = int(latest_row['timestamp']) if not isinstance(latest_row['timestamp'], (pd.Timestamp, datetime)) else int(latest_row['timestamp'].timestamp())
     trigger_data['candle_ts'] = candle_ts; prev_data = bot_state.get(symbol, {}); last_candle_ts = prev_data.get('_last_candle_ts')
     consecutive_buys = prev_data.get('consecutive_buys', 0); consecutive_sells = prev_data.get('consecutive_sells', 0)
     if last_candle_ts is None:
@@ -1301,6 +1343,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'all_matching_strategies': [ap[1]['strategy'] for ap in active_patterns] if active_patterns else [strategy_name],
         'tendency': latest_row.get('tendency', 'Neutral'), 'buy': consecutive_buys >= buy_threshold, 'sell': consecutive_sells >= 3,
         'consecutive_buys': consecutive_buys, 'consecutive_sells': consecutive_sells, '_last_candle_ts': candle_ts,
+        'active_pattern_id': current_pattern_id, 'pattern_match_ts': pattern_match_ts,
         'sell_triggered': consecutive_sells >= 3 and len(data_manager.get_positions(symbol)) > 0,
         'positions': data_manager.get_positions(symbol),
         'position': data_manager.get_position(symbol),
@@ -1487,8 +1530,9 @@ def sync_live_positions(exchange, data_manager, config):
                 ticker = exchange.fetch_ticker(symbol)
                 if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
                     is_dust = True
-            elif amount <= 0.25: is_dust = True
-        except: pass
+            elif amount <= 0.000001: is_dust = True
+        except:
+            if amount <= 0.000001: is_dust = True
 
         if is_dust: continue
         sellable_found = True
@@ -1550,10 +1594,10 @@ def get_sellable_assets(exchange, config=None):
                 min_cost = market['limits']['cost']['min'] or 10
                 ticker = exchange.fetch_ticker(symbol)
                 if ticker and (amount < min_amount or (amount * ticker['last']) < min_cost): continue
-            elif amount <= 0.25: continue
+            elif amount <= 0.000001: continue
             assets.append(asset)
         except Exception:
-            if amount > 0.25: assets.append(asset)
+            if amount > 0.000001: assets.append(asset)
     return sorted(assets)
 
 def interactive_sell(exchange, data_manager, engine, config):
@@ -1876,6 +1920,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     tech_state = {
         'rsi': float(latest.get('rsi', 50)),
         'adx': float(latest.get('adx', 0)),
+        'volatility': float(latest.get('volatility', 0)),
         'ema_f': float(latest.get('ema_f', 0)),
         'ema_s': float(latest.get('ema_s', 0))
     }
@@ -2040,6 +2085,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
             tech_state = {
                 'rsi': float(latest_row.get('rsi', 50)),
                 'adx': float(latest_row.get('adx', 0)),
+                'volatility': float(latest_row.get('volatility', 0)),
                 'ema_f': float(latest_row.get('ema_f', 0)),
                 'ema_s': float(latest_row.get('ema_s', 0))
             }
