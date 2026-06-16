@@ -309,6 +309,12 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
         if elapsed < 1.0: time.sleep(1.0 - elapsed)
 
 def main():
+    # Initialize logging early to capture all events in Dashboard
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    db_handler = dashboard.DashboardHandler(ui, bot_lock)
+    logging.basicConfig(level=logging.INFO, handlers=[db_handler, RichHandler(console=console, show_time=False)])
+
     global ohlcv_cache_manager
     migrate_fresh_files_to_archive()
     load_from_archive()
@@ -430,9 +436,6 @@ def main():
         for symbol in config['pairs']:
             pos_list = data_manager.get_positions(symbol)
             bot_state[symbol] = {'aggr': config['pairs'][symbol].get('aggr', 'normal'), 'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'), 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': config['pairs'][symbol].get('expected_profit', 0)}
-
-    db_handler = dashboard.DashboardHandler(ui, bot_lock)
-    logging.basicConfig(level=logging.INFO, handlers=[db_handler, RichHandler(console=console, show_time=False)])
 
     with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock), refresh_per_second=2, screen=True) as live:
         threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
