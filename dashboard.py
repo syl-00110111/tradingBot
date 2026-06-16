@@ -71,20 +71,15 @@ class DashboardUI:
             )
 
             # Header: Clock, Mode and Marquee Status
-            header_text = Text()
-            header_text.append(f" Cryptocurrencies multiplatform", style="bold bright_white")
-            header_text.append(f" | {global_mode.upper()} MODE", style="bold green" if global_mode == "live" else "bold yellow")
-            header_text.append(f" | {now.strftime('%Y-%m-%d %H:%M:%S')}", style="cyan")
-
             uptime = timedelta(seconds=int(now_ts - self.bot_start_time))
-            header_text.append(f" | Uptime: {uptime}", style="dim white")
-
-            if self.show_help:
-                header_text.append(" | [H] Hide Help", style="bold yellow")
-            else:
-                header_text.append(" | [H] Help", style="dim")
-
-            layout["header"].update(Panel(header_text, border_style="bright_blue"))
+            header_cols = [
+                Text(" Cryptocurrencies multiplatform trading bot", style="bold bright_white"),
+                Text(f"{global_mode.upper()} MODE", style="bold green" if global_mode == "live" else "bold yellow"),
+                Text(now.strftime('%Y-%m-%d %H:%M:%S'), style="cyan"),
+                Text(f"Uptime: {uptime}", style="dim white"),
+                Text("[H] Hide Help" if self.show_help else "[H] Help", style="bold yellow" if self.show_help else "dim")
+            ]
+            layout["header"].update(Panel(Columns(header_cols, expand=True), border_style="bright_blue"))
 
             # Footer: Quick actions and Status Bar
             footer_cols = []

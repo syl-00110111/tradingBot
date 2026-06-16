@@ -374,7 +374,9 @@ def interactive_sell(exchange, data_manager, engine, config, console):
             console.print(f"[dim]Skipping {asset}.[/]")
 
     if not sellable_found:
-        console.print("[yellow]No sellable assets (above dust threshold) found in your real wallet.[/]")
+        msg = "No sellable assets (above dust threshold) found in your real wallet."
+        console.print(f"[yellow]{msg}[/]")
+        logging.info(msg)
 
 def show_balance(exchange, config, console, table_class):
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
