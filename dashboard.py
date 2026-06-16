@@ -198,7 +198,7 @@ class DashboardUI:
                     candles_text.append("Candle data not available yet.\n", style="dim")
                 pairs_panel = Panel(candles_text, title=f"[bold cyan]{symbol} Candles[/]", border_style="bold cyan")
             else:
-                pairs_height = self.console.height - 12
+                pairs_height = self.console.height - 9
                 if pairs_height < 3: pairs_height = 3
                 max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
 
@@ -289,7 +289,7 @@ class DashboardUI:
             layout["pairs"].update(pairs_panel)
 
             # Logs Panel
-            log_height = self.console.height - 12
+            log_height = self.console.height - 9
             if log_height < 3: log_height = 3
             max_logs_offset = max(0, len(self.all_logs) - log_height)
 
@@ -315,7 +315,15 @@ class DashboardUI:
             end = max(0, len(self.all_logs) - self.logs_scroll_offset)
             for log_entry in self.all_logs[start:end]:
                 style = "dim" if log_entry.get('expiry') and now > log_entry['expiry'] else ""
-                log_text.append(log_entry['msg'] + "\n", style=style)
+                try:
+                    log_text.append(Text.from_markup(log_entry['msg'], style=style))
+                except Exception:
+                    log_text.append(log_entry['msg'], style=style)
+                log_text.append("\n")
+
+            # Add 3 blank lines at the end to allow scrolling past the last message
+            if self.logs_scroll_offset == 0:
+                log_text.append("\n\n\n")
 
             layout["logs"].update(Panel(log_text, title="[bold cyan]System Logs[/]", border_style="bright_blue" if self.focused_panel == "logs" else "dim white"))
 
@@ -345,13 +353,15 @@ class DashboardUI:
                 if self.sell_proposal_pair and (time.time() - self.sell_proposal_time < 61):
                     if key.lower() == 'y' or key == readchar.key.ENTER:
                         symbol = self.sell_proposal_pair
-                        data = bot_state.get(symbol, {})
-                        if execute_sell_func(exchange, data_manager, engine, symbol, data, config, position_idx=0):
-                             with bot_lock:
-                                 data['last_action'] = 'SELL'
-                                 data['positions'] = data_manager.get_positions(symbol)
-                                 data['position'] = data_manager.get_position(symbol)
-                             play_sound_func("sell", config)
+                        def async_sell():
+                            data = bot_state.get(symbol, {})
+                            if execute_sell_func(exchange, data_manager, engine, symbol, data, config, position_idx=0):
+                                 with bot_lock:
+                                     data['last_action'] = 'SELL'
+                                     data['positions'] = data_manager.get_positions(symbol)
+                                     data['position'] = data_manager.get_position(symbol)
+                                 play_sound_func("sell", config)
+                        threading.Thread(target=async_sell, daemon=True).start()
                         with bot_lock:
                              self.sell_proposal_pair = None
                              self.sell_proposal_time = 0
@@ -390,7 +400,7 @@ class DashboardUI:
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = min(len(sorted_symbols) - 1, self.selected_pair_index + 1)
-                        pairs_height = self.console.height - 12
+                        pairs_height = self.console.height - 9
                         if self.selected_pair_index >= self.pairs_scroll_offset + pairs_height:
                             self.pairs_scroll_offset = self.selected_pair_index - pairs_height + 1
                         self.pairs_pause_until = time.time() + 5

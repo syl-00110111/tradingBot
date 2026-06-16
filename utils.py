@@ -119,7 +119,11 @@ def play_sound(action, config=None):
                      sys.stdout.write("\a"); sys.stdout.flush()
                      return
                 bell_char = "\a" if action == "buy" else "\a\a"
-                sys.stdout.write(bell_char)
-                sys.stdout.flush()
+                # Use os.write to ensure it's written even if stdout is buffered or redirected
+                try:
+                    os.write(sys.stdout.fileno(), bell_char.encode())
+                except:
+                    sys.stdout.write(bell_char)
+                    sys.stdout.flush()
         except Exception: pass
     threading.Thread(target=_play, daemon=True).start()

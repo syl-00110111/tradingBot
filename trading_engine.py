@@ -174,6 +174,12 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
                 profit = total_received - position.get('entry_total_base', 0)
                 data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, position_idx=position_idx)
                 return True
+            else:
+                logging.error(f"[{symbol}] Sell failed: Exchange rejected order for amount {format_amount(position['amount'])}")
+                return False
+        else:
+            logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} < {format_amount(position['amount'])})")
+            return False
     return False
 
 def initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state):
@@ -304,6 +310,7 @@ def get_sellable_assets(exchange, config=None):
 
 def interactive_sell(exchange, data_manager, engine, config, console):
     console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
+    play_sound("sell", config)
     balance = exchange.fetch_balance()
     if not balance:
         console.print("[red]Error: Failed to fetch balance.[/]")

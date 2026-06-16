@@ -397,7 +397,7 @@ def main():
             elif 'sse' in flags: opt_level = "SSE"
             elif 'mmx' in flags: opt_level = "MMX"
 
-            hw_msg = f"Hardware optimization level: {opt_level} ({info.get('brand_raw', 'Unknown CPU')})"
+            hw_msg = f"Hardware optimization level: [bold blue]{opt_level}[/] ({info.get('brand_raw', 'Unknown CPU')})"
             logging.info(hw_msg)
         except: pass
 
@@ -471,7 +471,6 @@ def main():
     archiver.stop()
     shutdown_msg = "Bot shutdown gracefully."
     console.print(f"[bold green]{shutdown_msg}[/]")
-    logging.info(shutdown_msg)
 
 if __name__ == "__main__":
     main()
