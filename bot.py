@@ -116,8 +116,8 @@ def format_amount(amount):
     if amount is None: return "-"
     if not isinstance(amount, (int, float)): return str(amount)
     if amount == 0: return "0"
-    # Format with high precision then strip trailing zeros
-    return f"{amount:.18f}".rstrip('0').rstrip('.')
+    # Format with high precision then strip trailing zeros. Round to avoid float representation noise.
+    return f"{round(amount, 12):.12f}".rstrip('0').rstrip('.')
 
 def parse_base_bet(config):
     """
@@ -758,7 +758,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             if data.get('buy'):
                                  potential_buys.append((symbol, data))
                     except Exception as e:
-                        logging.info(f"Analyzed {symbol}")
+                        logging.exception(f"Error analyzing {symbol}:")
 
             rebench_syms = []
             with bot_lock:
@@ -1390,7 +1390,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'volatility': latest_row.get('volatility', 0), 'score': latest_row.get('score', 0),
         'whale_active': bool(latest_row.get('whale_active', 0)), 'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
         'aggr': mode_name, 'strategy': strategy_name,
-        'all_matching_strategies': [ap[1]['strategy'] for ap in active_patterns] if active_patterns else [strategy_name],
+        'all_matching_strategies': [ap['pattern']['strategy'] for ap in active_patterns] if active_patterns else [strategy_name],
         'tendency': latest_row.get('tendency', 'Neutral'), 'buy': consecutive_buys >= buy_threshold, 'sell': consecutive_sells >= 3,
         'consecutive_buys': consecutive_buys, 'consecutive_sells': consecutive_sells, '_last_candle_ts': candle_ts,
         'active_pattern_id': current_pattern_id, 'pattern_match_ts': pattern_match_ts,
@@ -2022,7 +2022,7 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None):
+def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None, threshold_conv=1.0):
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
@@ -2053,15 +2053,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     aggr = aggrs[0] if aggrs else 'dynamic'
 
     # Instruction 8: Convert thresholds to base currency
-    quote = symbol.split('/')[1]
-    threshold_conv = 1.0
-    base_bet_curr = get_base_currency(None, config)
-    if quote != base_bet_curr:
-        try:
-            ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
-            if ticker and ticker.get('last'):
-                threshold_conv = ticker['last']
-        except: pass
+    # threshold_conv is now passed from the main process
 
     profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015) * threshold_conv
 
@@ -2290,8 +2282,22 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
                 # Fix: ONLY submit symbols that actually need re-benchmarking
-                futures = [executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device)
-                           for sym in symbols_to_bench if sym in symbol_data_map]
+                futures = []
+                conv_cache = {}
+                for sym in symbols_to_bench:
+                    if sym not in symbol_data_map: continue
+                    # Pre-calculate threshold_conv
+                    quote = sym.split('/')[1]
+                    if quote not in conv_cache:
+                        t_conv = 1.0
+                        if quote != base_bet_curr:
+                            try:
+                                ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
+                                if ticker and ticker.get('last'):
+                                    t_conv = ticker['last']
+                            except: pass
+                        conv_cache[quote] = t_conv
+                    futures.append(executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device, threshold_conv=conv_cache[quote]))
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
