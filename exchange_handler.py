@@ -52,7 +52,7 @@ class CCXTExchange(ExchangeInterface):
         ex_class = getattr(ccxt, exchange_id)
         default_options = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'options': {'poolSize': 50},
+            'options': {'poolSize': 50, 'adjustForTimeDifference': True},
             'session': create_ccxt_session()
         }
         if options: default_options.update(options)

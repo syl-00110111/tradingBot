@@ -398,7 +398,6 @@ def main():
             elif 'mmx' in flags: opt_level = "MMX"
 
             hw_msg = f"Hardware optimization level: {opt_level} ({info.get('brand_raw', 'Unknown CPU')})"
-            console.print(f"[bold green]{hw_msg}[/]")
             logging.info(hw_msg)
         except: pass
 
@@ -438,9 +437,17 @@ def main():
                     pair_priorities.append((sym, best['profit']))
             config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
 
+        if args.mode == 'simulation':
+             trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
+
         for symbol in config['pairs']:
             pos_list = data_manager.get_positions(symbol)
             bot_state[symbol] = {'aggr': config['pairs'][symbol].get('aggr', 'normal'), 'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'), 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': config['pairs'][symbol].get('expected_profit', 0)}
+
+        # Initial synchronous asset update to ensure immediate availability
+        try:
+            available_assets[:] = trading_engine.get_sellable_assets(exchange, config)
+        except: pass
 
     # Silence ALL other handlers during Dashboard execution, keeping ONLY DashboardHandler
     all_other_handlers = [h for h in logging.root.handlers if not isinstance(h, dashboard.DashboardHandler)]
