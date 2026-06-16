@@ -477,7 +477,7 @@ def make_dashboard(global_mode, config):
         status_text = Text()
         status_text.append(f"Update: {datetime.now().strftime('%H:%M:%S')} | Mode: {global_mode.capitalize()} | ", style="bold brown")
         status_text.append(f"Sellable: {', '.join(available_assets) if available_assets else 'None'} | ", style="bold yellow")
-        status_text.append("TAB: Switch | Arrows: Scroll | H: Help | Exit: Ctrl+C", style="bold red")
+        status_text.append("TAB: Switch | Arrows: Scroll | H: Help | Exit: Q or Ctrl+C", style="bold red")
 
         display_width = console.width - 4
         max_status_offset = max(0, len(status_text) - display_width)
@@ -517,6 +517,7 @@ def make_dashboard(global_mode, config):
         help_text.append("  X      : Toggle Expert Mode (Show/Hide Indicators)\n")
         help_text.append("  M      : Toggle Marquee Effect (Pause/Resume scrolling)\n")
         help_text.append("  H      : Close this help menu\n")
+        help_text.append("  Q      : Stop the bot gracefully\n")
         help_text.append("  Ctrl+C : Stop the bot gracefully\n")
 
         pairs_panel = Panel(help_text, title="[bold]Help / Info[/]", border_style="bold yellow")
@@ -636,7 +637,7 @@ def input_thread_func(exchange, data_manager, engine, config):
                 marquee_enabled = not marquee_enabled
             elif key.lower() == 'h':
                 show_help = not show_help
-            elif key == readchar.key.CTRL_C:
+            elif key.lower() == 'q' or key == readchar.key.CTRL_C:
                 shutdown_event.set()
                 break
         except (KeyboardInterrupt, EOFError):
@@ -1207,28 +1208,31 @@ def main():
     logging.info("Bot stopped gracefully.")
 
 def play_sound(action, config=None):
-    system = platform.system().lower()
-    try:
-        if system == "windows":
-            import winsound
-            if action == "startup":
-                 # Randomized sequence equal to max_open_positions
-                 num_blips = int(config.get('max_open_positions', 5)) if config else 5
-                 for _ in range(num_blips):
-                      freq = random.randint(400, 1200)
-                      dur = random.randint(100, 300)
-                      winsound.Beep(freq, dur)
-                 return
-            frequency = 1000 if action == "buy" else 1500
-            winsound.Beep(frequency, 200)
-        else:
-            if action == "startup":
-                 sys.stdout.write("\a"); sys.stdout.flush()
-                 return
-            bell_char = "\a" if action == "buy" else "\a\a"
-            sys.stdout.write(bell_char)
-            sys.stdout.flush()
-    except Exception: pass
+    """Plays notification sounds in a non-blocking daemon thread."""
+    def _play():
+        system = platform.system().lower()
+        try:
+            if system == "windows":
+                import winsound
+                if action == "startup":
+                     # Randomized sequence equal to max_open_positions
+                     num_blips = int(config.get('max_open_positions', 5)) if config else 5
+                     for _ in range(num_blips):
+                          freq = random.randint(400, 1200)
+                          dur = random.randint(100, 300)
+                          winsound.Beep(freq, dur)
+                     return
+                frequency = 1000 if action == "buy" else 1500
+                winsound.Beep(frequency, 200)
+            else:
+                if action == "startup":
+                     sys.stdout.write("\a"); sys.stdout.flush()
+                     return
+                bell_char = "\a" if action == "buy" else "\a\a"
+                sys.stdout.write(bell_char)
+                sys.stdout.flush()
+        except Exception: pass
+    threading.Thread(target=_play, daemon=True).start()
 
 def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, global_config, engine=None):
     patterns = pattern_manager.get_patterns(symbol)
@@ -2237,6 +2241,11 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
         def handle_bench_shutdown(sig, frame):
              shutdown_event.set()
+             # Explicitly terminate worker processes for a responsive exit
+             if hasattr(executor, '_processes'):
+                 for p in executor._processes.values():
+                     try: p.terminate()
+                     except: pass
              executor.shutdown(wait=False, cancel_futures=True)
              raise KeyboardInterrupt
 
@@ -2246,8 +2255,10 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         # We limit max_workers to prevent massive memory spikes when processing large history.
         executor_class = concurrent.futures.ProcessPoolExecutor
         with executor_class(max_workers=min(os.cpu_count() or 1, 4), initializer=silent_worker_init) as executor:
-            # Register signal handler during optimization
-            original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
+            # Register signal handler during optimization ONLY if in main thread
+            original_handler = None
+            if threading.current_thread() == threading.main_thread():
+                original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
                 # Fix: ONLY submit symbols that actually need re-benchmarking
                 futures = [executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device)
@@ -2288,7 +2299,8 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         if best_for_symbol['profit'] > best_overall['total']['profit']:
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
-                signal.signal(signal.SIGINT, original_handler)
+                if original_handler:
+                    signal.signal(signal.SIGINT, original_handler)
                 # Free up OHLCV data immediately after benchmarking
                 symbol_data_map.clear()
 
