@@ -72,14 +72,18 @@ class DashboardUI:
 
             # Header: Clock, Mode and Marquee Status
             uptime = timedelta(seconds=int(now_ts - self.bot_start_time))
-            header_cols = [
-                Text(" Cryptocurrencies multiplatform trading bot", style="bold bright_white"),
-                Text(f"{global_mode.upper()} MODE", style="bold green" if global_mode == "live" else "bold yellow"),
-                Text(now.strftime('%Y-%m-%d %H:%M:%S'), style="cyan"),
-                Text(f"Uptime: {uptime}", style="dim white"),
-                Text("[H] Hide Help" if self.show_help else "[H] Help", style="bold yellow" if self.show_help else "dim")
-            ]
-            layout["header"].update(Panel(Columns(header_cols, expand=True), border_style="bright_blue"))
+
+            header_left = Text()
+            header_left.append(" Cryptocurrencies multiplatform trading bot", style="bold bright_white")
+            header_left.append(f" | {global_mode.upper()} MODE", style="bold green" if global_mode == "live" else "bold yellow")
+
+            header_right = Text()
+            header_right.append(now.strftime('%Y-%m-%d %H:%M:%S'), style="cyan")
+            header_right.append(f" | Uptime: {uptime}", style="dim white")
+            header_right.append(" | ")
+            header_right.append("[H] Hide Help" if self.show_help else "[H] Help", style="bold yellow" if self.show_help else "dim")
+
+            layout["header"].update(Panel(Columns([header_left, header_right], expand=True), border_style="bright_blue"))
 
             # Footer: Quick actions and Status Bar
             footer_cols = []
@@ -194,7 +198,7 @@ class DashboardUI:
                     candles_text.append("Candle data not available yet.\n", style="dim")
                 pairs_panel = Panel(candles_text, title=f"[bold cyan]{symbol} Candles[/]", border_style="bold cyan")
             else:
-                pairs_height = self.console.height - 8
+                pairs_height = self.console.height - 12
                 if pairs_height < 3: pairs_height = 3
                 max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
 
@@ -285,7 +289,7 @@ class DashboardUI:
             layout["pairs"].update(pairs_panel)
 
             # Logs Panel
-            log_height = self.console.height - 4
+            log_height = self.console.height - 12
             if log_height < 3: log_height = 3
             max_logs_offset = max(0, len(self.all_logs) - log_height)
 
@@ -386,7 +390,7 @@ class DashboardUI:
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = min(len(sorted_symbols) - 1, self.selected_pair_index + 1)
-                        pairs_height = self.console.height - 8
+                        pairs_height = self.console.height - 12
                         if self.selected_pair_index >= self.pairs_scroll_offset + pairs_height:
                             self.pairs_scroll_offset = self.selected_pair_index - pairs_height + 1
                         self.pairs_pause_until = time.time() + 5

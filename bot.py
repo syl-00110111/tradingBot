@@ -313,7 +313,12 @@ def main():
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     db_handler = dashboard.DashboardHandler(ui, bot_lock)
-    logging.basicConfig(level=logging.INFO, handlers=[db_handler, RichHandler(console=console, show_time=False)])
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(message)s',
+        handlers=[db_handler, RichHandler(console=console, show_time=False, show_level=False, show_path=False)]
+    )
+    logging.root.setLevel(logging.INFO)
 
     global ohlcv_cache_manager
     migrate_fresh_files_to_archive()
@@ -437,13 +442,13 @@ def main():
             pos_list = data_manager.get_positions(symbol)
             bot_state[symbol] = {'aggr': config['pairs'][symbol].get('aggr', 'normal'), 'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'), 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': config['pairs'][symbol].get('expected_profit', 0)}
 
-    # Identify RichHandler to silence it during Dashboard execution
-    rich_handlers = [h for h in logging.root.handlers if isinstance(h, RichHandler)]
+    # Silence ALL other handlers during Dashboard execution, keeping ONLY DashboardHandler
+    all_other_handlers = [h for h in logging.root.handlers if not isinstance(h, dashboard.DashboardHandler)]
 
     with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock), refresh_per_second=2, screen=True) as live:
         # Silence console output once dashboard is live
-        for rh in rich_handlers:
-            logging.root.removeHandler(rh)
+        for h in all_other_handlers:
+            logging.root.removeHandler(h)
 
         try:
             threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
@@ -453,8 +458,8 @@ def main():
                 time.sleep(0.5)
         finally:
             # Restore console logging on exit
-            for rh in rich_handlers:
-                logging.root.addHandler(rh)
+            for h in all_other_handlers:
+                logging.root.addHandler(h)
 
     archiver.stop()
     shutdown_msg = "Bot shutdown gracefully."

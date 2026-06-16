@@ -269,7 +269,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             if cached_patterns:
                 best_cached = cached_patterns[0]
                 now_ts = time.time()
-                if now_ts - best_cached.get('last_bench_ts', 0) < 3600:
+                # Use a longer cache validity (7 days) for benchmarks
+                if now_ts - best_cached.get('last_bench_ts', 0) < (3600 * 24 * 7):
                     return sym, None, cached_patterns, best_cached
 
             limit = 20000 if term_to_test == 'short' else 40000
