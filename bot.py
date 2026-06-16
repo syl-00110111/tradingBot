@@ -664,7 +664,7 @@ def update_available_assets_live(exchange, config):
         logging.error(f"Failed to update assets from API: {e}")
         with bot_lock: pending_asset_update = False
 
-def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
+def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, args):
     global available_assets, pending_asset_update
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
@@ -683,11 +683,11 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     global last_sell_proposal_check, sell_proposal_pair, sell_proposal_profit, sell_proposal_time
 
     while not shutdown_event.is_set():
-        if mode == 'simulation' and not sim_init_done:
+        if args.mode == 'simulation' and not sim_init_done:
             initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
             sim_init_done = True
 
-        if mode == 'live' and not sim_init_done:
+        if args.mode == 'live' and not sim_init_done:
             # First time load for live
             sync_live_positions(exchange, data_manager, config)
             new_assets = get_sellable_assets(exchange, config)
@@ -696,7 +696,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             sim_init_done = True
 
         try:
-            if mode == 'simulation' and time.time() - last_assets_update > 60:
+            if args.mode == 'simulation' and time.time() - last_assets_update > 60:
                 new_available_assets = get_sellable_assets_sim(data_manager)
                 with bot_lock:
                      available_assets[:] = new_available_assets
@@ -747,7 +747,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                      if execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=i):
                                           with bot_lock:
                                               data['last_action'] = 'SELL'
-                                              if mode == 'live' and not pending_asset_update:
+                                              if args.mode == 'live' and not pending_asset_update:
                                                   pending_asset_update = True
                                                   threading.Thread(target=update_available_assets_live, args=(exchange, config), daemon=True).start()
                                           play_sound("sell", config)
@@ -760,13 +760,19 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     except Exception as e:
                         logging.info(f"Analyzed {symbol}")
 
+            rebench_syms = []
             with bot_lock:
                 if benchmarking_pairs:
                     rebench_syms = list(benchmarking_pairs)
-                    msg = f"Re-benchmarking {len(rebench_syms)} pairs due to expiration/shift..." 
-                    logging.info(msg)
-                    mode_term = config.get("_active_term", "short")
-                    run_benchmark_mode(exchange, config, args, term_override=mode_term, status=None, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
+                    # Clear them so other iterations don't re-trigger while this one runs
+                    benchmarking_pairs.clear()
+
+            if rebench_syms:
+                msg = f"Re-benchmarking {len(rebench_syms)} pairs due to expiration/shift..."
+                logging.info(msg)
+                mode_term = config.get("_active_term", "short")
+                # Run benchmarking OUTSIDE of bot_lock to keep dashboard responsive
+                run_benchmark_mode(exchange, config, args, term_override=mode_term, status=None, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device, symbols_to_process=rebench_syms)
             if potential_buys and not shutdown_event.is_set():
                 max_open = int(config.get("max_open_positions", 5))
                 current_open = len(data_manager.get_open_positions())
@@ -1190,7 +1196,7 @@ def main():
             }
 
     threading.Thread(target=input_thread_func, args=(exchange, data_manager, engine, config), daemon=True).start()
-    threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args.mode), daemon=True).start()
+    threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
 
     play_sound("startup")
     try:
@@ -2120,7 +2126,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     patterns.sort(key=lambda x: x['score'], reverse=True)
     return symbol, patterns[:5]
 
-def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
+def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None):
 
     # Respect global overrides if they exist
     global_aggr = config.get('force_agressivity_to_all_pairs')
@@ -2133,7 +2139,11 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     cache_mgr = CacheManager()
 
     terms_cfg = config.get('expected_profit_terms', {})
-    symbols = [args.symbol] if (hasattr(args, 'symbol') and args.symbol) else list(config.get('pairs', {}).keys())
+
+    if symbols_to_process:
+        symbols = symbols_to_process
+    else:
+        symbols = [args.symbol] if (hasattr(args, 'symbol') and args.symbol) else list(config.get('pairs', {}).keys())
 
     # Best per symbol
     best_per_symbol = {}
@@ -2153,9 +2163,10 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
     timeframe = term_cfg.get('timeframe', '5m')
 
-    # Step 1: Pre-fetch OHLCV for all symbols and track incremental counts
+    # Step 1 & 2: Pre-fetch OHLCV and validate cache in parallel
     symbol_data_map = {}
-    incremental_info = {} # sym -> (new_count, total_count)
+    symbols_to_bench = []
+    now_ts = time.time()
 
     # Date filtering logic
     since_ts = None
@@ -2163,76 +2174,58 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
          try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
          except Exception: console.print(f"[red]Invalid --since format. Use YYYY-MM-DD HH:MM[/]")
 
+    def fetch_and_validate(symbol):
+        try:
+            target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
+            current_since = since_ts if since_ts else target_ts
+            full_history, new_count = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=None, since=current_since)
+            if not full_history: return None
+
+            df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+            cache_entry = cache_mgr.get(symbol, term_to_test)
+            if cache_entry:
+                cached_patterns = cache_entry['data']
+                benchmark_ts = cache_entry['timestamp']
+                total_count = len(full_history)
+                prev_stored_count = total_count - new_count
+                invalidation_1 = new_count > prev_stored_count
+                total_history_duration = df['timestamp'].iloc[-1].timestamp() - df['timestamp'].iloc[0].timestamp()
+                invalidation_2 = (now_ts - benchmark_ts) > (2 * total_history_duration)
+
+                if not invalidation_1 and not invalidation_2:
+                    best = cached_patterns[0]
+                    best['is_cached'] = True
+                    return (symbol, None, cached_patterns, best)
+
+            return (symbol, df, None, None)
+        except Exception:
+            return None
+
     msg = f"Updating OHLCV data for {len(symbols)} symbol(s)..."
     if status: status.update(f"[bold blue]{msg}")
     else: console.print(f"[bold blue]{msg}")
 
-    for i, symbol in enumerate(symbols):
-        if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Updating history for {symbol}...")
-        try:
-            target_date = datetime(2024, 6, 1); target_ts = int(target_date.timestamp() * 1000)
-            current_since = since_ts if since_ts else target_ts
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(fetch_and_validate, sym): sym for sym in symbols}
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            res = future.result()
+            if not res: continue
+            sym, df, cached_patterns, best = res
 
-            # Use unified incremental fetch which now handles backward gaps too
-            # Passing limit=None ensures we get "Everything" since June 2024
-            full_history, new_count = fetch_ohlcv_incremental(exchange, symbol, timeframe, limit=None, since=current_since)
-
-            if new_count > 0:
-                msg = f"[bold cyan][{i+1}/{len(symbols)}] Downloading {new_count} new candles for {symbol} (Total: {len(full_history)})"
-                if status: status.update(msg)
-                else: console.print(msg)
-
-            if full_history:
-                df = pd.DataFrame(full_history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                symbol_data_map[symbol] = df
-                incremental_info[symbol] = (new_count, len(full_history))
-        except Exception as e:
-            if not status: console.print(f"[red]Failed to fetch {symbol}: {e}")
-
-    # Step 2: Decide whether to reuse cached benchmarks or re-bench
-    symbols_to_bench = []
-    now_ts = time.time()
-
-    for symbol in symbols:
-        if symbol not in symbol_data_map: continue
-
-        # Load full cache entry to get timestamp
-        cache_entry = cache_mgr.get(symbol, term_to_test)
-
-        should_rebench = True
-        if cache_entry:
-            cached_patterns = cache_entry['data']
-            benchmark_ts = cache_entry['timestamp']
-            new_count, total_count = incremental_info.get(symbol, (0, 0))
-
-            df = symbol_data_map[symbol]
-
-            # Instruction: consider it valid even if old, EXCEPT if:
-            # 1. Number of newly fetched candles > number of candles previously stored
-            # 2. Benchmark age > 2 * (Duration of stored history)
-
-            prev_stored_count = total_count - new_count
-            invalidation_1 = new_count > prev_stored_count
-
-            total_history_duration = df['timestamp'].iloc[-1].timestamp() - df['timestamp'].iloc[0].timestamp()
-            invalidation_2 = (now_ts - benchmark_ts) > (2 * total_history_duration)
-
-            if not invalidation_1 and not invalidation_2:
-                should_rebench = False
-                best = cached_patterns[0]
-                best['is_cached'] = True
-                best_per_symbol[symbol] = best.copy()
-                optimization_map[symbol] = best
-
+            if best:
+                best_per_symbol[sym] = best.copy()
+                optimization_map[sym] = best
                 period_str = f" [dim](From {best.get('start_time')} to {best.get('end_time')})[/]"
-                console.print(f"[bold green][{symbol}][/] Reusing cached benchmark: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Bench: {format_price(best.get('avg_bench_profit', best['profit']))} {base_bet_curr}{period_str}")
-
+                console.print(f"[bold green][{sym}][/] Reusing cached benchmark: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Bench: {format_price(best.get('avg_bench_profit', best['profit']))} {base_bet_curr}{period_str}")
                 if data_manager:
-                    pattern_manager.set_patterns(symbol, cached_patterns)
+                    pattern_manager.set_patterns(sym, cached_patterns)
+            else:
+                symbols_to_bench.append(sym)
+                symbol_data_map[sym] = df
 
-        if should_rebench:
-            symbols_to_bench.append(symbol)
+            if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Processed history for {sym}...")
 
     if symbols_to_bench:
         msg = f"Benchmarking all strategies for {len(symbols_to_bench)} symbol(s) using multi-processing..."
@@ -2312,10 +2305,14 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         # Instruction 1d & 2: populate global pool for cross-pair matching
         with bot_lock:
             global_pattern_pool.clear()
-            for sym in optimization_map:
+            # Iterate over ALL configured pairs to populate the global pool
+            all_pairs = list(config.get('pairs', {}).keys())
+            for sym in all_pairs:
                 patterns = pattern_manager.get_patterns(sym)
                 global_pattern_pool.extend(patterns)
-        with bot_lock: benchmarking_pairs.clear()
+
+            # Only clear the symbols that were processed in this call
+            benchmarking_pairs.difference_update(set(symbols))
         return optimization_map
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
