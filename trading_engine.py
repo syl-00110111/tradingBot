@@ -157,8 +157,15 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
             return False
         free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
 
-        if is_simulation or free_balance >= position['amount']:
-            order = exchange.create_order(symbol, 'sell', position['amount'])
+        # Tolerance for small balance discrepancies (e.g., due to fees or rounding)
+        sell_amount = position['amount']
+        if not is_simulation and free_balance < sell_amount:
+            if free_balance >= sell_amount * 0.98:
+                sell_amount = free_balance
+                logging.info(f"[{symbol}] Adjusting sell amount from {position['amount']} to {sell_amount} due to balance discrepancy.")
+
+        if is_simulation or free_balance >= sell_amount:
+            order = exchange.create_order(symbol, 'sell', sell_amount)
             if isinstance(order, dict) and order.get('error') == 'dust_limit':
                 logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
                 data_manager.flag_ignore_sell(symbol)
@@ -166,7 +173,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
             if order:
                 # Use executed values if available
                 exec_price = order.get('average', order.get('price', guaranteed_price))
-                exec_amount = order.get('filled', order.get('amount', position['amount']))
+                exec_amount = order.get('filled', order.get('amount', sell_amount))
                 fee = order.get('calculated_fee', 0)
 
                 total_received = (exec_amount * exec_price) - fee
@@ -175,10 +182,10 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
                 data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, position_idx=position_idx)
                 return True
             else:
-                logging.error(f"[{symbol}] Sell failed: Exchange rejected order for amount {format_amount(position['amount'])}")
+                logging.error(f"[{symbol}] Sell failed: Exchange rejected order for amount {format_amount(sell_amount)}")
                 return False
         else:
-            logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} < {format_amount(position['amount'])})")
+            logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} < {format_amount(sell_amount)})")
             return False
     return False
 

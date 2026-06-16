@@ -74,7 +74,7 @@ class DashboardUI:
             uptime = timedelta(seconds=int(now_ts - self.bot_start_time))
 
             header_left = Text()
-            header_left.append(" Cryptocurrencies multiplatform trading bot", style="bold bright_white")
+            header_left.append("Cryptocurrencies multiplatform trading bot", style="bold bright_white")
             header_left.append(f" | {global_mode.upper()} MODE", style="bold green" if global_mode == "live" else "bold yellow")
 
             header_right = Text()
@@ -83,23 +83,28 @@ class DashboardUI:
             header_right.append(" | ")
             header_right.append("[H] Hide Help" if self.show_help else "[H] Help", style="bold yellow" if self.show_help else "dim")
 
-            layout["header"].update(Panel(Columns([header_left, header_right], expand=True, align="center"), border_style="bright_blue"))
+            header_table = Table.grid(expand=True, padding=0)
+            header_table.add_column(justify="left")
+            header_table.add_column(justify="right")
+            header_table.add_row(header_left, header_right)
+            layout["header"].update(Panel(header_table, border_style="bright_blue", padding=(0, 1)))
 
             # Footer: Quick actions and Status Bar
-            footer_cols = []
-            footer_cols.append("[B] Buy  [S] Sell  [X] Expert  [TAB] Switch Panel  [M] Marquee  [Q] Quit")
+            footer_left = Text("[B] Buy  [S] Sell  [X] Expert  [TAB] Switch Panel  [M] Marquee  [Q] Quit")
 
             status_items = [
                  f"Accel: {config.get('gpu_accel', 'CPU')}",
                  f"Risk: {config.get('global_risk_multiplier', 1.2)}x",
                  f"Hurdle: {config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)}"
             ]
+            footer_right = Text(" | ".join(status_items))
 
-            visible_status = status_items
+            footer_table = Table.grid(expand=True, padding=0)
+            footer_table.add_column(justify="left")
+            footer_table.add_column(justify="right")
+            footer_table.add_row(footer_left, footer_right)
 
-            footer_cols.append(" | ".join(visible_status))
-
-            layout["footer"].update(Panel(Columns(footer_cols, expand=True), border_style="bright_blue"))
+            layout["footer"].update(Panel(footer_table, border_style="bright_blue", padding=(0, 1)))
 
             # Pairs Panel
             table = Table(expand=True, box=None, padding=(0, 1))

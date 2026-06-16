@@ -381,6 +381,7 @@ def main():
             logging.error(err_msg)
 
     with console.status("[bold green]Initializing Cryptocurrencies multiplatform bot...", spinner="dots") as status:
+        # Pre-load patterns or other metadata if needed before dashboard
         try:
             import cpuinfo
             info = cpuinfo.get_cpu_info()
@@ -426,23 +427,6 @@ def main():
             import optimization
             optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager); return
 
-        if args.mode in ['live', 'simulation']:
-            config['_active_term'] = args.term
-            import optimization
-            opt_map = optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=args.term, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager)
-            pair_priorities = []
-            for sym, best in opt_map.items():
-                if sym in config['pairs']:
-                    config['pairs'][sym].update({'aggr': best['aggr'], 'strategy': best['strategy'], 'expected_profit': best.get('avg_bench_profit', best['profit'])})
-                    pair_priorities.append((sym, best['profit']))
-            config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
-
-        if args.mode == 'simulation':
-             trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
-
-        for symbol in config['pairs']:
-            pos_list = data_manager.get_positions(symbol)
-            bot_state[symbol] = {'aggr': config['pairs'][symbol].get('aggr', 'normal'), 'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'), 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': config['pairs'][symbol].get('expected_profit', 0)}
 
         # Initial synchronous asset update to ensure immediate availability
         try:
@@ -456,6 +440,37 @@ def main():
         # Silence console output once dashboard is live
         for h in all_other_handlers:
             logging.root.removeHandler(h)
+
+        if args.mode in ['live', 'simulation']:
+            # Re-initialize bot_state to ensure keys exist before benchmarking
+            for symbol in config['pairs']:
+                pos_list = data_manager.get_positions(symbol) if data_manager else []
+                bot_state[symbol] = {'aggr': 'N/A', 'strategy': 'Benchmarking...', 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': 0}
+            live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
+
+            config['_active_term'] = args.term
+            import optimization
+            sellable = []
+            try:
+                sellable = trading_engine.get_sellable_assets(exchange, config)
+                with bot_lock: available_assets[:] = sellable
+            except: pass
+
+            # Initial re-benchmarking for live/simulation inside the dashboard context
+            opt_map = optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=args.term, status=None, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager, priority_symbols=sellable)
+            pair_priorities = []
+            for sym, best in opt_map.items():
+                if sym in config['pairs']:
+                    config['pairs'][sym].update({'aggr': best['aggr'], 'strategy': best['strategy'], 'expected_profit': best.get('avg_bench_profit', best['profit'])})
+                    pair_priorities.append((sym, best['profit']))
+            config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
+
+            if args.mode == 'simulation':
+                trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
+
+            for symbol in config['pairs']:
+                pos_list = data_manager.get_positions(symbol)
+                bot_state[symbol] = {'aggr': config['pairs'][symbol].get('aggr', 'normal'), 'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'), 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': config['pairs'][symbol].get('expected_profit', 0)}
 
         try:
             threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()

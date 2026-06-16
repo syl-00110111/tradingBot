@@ -242,7 +242,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     patterns.sort(key=lambda x: x['profit'], reverse=True)
     return symbol, patterns[:5]
 
-def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None, ohlcv_cache_manager=None):
+def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None, ohlcv_cache_manager=None, priority_symbols=None):
     term_to_test = term_override if term_override else (args.term if args else 'short')
     terms_cfg = config.get('expected_profit_terms', {})
     term_cfg = terms_cfg.get(term_to_test, {})
@@ -251,7 +251,15 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
     strategies = STRATEGIES
     aggrs = ['balanced']
 
-    symbols = symbols_to_process if symbols_to_process else list(config.get('pairs', {}).keys())
+    all_pairs = list(config.get('pairs', {}).keys())
+    if symbols_to_process:
+        symbols = symbols_to_process
+    else:
+        symbols = all_pairs
+        if priority_symbols:
+            # Move priority symbols to the front
+            priority_set = set(priority_symbols)
+            symbols = [s for s in symbols if s.split('/')[0] in priority_set] + [s for s in symbols if s.split('/')[0] not in priority_set]
     base_bet_curr = get_base_currency(None, config)
 
     cache_mgr = CacheManager()
@@ -357,9 +365,6 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
 
                         if term_override:
                             optimization_map[sym] = best_for_symbol
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} {base_bet_curr}{period_str}")
-                        else:
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Bench: {format_price(best_for_symbol['avg_bench_profit'])} {base_bet_curr}{period_str}")
 
                         if best_overall.get(term_to_test) and best_for_symbol['profit'] > best_overall[term_to_test]['profit']:
                             best_overall[term_to_test] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
