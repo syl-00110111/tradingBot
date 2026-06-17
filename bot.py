@@ -106,6 +106,159 @@ def update_available_assets_live(exchange, config):
         logging.error(f"Failed to update assets from API: {e}")
         with bot_lock: pending_asset_update = False
 
+def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info):
+    """
+    CPU-intensive analysis task designed to run in a subprocess.
+    """
+    try:
+        device = global_config_lite.get('device', torch.device('cpu'))
+        # 1. Indicators
+        df = get_common_indicators(df, device)
+
+        current_pattern_id = pattern_info.get('active_pattern_id')
+        pattern_match_ts = pattern_info.get('pattern_match_ts', 0)
+        last_mc_ts = pattern_info.get('last_mc_ts', 0)
+        last_mc_score = pattern_info.get('mc_score', 1.1)
+        candle_ts = df.iloc[-1]['timestamp']
+
+        # 2. Similarity Matching
+        active_patterns = []
+        if search_pool:
+            for p in search_pool:
+                p_len = len(p['prices'])
+                if len(df) < p_len: continue
+                buffer_window = df.iloc[-p_len:]
+                sim = calculate_similarity(buffer_window, p, device=device)
+                if sim > 0.70:
+                    active_patterns.append({'sim': sim, 'pattern': p.copy()})
+
+        candidates = []
+        for item in active_patterns:
+            p = item['pattern']
+            p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
+            p_match_ts = pattern_match_ts if p_id == current_pattern_id else candle_ts
+            p_len = len(p['prices'])
+            p_expired = (abs(candle_ts - p_match_ts) // tf_secs) >= p_len
+
+            p_tech = p.get('tech_state', {})
+            latest_row = df.iloc[-1]
+            curr_adx = latest_row.get('adx', 0)
+            curr_vol = latest_row.get('volatility', 0)
+            p_adx = p_tech.get('adx', curr_adx)
+            p_vol = p_tech.get('volatility', curr_vol)
+
+            p_regime_shift = False
+            if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: p_regime_shift = True
+            if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: p_regime_shift = True
+
+            item['expired'] = p_expired
+            item['regime_shift'] = p_regime_shift
+            item['id'] = p_id
+            candidates.append(item)
+
+        # 3. MC Validation
+        valid_candidates = []
+        if candidates:
+            p_len_max = max([len(c['pattern']['prices']) for c in candidates])
+            p_duration_secs = p_len_max * tf_secs
+            spm_threshold_secs = p_duration_secs * 0.05
+            can_reuse_mc = (current_pattern_id is not None) and (time.time() - last_mc_ts < spm_threshold_secs)
+
+            if can_reuse_mc and last_mc_score > 0:
+                 for c in candidates:
+                     if c['id'] == current_pattern_id:
+                          c['pattern']['mc_score'] = last_mc_score
+                          valid_candidates.append(c)
+
+            if not valid_candidates:
+                mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
+                mc_engine.set_device(device)
+                for c in candidates:
+                    p = c['pattern']
+                    temp_cfg = {'strategy': p['strategy'], 'device': device}
+                    df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
+                    score = mc_engine.validate_strategy(df_mc)
+                    hurdle = global_config_lite.get('mc_hurdle', 0.0015)
+                    p['mc_score'] = score
+                    if score > 1.0 + hurdle:
+                        valid_candidates.append(c)
+                last_mc_ts = time.time()
+
+        active_pattern = None
+        if valid_candidates:
+            valid_candidates.sort(key=lambda x: x['sim'], reverse=True)
+            active_pattern = valid_candidates[0]['pattern']
+            active_pattern_id = valid_candidates[0]['id']
+        elif candidates:
+            candidates.sort(key=lambda x: x['sim'], reverse=True)
+            active_pattern = candidates[0]['pattern']
+            active_pattern_id = candidates[0]['id']
+
+        if active_pattern:
+            if active_pattern_id != current_pattern_id:
+                pattern_match_ts = candle_ts
+                current_pattern_id = active_pattern_id
+
+            latest = df.iloc[-1]
+            curr_adx = latest.get('adx', 0)
+            curr_vol = latest.get('volatility', 0)
+
+            # Replicate get_dynamic_settings logic
+            settings = {
+                "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
+            }
+            if curr_adx > 25:
+                settings.update({"ema_fast": 10, "ema_slow": 30, "rsi_buy": 40, "rsi_sell": 60})
+            elif curr_vol > global_config_lite.get('min_profit', 0.015):
+                settings.update({"ema_fast": 30, "ema_slow": 100, "rsi_buy": 20, "rsi_sell": 80})
+
+            settings.update({'strategy': active_pattern['strategy'], 'device': device})
+            df = get_signals(df, settings, is_backtest=False)
+            latest = df.iloc[-1]
+
+            p_len = len(active_pattern['prices'])
+            expired = (abs(candle_ts - pattern_match_ts) // tf_secs) >= p_len
+            regime_shift = False # Already checked above
+            if curr_adx > 0 and abs(curr_adx - active_pattern.get('tech_state', {}).get('adx', curr_adx)) / curr_adx > 0.50: regime_shift = True
+
+            trigger_rebench = False
+            if expired or regime_shift:
+                p_duration_secs = p_len * tf_secs
+                if (time.time() - pattern_match_ts) > (p_duration_secs * 0.05):
+                    trigger_rebench = True
+
+            res = {
+                'symbol': symbol,
+                'price': latest['close'],
+                'mc_score': active_pattern.get('mc_score', 1.1),
+                'ema_f': latest.get('ema_f', 0),
+                'ema_s': latest.get('ema_s', 0),
+                'macd_hist': latest.get('macd_hist', 0),
+                'rsi': latest.get('rsi', 0),
+                'adx': latest.get('adx', 0),
+                'volatility': latest.get('volatility', 0),
+                'whale_active': latest.get('whale_active', 0),
+                'is_mean_rev': latest.get('is_mean_rev', 0),
+                'tendency': latest.get('tendency', 'Neutral'),
+                'buy_signal': latest['buy_signal'],
+                'sell_signal': latest['sell_signal'],
+                'strategy': active_pattern['strategy'],
+                'aggr': active_pattern['aggr'],
+                'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
+                'active_pattern_id': active_pattern_id,
+                'pattern_match_ts': pattern_match_ts,
+                'last_mc_ts': last_mc_ts,
+                'last_processed_ts': candle_ts,
+                'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()},
+                'trigger_rebenchmark': trigger_rebench
+            }
+            return res
+        else:
+            return {'symbol': symbol, 'trigger_rebenchmark': True, 'no_patterns': True}
+    except Exception as e:
+        return {'symbol': symbol, 'error': str(e)}
+
 def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, global_config, engine=None):
     try:
         patterns = pattern_manager.get_patterns(symbol)
@@ -140,214 +293,74 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
         ohlcv = cached[-500:]
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        if df.empty:
-            return None
-
-        device = global_config.get('device', torch.device('cpu'))
-        df = get_common_indicators(df, device)
+        if df.empty: return None
 
         with bot_lock:
             current_data = bot_state.get(symbol, {})
-            current_pattern_id = current_data.get('active_pattern_id')
-            pattern_match_ts = current_data.get('pattern_match_ts', 0)
-            last_mc_ts = current_data.get('last_mc_ts', 0)
-            last_mc_score = current_data.get('mc_score', 1.1)
-            cached_sim_candidates = current_data.get('cached_sim_candidates', [])
             last_processed_ts = current_data.get('last_processed_ts', 0)
 
-        latest_row_base = df.iloc[-1]
-        candle_ts = latest_row_base['timestamp']
-
+        candle_ts = df.iloc[-1]['timestamp']
         # Efficiency optimization: only re-process if new data or pattern list changed
         if candle_ts == last_processed_ts and not benchmarking_pairs:
              return current_data
+
         with bot_lock:
             current_global_pool = list(global_pattern_pool)
-        search_pool = patterns + current_global_pool; active_patterns = []
-        device = global_config.get('device', torch.device('cpu'))
-        if search_pool:
-            for p in search_pool:
-                p_len = len(p['prices'])
-                if len(df) < p_len: continue
-                buffer_window = df.iloc[-p_len:]; sim = calculate_similarity(buffer_window, p, device=device)
-                if sim > 0.70:
-                    p_copy = p.copy()
-                    active_patterns.append({'sim': sim, 'pattern': p_copy})
 
-        active_pattern = None
+        search_pool = patterns + current_global_pool
         tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
         tf_secs = tf_map.get(timeframe, 300)
 
-        candidates = []
-        for item in active_patterns:
-            p = item['pattern']
-            p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
-            p_match_ts = pattern_match_ts if p_id == current_pattern_id else candle_ts
-            p_len = len(p['prices'])
-            p_expired = (abs(candle_ts - p_match_ts) // tf_secs) >= p_len
+        global_config_lite = {
+            'device': global_config.get('device'),
+            'mc_hurdle': global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015),
+            'min_profit': global_config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015)
+        }
 
-            p_tech = p.get('tech_state', {})
-            curr_adx = latest_row_base.get('adx', 0)
-            curr_vol = latest_row_base.get('volatility', 0)
-            p_adx = p_tech.get('adx', curr_adx)
-            p_vol = p_tech.get('volatility', curr_vol)
+        pattern_info = {
+            'active_pattern_id': current_data.get('active_pattern_id'),
+            'pattern_match_ts': current_data.get('pattern_match_ts', 0),
+            'last_mc_ts': current_data.get('last_mc_ts', 0),
+            'mc_score': current_data.get('mc_score', 1.1)
+        }
 
-            p_regime_shift = False
-            if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: p_regime_shift = True
-            if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: p_regime_shift = True
+        # This call will be parallelized in trading_thread_func
+        res = perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info)
 
-            item['expired'] = p_expired
-            item['regime_shift'] = p_regime_shift
-            item['id'] = p_id
-            candidates.append(item)
+        if res and 'error' not in res:
+            if res.get('trigger_rebenchmark'):
+                with bot_lock: benchmarking_pairs.add(symbol)
 
-        valid_candidates = []
-        if candidates:
-            # Check if we should reuse MC scores based on the 5% threshold
-            # Total real-time duration of pattern: length * timeframe_seconds
-            p_len_max = max([len(c['pattern']['prices']) for c in candidates])
-            p_duration_secs = p_len_max * tf_secs
-            spm_threshold_secs = p_duration_secs * 0.05
+            if res.get('no_patterns'):
+                with bot_lock:
+                    if symbol in bot_state:
+                        bot_state[symbol]['scan_attempts'] = bot_state[symbol].get('scan_attempts', 0) + 1
+                        attempts = bot_state[symbol]['scan_attempts']
+                        bot_state[symbol]['next_scan_allowed'] = time.time() + (attempts * 60)
+                        if attempts >= 5:
+                            current_term = pair_config.get('term_override', global_config.get('_active_term', 'short'))
+                            term_order = ['short', 'medium', 'long']
+                            if current_term in term_order:
+                                idx = term_order.index(current_term)
+                                if idx < len(term_order) - 1:
+                                    pair_config['term_override'] = term_order[idx + 1]
+                                    bot_state[symbol]['scan_attempts'] = 0
+                with bot_lock: benchmarking_pairs.add(symbol)
+                return None
 
-            can_reuse_mc = (current_pattern_id is not None) and (time.time() - last_mc_ts < spm_threshold_secs)
-
-            if can_reuse_mc and last_mc_score > 0:
-                 # Reuse last score for candidates matching current pattern ID
-                 for c in candidates:
-                     p = c['pattern']
-                     p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
-                     if p_id == current_pattern_id:
-                          p['mc_score'] = last_mc_score
-                          valid_candidates.append(c)
-                 if not valid_candidates: can_reuse_mc = False # Force recalculate if current ID not found
-
-            if not can_reuse_mc:
-                def validate_candidate_mc(c):
-                    p = c['pattern']
-                    mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
-                    mc_engine.set_device(device)
-                    temp_cfg = {'strategy': p['strategy'], 'device': device}
-                    df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
-                    score = mc_engine.validate_strategy(df_mc)
-                    hurdle = global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
-                    p['mc_score'] = score
-                    return c, (score > 1.0 + hurdle)
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), 10)) as mc_executor:
-                    mc_futures = [mc_executor.submit(validate_candidate_mc, c) for c in candidates]
-                    for f in concurrent.futures.as_completed(mc_futures):
-                        try:
-                            c_res, is_valid = f.result()
-                            if is_valid:
-                                valid_candidates.append(c_res)
-                        except Exception as e:
-                            logging.error(f"Error in MC validation for {symbol}: {e}")
-                last_mc_ts = time.time()
-
-        active_pattern_id = None
-        if valid_candidates:
-            valid_candidates.sort(key=lambda x: x['sim'], reverse=True)
-            active_pattern = valid_candidates[0]['pattern']
-            active_pattern_id = valid_candidates[0]['id']
-        elif candidates:
-            candidates.sort(key=lambda x: x['sim'], reverse=True)
-            active_pattern = candidates[0]['pattern']
-            active_pattern_id = candidates[0]['id']
-
-        if active_pattern:
             with bot_lock:
                 if symbol in bot_state:
                     bot_state[symbol]['scan_attempts'] = 0
                     bot_state[symbol]['next_scan_allowed'] = 0
-
-            if active_pattern_id != current_pattern_id:
-                pattern_match_ts = candle_ts
-                current_pattern_id = active_pattern_id
-
-            p_len = len(active_pattern['prices'])
-            expired = (abs(candle_ts - pattern_match_ts) // tf_secs) >= p_len
-            p_tech = active_pattern.get('tech_state', {})
-            curr_adx = latest_row_base.get('adx', 0)
-            curr_vol = latest_row_base.get('volatility', 0)
-            p_adx = p_tech.get('adx', curr_adx)
-            p_vol = p_tech.get('volatility', curr_vol)
-            regime_shift = False
-            if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: regime_shift = True
-            if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: regime_shift = True
-
-            if expired or regime_shift:
-                p_len = len(active_pattern['prices'])
-                p_duration_secs = p_len * tf_secs
-                spm_threshold_secs = p_duration_secs * 0.05
-
-                # Instruction: only re-benchmark if at least 5% of pattern duration has elapsed
-                if (time.time() - pattern_match_ts) > spm_threshold_secs:
-                    with bot_lock: benchmarking_pairs.add(symbol)
-
-            strategy = active_pattern['strategy']
-            aggr = active_pattern['aggr']
-
-            settings = engine.get_dynamic_settings(curr_adx, curr_vol)
-            settings.update({'strategy': strategy, 'device': device})
-            df = get_signals(df, settings, is_backtest=False)
-            latest = df.iloc[-1]
-
-            new_data = {
-                'price': latest['close'],
-                'mc_score': active_pattern.get('mc_score', 1.1),
-                'ema_f': latest.get('ema_f', 0),
-                'ema_s': latest.get('ema_s', 0),
-                'macd_hist': latest.get('macd_hist', 0),
-                'rsi': latest.get('rsi', 0),
-                'adx': latest.get('adx', 0),
-                'volatility': latest.get('volatility', 0),
-                'whale_active': latest.get('whale_active', 0),
-                'is_mean_rev': latest.get('is_mean_rev', 0),
-                'tendency': latest.get('tendency', 'Neutral'),
-                'buy_signal': latest['buy_signal'],
-                'sell_signal': latest['sell_signal'],
-                'strategy': strategy,
-                'aggr': aggr,
-                'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
-                'active_pattern_id': active_pattern_id,
-                'pattern_match_ts': pattern_match_ts,
-                'last_mc_ts': last_mc_ts,
-                'mc_score': active_pattern.get('mc_score', 1.1),
-                'last_processed_ts': candle_ts,
-                'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()}
-            }
-            return new_data
-        else:
-            with bot_lock:
-                if symbol in bot_state:
-                    bot_state[symbol]['scan_attempts'] = bot_state[symbol].get('scan_attempts', 0) + 1
-                    attempts = bot_state[symbol]['scan_attempts']
-                    # Linear backoff: 1 min, 2 min, 3 min...
-                    bot_state[symbol]['next_scan_allowed'] = time.time() + (attempts * 60)
-                    logging.info(f"[{symbol}] No profitable patterns found (Attempt {attempts}). Next scan allowed in {attempts} minutes.")
-
-                    if attempts >= 5:
-                        # Switch timeframe
-                        current_term = pair_config.get('term_override', global_config.get('_active_term', 'short'))
-                        term_order = ['short', 'medium', 'long']
-                        if current_term in term_order:
-                            idx = term_order.index(current_term)
-                            if idx < len(term_order) - 1:
-                                new_term = term_order[idx + 1]
-                                # Note: This affects global term for this pair if we can isolate it,
-                                # but currently _active_term is global.
-                                # Let's see if we can override it in pair_config.
-                                pair_config['term_override'] = new_term
-                                bot_state[symbol]['scan_attempts'] = 0
-                                logging.info(f"[{symbol}] Max scan attempts reached. Switching to {new_term} term.")
-                            else:
-                                logging.info(f"[{symbol}] Max scan attempts reached on longest term (long).")
-
-                benchmarking_pairs.add(symbol)
-            return None
+            return res
+        return None
     except Exception as e:
         logging.error(f"Error in analyze_pair for {symbol}: {e}")
         return None
+
+def wrapped_analysis_task(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info):
+    """Picklable wrapper for the multiprocess analysis task."""
+    return perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info)
 
 class AnalysisWorker(threading.Thread):
     def __init__(self, exchange, data_manager, pattern_manager, engine, config):
@@ -360,25 +373,126 @@ class AnalysisWorker(threading.Thread):
 
     def run(self):
         while not shutdown_event.is_set():
+            cpu_count = os.cpu_count() or 1
+            max_workers = cpu_count
             try:
-                priority, group_id, symbol = analysis_queue.get(timeout=1)
+                cpu_usage = psutil.cpu_percent(interval=0.1)
+                mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+                if cpu_usage < 40 and mem_available > 1.0:
+                    max_workers += 1
+            except: pass
+
+            batch = []
+            while len(batch) < max_workers:
                 try:
-                    pairs_dict = self.config.get('pairs', {})
-                    res = analyze_pair(self.exchange, self.data_manager, self.pattern_manager, symbol, pairs_dict.get(symbol, {}), self.config, self.engine)
-                    if res:
-                        execution_queue.put((symbol, res))
-                except Exception as e:
-                    logging.error(f"AnalysisWorker error for {symbol}: {e}")
-                    # Recoup: Put back in queue with lower priority if it wasn't a major failure
-                    if not shutdown_event.is_set():
-                         analysis_queue.put((priority + 5, group_id, symbol))
-                         continue # Skip discard to keep it "pending"
-                finally:
-                    with bot_lock:
-                        pending_analysis.discard(symbol)
-                    analysis_queue.task_done()
-            except queue.Empty:
-                continue
+                    batch.append(analysis_queue.get(timeout=0.5))
+                except queue.Empty:
+                    break
+
+            if not batch: continue
+
+            try:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=silent_worker_init) as process_executor:
+                    futures = {}
+                    for item in batch:
+                        priority, group_id, symbol = item
+                        pairs_dict = self.config.get('pairs', {})
+                        pair_cfg = pairs_dict.get(symbol, {})
+
+                        # Data Prep (Thread-side)
+                        patterns = self.pattern_manager.get_patterns(symbol)
+                        open_positions = self.data_manager.get_positions(symbol)
+                        term_order = ['short', 'medium', 'long']
+                        active_term = self.config.get('_active_term', 'short')
+                        term = pair_cfg.get('term_override', active_term)
+                        if open_positions:
+                            max_term_idx = max([term_order.index(p.get('term', 'short')) for p in open_positions])
+                            term = term_order[max_term_idx]
+
+                        term_cfg = self.config.get('expected_profit_terms', {}).get(term, {})
+                        timeframe = term_cfg.get('timeframe', '5m')
+
+                        with bot_lock:
+                            download_key = (symbol, timeframe)
+                            now_ts = time.time()
+                            if download_key not in pending_downloads and (now_ts - last_download_time.get(download_key, 0) > 30):
+                                candle_queue.put((0 if open_positions else 1, symbol, timeframe, 500, None))
+                                pending_downloads.add(download_key)
+
+                        cached = ohlcv_cache_manager.get(symbol, timeframe)
+                        if not cached:
+                            with bot_lock: pending_analysis.discard(symbol)
+                            analysis_queue.task_done()
+                            continue
+
+                        ohlcv = cached[-500:]
+                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+                        with bot_lock:
+                            current_data = bot_state.get(symbol, {})
+                            last_processed_ts = current_data.get('last_processed_ts', 0)
+                            current_global_pool = list(global_pattern_pool)
+
+                        if df.iloc[-1]['timestamp'] == last_processed_ts and not benchmarking_pairs:
+                             execution_queue.put((symbol, current_data))
+                             with bot_lock: pending_analysis.discard(symbol)
+                             analysis_queue.task_done()
+                             continue
+
+                        search_pool = patterns + current_global_pool
+                        tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+                        tf_secs = tf_map.get(timeframe, 300)
+
+                        glite = {
+                            'device': self.config.get('device'),
+                            'mc_hurdle': self.config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015),
+                            'min_profit': self.config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
+                        }
+                        pinfo = {
+                            'active_pattern_id': current_data.get('active_pattern_id'),
+                            'pattern_match_ts': current_data.get('pattern_match_ts', 0),
+                            'last_mc_ts': current_data.get('last_mc_ts', 0),
+                            'mc_score': current_data.get('mc_score', 1.1)
+                        }
+
+                        f = process_executor.submit(wrapped_analysis_task, symbol, timeframe, tf_secs, df, search_pool, glite, pinfo)
+                        futures[f] = item
+
+                    for f in concurrent.futures.as_completed(futures):
+                        p, gid, sym = futures[f]
+                        try:
+                            res = f.result()
+                            if res and 'error' not in res:
+                                # Post-process results back in bot_lock context
+                                if res.get('trigger_rebenchmark'):
+                                     with bot_lock: benchmarking_pairs.add(sym)
+                                if res.get('no_patterns'):
+                                     with bot_lock:
+                                         if sym in bot_state:
+                                             bot_state[sym]['scan_attempts'] = bot_state[sym].get('scan_attempts', 0) + 1
+                                             bot_state[sym]['next_scan_allowed'] = time.time() + (bot_state[sym]['scan_attempts'] * 60)
+                                             if bot_state[sym]['scan_attempts'] >= 5:
+                                                 pair_cfg = self.config.get('pairs', {}).get(sym, {})
+                                                 # Escalation logic here...
+                                                 bot_state[sym]['scan_attempts'] = 0
+                                     with bot_lock: benchmarking_pairs.add(sym)
+                                else:
+                                     execution_queue.put((sym, res))
+                                     with bot_lock:
+                                         if sym in bot_state:
+                                             bot_state[sym]['scan_attempts'] = 0
+                                             bot_state[sym]['next_scan_allowed'] = 0
+                            elif res and 'error' in res:
+                                 logging.error(f"Task error for {sym}: {res['error']}")
+                                 analysis_queue.put((p + 5, gid, sym))
+                        except Exception as e:
+                            logging.error(f"Process future failed for {sym}: {e}")
+                            analysis_queue.put((p + 5, gid, sym))
+                        finally:
+                            with bot_lock: pending_analysis.discard(sym)
+                            analysis_queue.task_done()
+            except Exception as e:
+                logging.error(f"AnalysisWorker batch error: {e}")
 
 class ExecutionWorker(threading.Thread):
     def __init__(self, exchange, data_manager, engine, config):
