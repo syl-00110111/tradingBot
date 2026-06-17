@@ -29,6 +29,7 @@ import concurrent.futures
 import queue
 import torch
 import gc
+import psutil
 import importlib.util
 from datetime import datetime
 
@@ -375,70 +376,87 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
         if rebench_syms:
             optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=config.get('_active_term', 'short'), data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=config.get('device'), symbols_to_process=rebench_syms, ohlcv_cache_manager=ohlcv_cache_manager)
 
+        cpu_count = os.cpu_count() or 1
+        max_workers = cpu_count
+        try:
+            cpu_usage = psutil.cpu_percent(interval=0.1)
+            mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+            if cpu_usage < 40 and mem_available > 1.0:
+                max_workers += 1
+        except: pass
+
+        eligible_symbols = []
         for symbol in all_symbols:
-            if shutdown_event.is_set(): break
             if symbol in suspended_pairs: continue
-
             with bot_lock:
-                if time.time() < bot_state[symbol].get('next_scan_allowed', 0):
-                    continue
+                if time.time() >= bot_state[symbol].get('next_scan_allowed', 0):
+                    eligible_symbols.append(symbol)
 
-            res = analyze_pair(exchange, data_manager, pattern_manager, symbol, pairs_dict[symbol], config, engine)
-            if res:
-                with bot_lock:
-                    bot_state[symbol].update(res)
-                    data = bot_state[symbol]
+        if eligible_symbols:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, symbol, pairs_dict[symbol], config, engine): symbol for symbol in eligible_symbols}
+                for future in concurrent.futures.as_completed(futures):
+                    if shutdown_event.is_set(): break
+                    symbol = futures[future]
+                    try:
+                        res = future.result()
+                        if res:
+                            with bot_lock:
+                                bot_state[symbol].update(res)
+                                data = bot_state[symbol]
 
-                    if res['buy_signal']:
-                        data['consecutive_buys'] += 1
-                        data['consecutive_sells'] = 0
-                        if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
-                    elif res['sell_signal']:
-                        data['consecutive_sells'] += 1
-                        data['consecutive_buys'] = 0
-                        if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
-                    else:
-                        data['consecutive_buys'] = 0
-                        data['consecutive_sells'] = 0
-                        signal_arrival_times.pop(symbol, None)
+                                if res['buy_signal']:
+                                    data['consecutive_buys'] += 1
+                                    data['consecutive_sells'] = 0
+                                    if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
+                                elif res['sell_signal']:
+                                    data['consecutive_sells'] += 1
+                                    data['consecutive_buys'] = 0
+                                    if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
+                                else:
+                                    data['consecutive_buys'] = 0
+                                    data['consecutive_sells'] = 0
+                                    signal_arrival_times.pop(symbol, None)
 
-                    if data['consecutive_buys'] >= 1 and not data['position']:
-                        active_term = config.get('_active_term', 'short')
-                        if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs, term=active_term):
-                            data['last_action'] = 'BUY'
-                            data['position'] = data_manager.get_position(symbol)
-                            data['positions'] = data_manager.get_positions(symbol)
-                            play_sound("buy", config)
+                                if data['consecutive_buys'] >= 1 and not data['position']:
+                                    active_term = config.get('_active_term', 'short')
+                                    if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs, term=active_term):
+                                        data['last_action'] = 'BUY'
+                                        data['position'] = data_manager.get_position(symbol)
+                                        data['positions'] = data_manager.get_positions(symbol)
+                                        play_sound("buy", config)
 
-                    if data['consecutive_sells'] >= 1 and data['positions']:
-                         for idx, pos in enumerate(data['positions']):
-                             if engine.is_profitable(data['price'], pos['entry_price']):
-                                 # Profitable: sell immediately on 1st signal
-                                 if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=idx):
-                                     data['last_action'] = 'SELL'
-                                     data['positions'] = data_manager.get_positions(symbol)
-                                     data['position'] = data_manager.get_position(symbol)
-                                     play_sound("sell", config)
-                                     break
-                             elif data['consecutive_sells'] >= 3:
-                                 # Non-profitable: shift to longer term if possible, otherwise trigger proposal
-                                 current_term = pos.get('term', 'short')
-                                 term_order = ['short', 'medium', 'long']
-                                 if current_term in term_order and term_order.index(current_term) < len(term_order) - 1:
-                                     new_term = term_order[term_order.index(current_term) + 1]
-                                     if data_manager.update_position_term(symbol, idx, new_term):
-                                         logging.info(f"[{symbol}] Position not profitable in {current_term} term. Shifting to {new_term} term to regain profitability.")
-                                         # Reset signals to avoid immediate trigger in new term
-                                         data['consecutive_sells'] = 0
-                                 else:
-                                     # Non-profitable and already on longest term: auto-sell
-                                     if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=idx):
-                                         data['last_action'] = 'SELL'
-                                         data['positions'] = data_manager.get_positions(symbol)
-                                         data['position'] = data_manager.get_position(symbol)
-                                         play_sound("sell", config)
-                                         logging.warning(f"[{symbol}] 3rd consecutive SELL signal received at non-profitable price on longest term. Auto-executing sell.")
-                                         break
+                                if data['consecutive_sells'] >= 1 and data['positions']:
+                                     for idx, pos in enumerate(data['positions']):
+                                         if engine.is_profitable(data['price'], pos['entry_price']):
+                                             # Profitable: sell immediately on 1st signal
+                                             if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=idx):
+                                                 data['last_action'] = 'SELL'
+                                                 data['positions'] = data_manager.get_positions(symbol)
+                                                 data['position'] = data_manager.get_position(symbol)
+                                                 play_sound("sell", config)
+                                                 break
+                                         elif data['consecutive_sells'] >= 3:
+                                             # Non-profitable: shift to longer term if possible, otherwise trigger proposal
+                                             current_term = pos.get('term', 'short')
+                                             term_order = ['short', 'medium', 'long']
+                                             if current_term in term_order and term_order.index(current_term) < len(term_order) - 1:
+                                                 new_term = term_order[term_order.index(current_term) + 1]
+                                                 if data_manager.update_position_term(symbol, idx, new_term):
+                                                     logging.info(f"[{symbol}] Position not profitable in {current_term} term. Shifting to {new_term} term to regain profitability.")
+                                                     # Reset signals to avoid immediate trigger in new term
+                                                     data['consecutive_sells'] = 0
+                                             else:
+                                                 # Non-profitable and already on longest term: auto-sell
+                                                 if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=idx):
+                                                     data['last_action'] = 'SELL'
+                                                     data['positions'] = data_manager.get_positions(symbol)
+                                                     data['position'] = data_manager.get_position(symbol)
+                                                     play_sound("sell", config)
+                                                     logging.warning(f"[{symbol}] 3rd consecutive SELL signal received at non-profitable price on longest term. Auto-executing sell.")
+                                                     break
+                    except Exception as e:
+                        logging.error(f"Error processing result for {symbol}: {e}")
 
             if not pending_asset_update and time.time() % 30 < 1:
                 pending_asset_update = True
