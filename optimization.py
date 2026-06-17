@@ -93,7 +93,6 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
             console.print(f"[red]No OHLCV returned for {symbol} ({timeframe}).[/]")
             return None
 
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     else:
         df = df_in.copy() if copy_df else df_in
@@ -186,7 +185,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         'start_time': start_time_dt.strftime("%Y-%m-%d %H:%M"),
         'end_time': end_time_dt.strftime("%Y-%m-%d %H:%M"),
         'start_ts': start_time_dt.timestamp(),
-        'prices': eval_df['average'].tolist(), 'volumes': eval_df['volume'].tolist(),
+        'prices': eval_df['close'].tolist(), 'volumes': eval_df['volume'].tolist(),
         'tech_state': tech_state,
         'equity_curve': equity_curve if return_full_df else []
     }
@@ -285,7 +284,6 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             ohlcv, _ = fetch_ohlcv_incremental(exchange, sym, timeframe, ohlcv_cache_manager, limit=limit)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return sym, df, None, None
         except Exception as e:

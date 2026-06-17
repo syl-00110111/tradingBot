@@ -183,7 +183,7 @@ class DataManager:
             except Exception as e:
                 logging.error(f"Failed to save history: {e}")
 
-    def add_position(self, symbol, entry_price, amount, entry_fee, trigger_data, timestamp, total_base=0):
+    def add_position(self, symbol, entry_price, amount, entry_fee, trigger_data, timestamp, total_base=0, term="short"):
         if symbol not in self.positions:
             self.positions[symbol] = []
 
@@ -194,10 +194,18 @@ class DataManager:
             'entry_total_base': total_base if total_base > 0 else (entry_price * amount),
             'trigger_data': trigger_data,
             'timestamp': timestamp,
-            'ignore_sell': False
+            'ignore_sell': False,
+            'term': term
         }
         self.positions[symbol].append(pos)
         self._save()
+
+    def update_position_term(self, symbol, position_idx, new_term):
+        if symbol in self.positions and position_idx < len(self.positions[symbol]):
+            self.positions[symbol][position_idx]['term'] = new_term
+            self._save()
+            return True
+        return False
 
     def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, position_idx=0):
         if symbol in self.positions and position_idx < len(self.positions[symbol]):

@@ -104,7 +104,7 @@ class TradingEngine:
         if current_price > 0: return trade_amount_base / current_price
         return 0
 
-def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs, balance=None):
+def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs, balance=None, term="short"):
     if balance is None:
         balance = exchange.fetch_balance()
     if not balance:
@@ -157,7 +157,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
 
             total_paid = (exec_amount * exec_price) + fee
             logging.info(f"[{symbol}] Executing buy of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price paid: {format_price(total_paid)} {get_base_currency(symbol, config)}")
-            data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
+            data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid, term=term)
 
             # Immediately update Sellable list
             asset = symbol.split('/')[0]
@@ -292,7 +292,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
             existing = data_manager.get_positions(symbol)
             if not any(p['amount'] == amount and p['entry_price'] == entry_price for p in existing):
                 logging.info(f"[{symbol}] Found purchase price: {entry_price}. Adding to tracking.")
-                data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time())
+                data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time(), term="short")
         else:
             logging.warning(f"[{symbol}] Asset found in wallet but no purchase record found via API. Please connect to exchange and sell manually or manage this asset.")
 

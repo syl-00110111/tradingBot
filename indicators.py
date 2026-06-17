@@ -83,7 +83,7 @@ def torch_adx(high, low, close, length=14):
     return adx
 STRATEGIES = [
     'simple_ema', 'simple_sma',
-    'moving_averages', 'ichimoku_cloud', 'parabolic_sar', 'rsi_support_resistance',
+    'moving_closes', 'ichimoku_cloud', 'parabolic_sar', 'rsi_support_resistance',
     'bollinger_bands', 'macd_range', 'breakout_volume', 'donchian_channels',
     'atr_breakout', 'stochastic_rsi', 'williams_r', 'vwap_momentum',
     'order_flow_proxy', 'renko_proxy', 'tick_proxy', 'ema_rsi_volume',
@@ -116,7 +116,7 @@ def get_common_indicators(df, device=torch.device('cpu')):
 
     if missing_basics:
         if use_acceleration:
-            price_t = torch.tensor(df['average'].values, device=device, dtype=torch.float64)
+            price_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
             high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
             low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
             df['ema_f'] = torch_ema(price_t, 9).to('cpu').numpy()
@@ -128,22 +128,22 @@ def get_common_indicators(df, device=torch.device('cpu')):
             df['rsi'] = torch_rsi(price_t, 14).to('cpu').numpy()
             df['adx'] = torch_adx(high_t, low_t, price_t, 14).to('cpu').numpy()
         else:
-            ema_f = ta.ema(df['average'], length=9)
-            df['ema_f'] = ema_f.fillna(df['average']) if ema_f is not None else df['average']
-            ema_s = ta.ema(df['average'], length=21)
-            df['ema_s'] = ema_s.fillna(df['average']) if ema_s is not None else df['average']
-            macd = ta.macd(df['average'], fast=12, slow=26, signal=9)
+            ema_f = ta.ema(df['close'], length=9)
+            df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
+            ema_s = ta.ema(df['close'], length=21)
+            df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
+            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
             if macd is not None and not macd.empty:
                 df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
             else:
                 df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
-            rsi = ta.rsi(df['average'], length=14)
+            rsi = ta.rsi(df['close'], length=14)
             df['rsi'] = rsi.fillna(50) if rsi is not None else 50
-            adx_df = ta.adx(df['high'], df['low'], df['average'])
+            adx_df = ta.adx(df['high'], df['low'], df['close'])
             df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
 
     if 'volatility' not in df.columns:
-        df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
         df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
 
     # Whale Detection Proxy (Common)
@@ -175,7 +175,7 @@ def get_signals(df, mode_config, is_backtest=False):
 
     # Calculate tendency (Vectorized for performance)
     ema_diff = df['ema_f'] - df['ema_s']
-    price = df['average']
+    price = df['close']
     macd_hist = df['macd_hist']
 
     conditions = [
@@ -198,8 +198,8 @@ def get_signals(df, mode_config, is_backtest=False):
         df = strategy_double_ema(df, mode_config)
     elif strategy == 'double_ema_macd_rsi':
         df = strategy_double_ema_macd_rsi(df, mode_config)
-    elif strategy == 'moving_averages':
-        df = strategy_moving_averages(df, mode_config)
+    elif strategy == 'moving_closes':
+        df = strategy_moving_closes(df, mode_config)
     elif strategy == 'ichimoku_cloud':
         df = strategy_ichimoku(df, mode_config)
     elif strategy == 'parabolic_sar':
@@ -288,7 +288,7 @@ def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     # GPU-accelerated Similarity
     try:
         # 1. Price Similarity (Shape Correlation with Scaling)
-        c_vals = torch.tensor(buffer_df['average'].values, device=device, dtype=torch.float64)
+        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
         p_vals = torch.tensor(p_prices, device=device, dtype=torch.float64)
 
         # Proportional scaling of price to current levels
@@ -328,7 +328,7 @@ def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
 
     except Exception:
         # Fallback to CPU/Pandas
-        c_p = buffer_df['average']
+        c_p = buffer_df['close']
         p_p = pd.Series(p_prices)
         if p_p.mean() > 0:
             p_p_scaled = p_p * (c_p.mean() / p_p.mean())
@@ -370,15 +370,15 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
     device = config.get('device', torch.device('cpu'))
 
     if strategy == 'mc_mean_reversion':
-        sma20 = ta.sma(df['average'], length=20)
-        df['sma_20'] = sma20.fillna(df['average']) if sma20 is not None else df['average']
-        df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+        sma20 = ta.sma(df['close'], length=20)
+        df['sma_20'] = sma20.fillna(df['close']) if sma20 is not None else df['close']
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
         df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
 
         # Batch MC for mean reversion
         mask = (df['volatility'] > 0)
         if mask.any():
-            prices = torch.tensor(df.loc[mask, 'average'].values, device=device)
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
             targets = torch.tensor(df.loc[mask, 'sma_20'].values, device=device)
             vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
 
@@ -388,19 +388,19 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
             probs = _mc_engine.estimate_hit_probability(prices, targets, vols)
             df.loc[mask, 'mc_prob'] = probs.cpu().numpy()
 
-            df['buy_candidate'] = (df['average'] < df['sma_20']) & (df['mc_prob'] > 0.7)
-            df['sell_candidate'] = (df['average'] > df['sma_20']) & (df['mc_prob'] > 0.7)
+            df['buy_candidate'] = (df['close'] < df['sma_20']) & (df['mc_prob'] > 0.7)
+            df['sell_candidate'] = (df['close'] > df['sma_20']) & (df['mc_prob'] > 0.7)
 
     elif strategy == 'mc_momentum':
-        sma20 = ta.sma(df['average'], length=20)
-        df['sma_20'] = sma20.fillna(df['average']) if sma20 is not None else df['average']
-        df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+        sma20 = ta.sma(df['close'], length=20)
+        df['sma_20'] = sma20.fillna(df['close']) if sma20 is not None else df['close']
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
         df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
         df['drift'] = df['returns'].rolling(window=20).mean().fillna(0)
 
         mask = (df['volatility'] > 0)
         if mask.any():
-            prices = torch.tensor(df.loc[mask, 'average'].values, device=device)
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
             vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
             drifts = torch.tensor(df.loc[mask, 'drift'].values, device=device)
 
@@ -410,22 +410,22 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
             df.loc[mask, 'mc_up'] = probs_up.cpu().numpy()
             df.loc[mask, 'mc_down'] = probs_down.cpu().numpy()
 
-            df['buy_candidate'] = (df['average'] > df['sma_20']) & (df['mc_up'] > 0.6)
-            df['sell_candidate'] = (df['average'] < df['sma_20']) & (df['mc_down'] > 0.6)
+            df['buy_candidate'] = (df['close'] > df['sma_20']) & (df['mc_up'] > 0.6)
+            df['sell_candidate'] = (df['close'] < df['sma_20']) & (df['mc_down'] > 0.6)
 
     elif strategy == 'mc_dynamic_allocation':
-        df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
         df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
         threshold = 0.05 / np.sqrt(365)
         df['buy_candidate'] = (df['volatility'] < threshold) & (df['volatility'].shift(1) >= threshold)
         df['sell_candidate'] = (df['volatility'] > threshold) & (df['volatility'].shift(1) <= threshold)
 
     elif strategy == 'mc_market_making':
-        df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
         df['volatility'] = df['returns'].rolling(window=10).std().fillna(0)
         mask = (df['volatility'] > 0)
         if mask.any():
-            prices = torch.tensor(df.loc[mask, 'average'].values, device=device)
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
             vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
             prob_up = _mc_engine.estimate_hit_probability(prices, prices * 1.001, vols, mode='above')
             prob_down = _mc_engine.estimate_hit_probability(prices, prices * 0.999, vols, mode='below')
@@ -433,21 +433,21 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
             df.loc[mask, 'sell_candidate'] = (prob_down.cpu().numpy() > 0.8)
 
     elif strategy == 'mc_stop_loss_eval':
-        df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
         df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
         mask = (df['volatility'] > 0)
         if mask.any():
-            prices = torch.tensor(df.loc[mask, 'average'].values, device=device)
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
             vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
             prob_sl = _mc_engine.estimate_hit_probability(prices, prices * 0.95, vols, mode='below')
             df.loc[mask, 'sell_candidate'] = (prob_sl.cpu().numpy() > 0.4)
 
     elif strategy == 'mc_options_pricing':
-        df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
         df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
         mask = (df['volatility'] > 0)
         if mask.any():
-            prices = torch.tensor(df.loc[mask, 'average'].values, device=device)
+            prices = torch.tensor(df.loc[mask, 'close'].values, device=device)
             vols = torch.tensor(df.loc[mask, 'volatility'].values, device=device)
             call_p = _mc_engine.price_option(prices, prices * 1.05, vols, option_type='call')
             put_p = _mc_engine.price_option(prices, prices * 0.95, vols, option_type='put')
@@ -458,39 +458,39 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
 
 # --- 1. TREND FOLLOWING ---
 
-def strategy_moving_averages(df, config):
-    ma9 = ta.ema(df['average'], length=9)
+def strategy_moving_closes(df, config):
+    ma9 = ta.ema(df['close'], length=9)
     df['ma_9'] = ma9.fillna(0) if ma9 is not None else 0
-    ma21 = ta.ema(df['average'], length=21)
+    ma21 = ta.ema(df['close'], length=21)
     df['ma_21'] = ma21.fillna(0) if ma21 is not None else 0
-    ma50 = ta.ema(df['average'], length=50)
+    ma50 = ta.ema(df['close'], length=50)
     df['ma_50'] = ma50.fillna(0) if ma50 is not None else 0
-    ma200 = ta.ema(df['average'], length=200)
+    ma200 = ta.ema(df['close'], length=200)
     df['ma_200'] = ma200.fillna(0) if ma200 is not None else 0
 
-    df['buy_candidate'] = (df['ma_9'] > df['ma_21']) & (df['ma_9'].shift(1) <= df['ma_21'].shift(1)) & (df['average'] > df['ma_200'])
-    df['sell_candidate'] = (df['average'] < df['ma_50']) & (df['average'].shift(1) >= df['ma_50'].shift(1))
+    df['buy_candidate'] = (df['ma_9'] > df['ma_21']) & (df['ma_9'].shift(1) <= df['ma_21'].shift(1)) & (df['close'] > df['ma_200'])
+    df['sell_candidate'] = (df['close'] < df['ma_50']) & (df['close'].shift(1) >= df['ma_50'].shift(1))
 
     return finalize_signals(df)
 
 def strategy_ichimoku(df, config):
-    ichi_result = ta.ichimoku(df['high'], df['low'], df['average'])
+    ichi_result = ta.ichimoku(df['high'], df['low'], df['close'])
     if ichi_result is not None and len(ichi_result) > 0:
         ichimoku = ichi_result[0]
-        df['tenkan'] = ichimoku.iloc[:, 0].fillna(df['average']) if ichimoku is not None else df['average']
-        df['kijun'] = ichimoku.iloc[:, 1].fillna(df['average']) if ichimoku is not None else df['average']
-        df['span_a'] = ichimoku.iloc[:, 2].fillna(df['average']) if ichimoku is not None else df['average']
-        df['span_b'] = ichimoku.iloc[:, 3].fillna(df['average']) if ichimoku is not None else df['average']
+        df['tenkan'] = ichimoku.iloc[:, 0].fillna(df['close']) if ichimoku is not None else df['close']
+        df['kijun'] = ichimoku.iloc[:, 1].fillna(df['close']) if ichimoku is not None else df['close']
+        df['span_a'] = ichimoku.iloc[:, 2].fillna(df['close']) if ichimoku is not None else df['close']
+        df['span_b'] = ichimoku.iloc[:, 3].fillna(df['close']) if ichimoku is not None else df['close']
     else:
-        df['tenkan'] = df['kijun'] = df['span_a'] = df['span_b'] = df['average']
+        df['tenkan'] = df['kijun'] = df['span_a'] = df['span_b'] = df['close']
 
-    df['buy_candidate'] = (df['tenkan'] > df['kijun']) & (df['average'] > df['span_a']) & (df['average'] > df['span_b'])
+    df['buy_candidate'] = (df['tenkan'] > df['kijun']) & (df['close'] > df['span_a']) & (df['close'] > df['span_b'])
     df['sell_candidate'] = (df['tenkan'] < df['kijun'])
 
     return finalize_signals(df)
 
 def strategy_psar(df, config):
-    psar = ta.psar(df['high'], df['low'], df['average'])
+    psar = ta.psar(df['high'], df['low'], df['close'])
     if psar is not None and not psar.empty:
         l_col = [c for c in psar.columns if 'PSARl' in c]
         s_col = [c for c in psar.columns if 'PSARs' in c]
@@ -507,7 +507,7 @@ def strategy_psar(df, config):
 # --- 2. RANGE ---
 
 def strategy_rsi_sr(df, config):
-    r14 = ta.rsi(df['average'], length=14)
+    r14 = ta.rsi(df['close'], length=14)
     df['rsi'] = r14.fillna(50) if r14 is not None else 50
     df['support'] = df['low'].rolling(window=50).min()
     df['resistance'] = df['high'].rolling(window=50).max()
@@ -516,30 +516,30 @@ def strategy_rsi_sr(df, config):
     df['support'] = df['support'].fillna(df['low'])
     df['resistance'] = df['resistance'].fillna(df['high'])
 
-    df['buy_candidate'] = (df['rsi'] < 30) & (df['average'] <= df['support'] * 1.01)
-    df['sell_candidate'] = (df['rsi'] > 70) & (df['average'] >= df['resistance'] * 0.99)
+    df['buy_candidate'] = (df['rsi'] < 30) & (df['close'] <= df['support'] * 1.01)
+    df['sell_candidate'] = (df['rsi'] > 70) & (df['close'] >= df['resistance'] * 0.99)
 
     return finalize_signals(df)
 
 def strategy_bollinger(df, config):
-    bb = ta.bbands(df['average'], length=20, std=2)
+    bb = ta.bbands(df['close'], length=20, std=2)
     if bb is not None and not bb.empty:
-        df['bb_low'] = bb.iloc[:, 0].fillna(df['average']) if bb is not None and not bb.empty else df['average']
-        df['bb_mid'] = bb.iloc[:, 1].fillna(df['average']) if bb is not None and not bb.empty else df['average']
-        df['bb_high'] = bb.iloc[:, 2].fillna(df['average']) if bb is not None and not bb.empty else df['average']
+        df['bb_low'] = bb.iloc[:, 0].fillna(df['close']) if bb is not None and not bb.empty else df['close']
+        df['bb_mid'] = bb.iloc[:, 1].fillna(df['close']) if bb is not None and not bb.empty else df['close']
+        df['bb_high'] = bb.iloc[:, 2].fillna(df['close']) if bb is not None and not bb.empty else df['close']
     else:
-        df['bb_low'] = df['bb_mid'] = df['bb_high'] = df['average']
+        df['bb_low'] = df['bb_mid'] = df['bb_high'] = df['close']
 
-    r14 = ta.rsi(df['average'], length=14)
+    r14 = ta.rsi(df['close'], length=14)
     df['rsi'] = r14.fillna(50) if r14 is not None else 50
 
-    df['buy_candidate'] = (df['average'] <= df['bb_low']) & (df['rsi'] < 35)
-    df['sell_candidate'] = (df['average'] >= df['bb_mid'])
+    df['buy_candidate'] = (df['close'] <= df['bb_low']) & (df['rsi'] < 35)
+    df['sell_candidate'] = (df['close'] >= df['bb_mid'])
 
     return finalize_signals(df)
 
 def strategy_macd_range(df, config):
-    macd = ta.macd(df['average'], fast=12, slow=26, signal=9)
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     if macd is not None and not macd.empty:
         df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0)
     else:
@@ -557,10 +557,10 @@ def strategy_breakout_volume(df, config):
     v20 = ta.sma(df['volume'], length=20)
     df['vol_ma'] = v20.fillna(df['volume']) if v20 is not None else df['volume']
 
-    df['buy_candidate'] = (df['average'] > df['resistance']) & (df['volume'] > df['vol_ma'] * 2)
-    ma20 = ta.sma(df['average'], length=20)
-    df['ma_20'] = ma20.fillna(df['average']) if ma20 is not None else df['average']
-    df['sell_candidate'] = (df['average'] < df['ma_20'])
+    df['buy_candidate'] = (df['close'] > df['resistance']) & (df['volume'] > df['vol_ma'] * 2)
+    ma20 = ta.sma(df['close'], length=20)
+    df['ma_20'] = ma20.fillna(df['close']) if ma20 is not None else df['close']
+    df['sell_candidate'] = (df['close'] < df['ma_20'])
 
     return finalize_signals(df)
 
@@ -573,25 +573,25 @@ def strategy_donchian(df, config):
         df['dc_upper'] = df['high']
         df['dc_lower'] = df['low']
 
-    df['buy_candidate'] = (df['average'] >= df['dc_upper'])
-    df['sell_candidate'] = (df['average'] <= df['dc_lower'])
+    df['buy_candidate'] = (df['close'] >= df['dc_upper'])
+    df['sell_candidate'] = (df['close'] <= df['dc_lower'])
 
     return finalize_signals(df)
 
 def strategy_atr_breakout(df, config):
-    a14 = ta.atr(df['high'], df['low'], df['average'], length=14)
+    a14 = ta.atr(df['high'], df['low'], df['close'], length=14)
     df['atr'] = a14.fillna(0) if a14 is not None else 0
     df['resistance'] = df['high'].rolling(window=30).max().shift(1)
 
-    df['buy_candidate'] = (df['average'] > df['resistance']) & (df['atr'] > df['atr'].shift(1))
-    df['sell_candidate'] = (df['average'] < (df['average'].shift(1) - 2 * df['atr']))
+    df['buy_candidate'] = (df['close'] > df['resistance']) & (df['atr'] > df['atr'].shift(1))
+    df['sell_candidate'] = (df['close'] < (df['close'].shift(1) - 2 * df['atr']))
 
     return finalize_signals(df)
 
 # --- 4. MOMENTUM ---
 
 def strategy_stoch_rsi(df, config):
-    stoch = ta.stochrsi(df['average'], length=14, rsi_length=14, k=3, d=3)
+    stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
     if stoch is not None and not stoch.empty:
         df['stoch_k'] = stoch.iloc[:, 0].fillna(50)
     else:
@@ -603,7 +603,7 @@ def strategy_stoch_rsi(df, config):
     return finalize_signals(df)
 
 def strategy_williams_r(df, config):
-    w14 = ta.willr(df['high'], df['low'], df['average'], length=14)
+    w14 = ta.willr(df['high'], df['low'], df['close'], length=14)
     df['willr'] = w14.fillna(-50) if w14 is not None else -50
 
     df['buy_candidate'] = (df['willr'] < -80) & (df['willr'] > df['willr'].shift(1))
@@ -612,50 +612,50 @@ def strategy_williams_r(df, config):
     return finalize_signals(df)
 
 def strategy_vwap_momentum(df, config):
-    df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['average']) / 3).cumsum() / df['volume'].cumsum().replace(0, 1)
+    df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum().replace(0, 1)
 
-    df['buy_candidate'] = (df['average'] > df['vwap']) & (df['volume'] > df['volume'].shift(1))
-    df['sell_candidate'] = (df['average'] < df['vwap'])
+    df['buy_candidate'] = (df['close'] > df['vwap']) & (df['volume'] > df['volume'].shift(1))
+    df['sell_candidate'] = (df['close'] < df['vwap'])
 
     return finalize_signals(df)
 
 # --- 5. SCALPING (Proxies) ---
 
 def strategy_order_flow_proxy(df, config):
-    df['vol_delta'] = df['volume'] * (df['average'] - df['open']) / (df['high'] - df['low'] + 0.000001)
+    df['vol_delta'] = df['volume'] * (df['close'] - df['open']) / (df['high'] - df['low'] + 0.000001)
     df['vol_delta_ma'] = df['vol_delta'].rolling(window=10).mean().fillna(0)
 
-    df['buy_candidate'] = (df['vol_delta'] > df['vol_delta_ma'] * 1.5) & (df['average'] > df['open'])
+    df['buy_candidate'] = (df['vol_delta'] > df['vol_delta_ma'] * 1.5) & (df['close'] > df['open'])
     df['sell_candidate'] = (df['vol_delta'] < 0)
 
     return finalize_signals(df)
 
 def strategy_renko_proxy(df, config):
-    df['body'] = (df['average'] - df['open']).abs()
-    a14 = ta.atr(df['high'], df['low'], df['average'], length=14)
+    df['body'] = (df['close'] - df['open']).abs()
+    a14 = ta.atr(df['high'], df['low'], df['close'], length=14)
     df['atr'] = a14.fillna(0) if a14 is not None else 0
 
-    df['buy_candidate'] = (df['body'] > df['atr']) & (df['average'] > df['open'])
-    df['sell_candidate'] = (df['body'] > df['atr']) & (df['average'] < df['open'])
+    df['buy_candidate'] = (df['body'] > df['atr']) & (df['close'] > df['open'])
+    df['sell_candidate'] = (df['body'] > df['atr']) & (df['close'] < df['open'])
 
     return finalize_signals(df)
 
 def strategy_tick_proxy(df, config):
-    df['velocity'] = (df['average'] - df['average'].shift(5)) / 5
+    df['velocity'] = (df['close'] - df['close'].shift(5)) / 5
 
     df['buy_candidate'] = (df['velocity'] > df['velocity'].rolling(window=20).std().fillna(0) * 2)
-    df['sell_candidate'] = (df['average'] < df['average'].shift(1))
+    df['sell_candidate'] = (df['close'] < df['close'].shift(1))
 
     return finalize_signals(df)
 
 # --- 6. HYBRIDS ---
 
 def strategy_ema_rsi_volume(df, config):
-    e9 = ta.ema(df['average'], length=9)
-    df['ema_9'] = e9.fillna(df['average']) if e9 is not None else df['average']
-    e21 = ta.ema(df['average'], length=21)
-    df['ema_21'] = e21.fillna(df['average']) if e21 is not None else df['average']
-    r14 = ta.rsi(df['average'], length=14)
+    e9 = ta.ema(df['close'], length=9)
+    df['ema_9'] = e9.fillna(df['close']) if e9 is not None else df['close']
+    e21 = ta.ema(df['close'], length=21)
+    df['ema_21'] = e21.fillna(df['close']) if e21 is not None else df['close']
+    r14 = ta.rsi(df['close'], length=14)
     df['rsi'] = r14.fillna(50) if r14 is not None else 50
     v20 = ta.sma(df['volume'], length=20)
     df['vol_ma'] = v20.fillna(df['volume']) if v20 is not None else df['volume']
@@ -666,19 +666,19 @@ def strategy_ema_rsi_volume(df, config):
     return finalize_signals(df)
 
 def strategy_macd_bollinger(df, config):
-    macd = ta.macd(df['average'], fast=12, slow=26, signal=9)
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     if macd is not None and not macd.empty:
         df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0)
     else:
         df['macd_val'] = df['macd_sig'] = 0
 
-    bb = ta.bbands(df['average'], length=20, std=2)
+    bb = ta.bbands(df['close'], length=20, std=2)
     if bb is not None and not bb.empty:
-        df['bb_low'] = bb.iloc[:, 0].fillna(df['average'])
+        df['bb_low'] = bb.iloc[:, 0].fillna(df['close'])
     else:
-        df['bb_low'] = df['average']
+        df['bb_low'] = df['close']
 
-    df['buy_candidate'] = (df['macd_val'] > df['macd_sig']) & (df['average'] <= df['bb_low'] * 1.01)
+    df['buy_candidate'] = (df['macd_val'] > df['macd_sig']) & (df['close'] <= df['bb_low'] * 1.01)
     df['sell_candidate'] = (df['macd_val'] < df['macd_sig'])
 
     return finalize_signals(df)
@@ -699,8 +699,8 @@ def strategy_whale_detection(df, config):
     df['whale_spike'] = df['volume'] > (df['vol_ma'] + 3 * df['vol_std'])
 
     # Buy if volume spike and price moves up
-    df['buy_candidate'] = df['whale_spike'] & (df['average'] > df['average'].shift(1))
-    df['sell_candidate'] = df['whale_spike'] & (df['average'] < df['average'].shift(1))
+    df['buy_candidate'] = df['whale_spike'] & (df['close'] > df['close'].shift(1))
+    df['sell_candidate'] = df['whale_spike'] & (df['close'] < df['close'].shift(1))
 
     return finalize_signals(df)
 
@@ -710,14 +710,14 @@ def strategy_pump_dump(df, config):
     Detects extreme price-volume divergence.
     """
     df['vol_change'] = df['volume'].pct_change().fillna(0)
-    df['price_change'] = df['average'].pct_change().fillna(0)
+    df['price_change'] = df['close'].pct_change().fillna(0)
 
     # Pump: Price and Volume both surge suddenly
     df['pump_detected'] = (df['vol_change'] > 5.0) & (df['price_change'] > 0.05)
 
     # After a pump, price stops growing but volume remains high or drops
     df['buy_candidate'] = False
-    df['sell_candidate'] = df['pump_detected'].shift(1) & (df['average'] < df['average'].shift(1))
+    df['sell_candidate'] = df['pump_detected'].shift(1) & (df['close'] < df['close'].shift(1))
 
     return df
 
@@ -725,27 +725,27 @@ def strategy_market_regime(df, config):
     """
     Mean-reversion vs Trend detection based on volatility (Baur et Dimpfl, 2021).
     """
-    df['returns'] = np.log(df['average'] / df['average'].shift(1).replace(0, 1)).fillna(0)
+    df['returns'] = np.log(df['close'] / df['close'].shift(1).replace(0, 1)).fillna(0)
     df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
     df['vol_ma'] = df['volatility'].rolling(window=50).mean().fillna(0)
 
     # High volatility regime -> Mean Reversion (Bollinger Bands)
-    bb = ta.bbands(df['average'], length=20, std=2)
-    df['bb_low'] = bb.iloc[:, 0] if bb is not None and not bb.empty else df['average']
-    df['bb_high'] = bb.iloc[:, 2] if bb is not None and not bb.empty else df['average']
+    bb = ta.bbands(df['close'], length=20, std=2)
+    df['bb_low'] = bb.iloc[:, 0] if bb is not None and not bb.empty else df['close']
+    df['bb_high'] = bb.iloc[:, 2] if bb is not None and not bb.empty else df['close']
 
     # Low volatility regime -> Trend Following (EMA)
-    e9 = ta.ema(df['average'], length=9)
-    df['ema_9'] = e9.fillna(df['average']) if e9 is not None else df['average']
-    e21 = ta.ema(df['average'], length=21)
-    df['ema_21'] = e21.fillna(df['average']) if e21 is not None else df['average']
+    e9 = ta.ema(df['close'], length=9)
+    df['ema_9'] = e9.fillna(df['close']) if e9 is not None else df['close']
+    e21 = ta.ema(df['close'], length=21)
+    df['ema_21'] = e21.fillna(df['close']) if e21 is not None else df['close']
 
     # Vectorized market regime switching
     df['buy_candidate'] = np.where(df['volatility'] > df['vol_ma'],
-                                   df['average'] < df['bb_low'],
+                                   df['close'] < df['bb_low'],
                                    df['ema_9'] > df['ema_21'])
     df['sell_candidate'] = np.where(df['volatility'] > df['vol_ma'],
-                                    df['average'] > df['bb_high'],
+                                    df['close'] > df['bb_high'],
                                     df['ema_9'] < df['ema_21'])
 
     return finalize_signals(df)
@@ -755,9 +755,9 @@ def strategy_scientific_ensemble(df, config):
     LSTM/Machine Learning Ensemble Proxy (Makarov et al., 2019; Zhang et al., 2020).
     Weights MACD, RSI, and Bollinger.
     """
-    bb = ta.bbands(df['average'], length=20, std=2)
-    df['bb_low'] = bb.iloc[:, 0] if bb is not None and not bb.empty else df['average']
-    df['bb_high'] = bb.iloc[:, 2] if bb is not None and not bb.empty else df['average']
+    bb = ta.bbands(df['close'], length=20, std=2)
+    df['bb_low'] = bb.iloc[:, 0] if bb is not None and not bb.empty else df['close']
+    df['bb_high'] = bb.iloc[:, 2] if bb is not None and not bb.empty else df['close']
 
     # Score-based approach
     df['score'] = 0
@@ -765,8 +765,8 @@ def strategy_scientific_ensemble(df, config):
     df.loc[df['rsi'] > 65, 'score'] -= 1
     df.loc[df['macd_val'] > df['macd_sig'], 'score'] += 1
     df.loc[df['macd_val'] < df['macd_sig'], 'score'] -= 1
-    df.loc[df['average'] < df['bb_low'], 'score'] += 1
-    df.loc[df['average'] > df['bb_high'], 'score'] -= 1
+    df.loc[df['close'] < df['bb_low'], 'score'] += 1
+    df.loc[df['close'] > df['bb_high'], 'score'] -= 1
 
     df['buy_candidate'] = df['score'] >= 1
     df['sell_candidate'] = df['score'] <= -1
@@ -778,9 +778,9 @@ def strategy_sentiment_momentum(df, config):
     Social Media Sentiment Proxy (Abraham et al., 2018).
     Uses price acceleration and RSI divergence as a proxy for "FOMO" or "Fear".
     """
-    r14 = ta.rsi(df['average'], length=14)
+    r14 = ta.rsi(df['close'], length=14)
     df['rsi'] = r14.fillna(50) if r14 is not None else 50
-    r10 = ta.roc(df['average'], length=10)
+    r10 = ta.roc(df['close'], length=10)
     df['roc'] = r10.fillna(0) if r10 is not None else 0
     df['acceleration'] = df['roc'].diff().fillna(0)
 
@@ -797,29 +797,29 @@ def strategy_liquidation_cascade(df, config):
     Detects high-volume sharp price drops (long liquidations) as buying opportunities,
     or sharp rises as selling opportunities.
     """
-    df['pct_change'] = df['average'].pct_change().fillna(0)
+    df['pct_change'] = df['close'].pct_change().fillna(0)
     v20 = ta.sma(df['volume'], length=20)
     df['vol_ma'] = v20.fillna(df['volume']) if v20 is not None else df['volume']
 
-    # Cascade: Price drops > 2% in one candle + Volume > 2x average
+    # Cascade: Price drops > 2% in one candle + Volume > 2x average close volume
     df['long_liquidation'] = (df['pct_change'] < -0.02) & (df['volume'] > df['vol_ma'] * 2)
     df['short_liquidation'] = (df['pct_change'] > 0.02) & (df['volume'] > df['vol_ma'] * 2)
 
     # Buy the blood (after cascade)
-    df['buy_candidate'] = df['long_liquidation'].shift(1) & (df['average'] > df['average'].shift(1))
+    df['buy_candidate'] = df['long_liquidation'].shift(1) & (df['close'] > df['close'].shift(1))
     # Sell the squeeze
-    df['sell_candidate'] = df['short_liquidation'].shift(1) & (df['average'] < df['average'].shift(1))
+    df['sell_candidate'] = df['short_liquidation'].shift(1) & (df['close'] < df['close'].shift(1))
 
     return df
 
 def strategy_mvrv_proxy(df, config):
     """
     MVRV Ratio Proxy (Ciaian et al., 2018).
-    Proxy: Price / 200-day Moving Average (Market Value to 'Realized' Value proxy).
+    Proxy: Price / 200-day Moving Close Average (Market Value to 'Realized' Value proxy).
     """
-    rp200 = ta.sma(df['average'], length=200)
-    df['realized_proxy'] = rp200.fillna(df['average']) if rp200 is not None else df['average']
-    df['mvrv_proxy'] = df['average'] / df['realized_proxy'].replace(0, 1)
+    rp200 = ta.sma(df['close'], length=200)
+    df['realized_proxy'] = rp200.fillna(df['close']) if rp200 is not None else df['close']
+    df['mvrv_proxy'] = df['close'] / df['realized_proxy'].replace(0, 1)
 
     # Buy when undervalued (MVRV < 0.95), sell when overvalued (MVRV > 1.05)
     df['buy_candidate'] = df['mvrv_proxy'] < 0.95
@@ -832,7 +832,7 @@ def strategy_adx_trend(df, config):
     ADX Trend Strength (Zhang et al., 2020).
     Only trade when trend is strong (ADX > 25).
     """
-    try: adx = ta.adx(df['high'], df['low'], df['average'])
+    try: adx = ta.adx(df['high'], df['low'], df['close'])
     except: adx = None
     if adx is not None and not adx.empty:
         df['adx'] = adx.iloc[:, 0].fillna(0)
@@ -849,11 +849,11 @@ def strategy_adx_trend(df, config):
 def strategy_pairs_trading(df, config):
     """
     Statistical Arbitrage Proxy (Grobys et al., 2020).
-    Proxy: Asset vs moving average of its own price (Self-pairs trading/Mean reversion).
+    Proxy: Asset vs moving close average of its own close price (Self-pairs trading/Mean reversion).
     """
-    ma50 = ta.sma(df['average'], length=50)
-    df['ma_50'] = ma50.fillna(df['average']) if ma50 is not None else df['average']
-    df['z_score'] = (df['average'] - df['ma_50']) / df['average'].rolling(window=50).std().replace(0, 0.0001).fillna(0.0001)
+    ma50 = ta.sma(df['close'], length=50)
+    df['ma_50'] = ma50.fillna(df['close']) if ma50 is not None else df['close']
+    df['z_score'] = (df['close'] - df['ma_50']) / df['close'].rolling(window=50).std().replace(0, 0.0001).fillna(0.0001)
 
     df['buy_candidate'] = df['z_score'] < -2.0
     df['sell_candidate'] = df['z_score'] > 2.0
@@ -865,14 +865,14 @@ def strategy_halving_cycle(df, config):
     Bitcoin Halving Cycle Proxy (Bouoiyour & Selmi, 2020).
     Uses very long term EMA (200) to ensure alignment with major market cycles.
     """
-    e200 = ta.ema(df['average'], length=200)
-    df['ema_200'] = e200.fillna(df['average']) if e200 is not None else df['average']
-    e50 = ta.ema(df['average'], length=50)
-    df['ema_50'] = e50.fillna(df['average']) if e50 is not None else df['average']
+    e200 = ta.ema(df['close'], length=200)
+    df['ema_200'] = e200.fillna(df['close']) if e200 is not None else df['close']
+    e50 = ta.ema(df['close'], length=50)
+    df['ema_50'] = e50.fillna(df['close']) if e50 is not None else df['close']
 
     # Buy only when above 200 EMA (Bull market cycle)
-    df['buy_candidate'] = (df['average'] > df['ema_200']) & (df['average'] > df['ema_50']) & (df['average'].shift(1) <= df['ema_50'].shift(1))
-    df['sell_candidate'] = (df['average'] < df['ema_50'])
+    df['buy_candidate'] = (df['close'] > df['ema_200']) & (df['close'] > df['ema_50']) & (df['close'].shift(1) <= df['ema_50'].shift(1))
+    df['sell_candidate'] = (df['close'] < df['ema_50'])
 
     return finalize_signals(df)
 
@@ -883,13 +883,13 @@ def strategy_listing_surge(df, config):
     """
     vma50 = ta.sma(df['volume'], length=50)
     df['vol_ma'] = vma50.fillna(df['volume']) if vma50 is not None else df['volume']
-    df['price_std'] = df['average'].rolling(window=50).std().fillna(0)
+    df['price_std'] = df['close'].rolling(window=50).std().fillna(0)
 
-    # Surge: Volume > 5x average + Price breakout
-    df['surge'] = (df['volume'] > df['vol_ma'] * 5) & (df['average'] > df['average'].shift(1) + 2 * df['price_std'])
+    # Surge: Volume > 5x average close volume + Price breakout
+    df['surge'] = (df['volume'] > df['vol_ma'] * 5) & (df['close'] > df['close'].shift(1) + 2 * df['price_std'])
 
     df['buy_candidate'] = df['surge']
-    df['sell_candidate'] = df['average'] < df['average'].shift(3) # Exit fast after surge
+    df['sell_candidate'] = df['close'] < df['close'].shift(3) # Exit fast after surge
 
     return df
 
@@ -898,10 +898,10 @@ def strategy_listing_surge(df, config):
 def strategy_simple_ema(df, config):
     ema_fast = config.get('ema_fast', 9)
     ema_slow = config.get('ema_slow', 21)
-    ef = ta.ema(df['average'], length=ema_fast)
-    df['ema_f_strat'] = ef.fillna(df['average']) if ef is not None else df['average']
-    es = ta.ema(df['average'], length=ema_slow)
-    df['ema_s_strat'] = es.fillna(df['average']) if es is not None else df['average']
+    ef = ta.ema(df['close'], length=ema_fast)
+    df['ema_f_strat'] = ef.fillna(df['close']) if ef is not None else df['close']
+    es = ta.ema(df['close'], length=ema_slow)
+    df['ema_s_strat'] = es.fillna(df['close']) if es is not None else df['close']
     df['buy_candidate'] = (df['ema_f_strat'] > df['ema_s_strat']) & (df['ema_f_strat'].shift(1) <= df['ema_s_strat'].shift(1))
     df['sell_candidate'] = (df['ema_f_strat'] < df['ema_s_strat']) & (df['ema_f_strat'].shift(1) >= df['ema_s_strat'].shift(1))
     return finalize_signals(df)
@@ -909,10 +909,10 @@ def strategy_simple_ema(df, config):
 def strategy_simple_sma(df, config):
     sma_fast = config.get('ema_fast', 9)
     sma_slow = config.get('ema_slow', 21)
-    sf = ta.sma(df['average'], length=sma_fast)
-    df['sma_f_strat'] = sf.fillna(df['average']) if sf is not None else df['average']
-    ss = ta.sma(df['average'], length=sma_slow)
-    df['sma_s_strat'] = ss.fillna(df['average']) if ss is not None else df['average']
+    sf = ta.sma(df['close'], length=sma_fast)
+    df['sma_f_strat'] = sf.fillna(df['close']) if sf is not None else df['close']
+    ss = ta.sma(df['close'], length=sma_slow)
+    df['sma_s_strat'] = ss.fillna(df['close']) if ss is not None else df['close']
     df['buy_candidate'] = (df['sma_f_strat'] > df['sma_s_strat']) & (df['sma_f_strat'].shift(1) <= df['sma_s_strat'].shift(1))
     df['sell_candidate'] = (df['sma_f_strat'] < df['sma_s_strat']) & (df['sma_f_strat'].shift(1) >= df['sma_s_strat'].shift(1))
     return finalize_signals(df)
@@ -922,14 +922,14 @@ def strategy_double_ema(df, config):
     ema_slow = config.get('ema_slow', 18)
     device = config.get('device', torch.device('cpu'))
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
-        price_t = torch.tensor(df['average'].values, device=device, dtype=torch.float64)
+        price_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
         df['ema_f'] = torch_ema(price_t, ema_fast).to('cpu').numpy()
         df['ema_s'] = torch_ema(price_t, ema_slow).to('cpu').numpy()
     else:
-        ef = ta.ema(df['average'], length=ema_fast)
-        df['ema_f'] = ef.fillna(df['average']) if ef is not None else df['average']
-        es = ta.ema(df['average'], length=ema_slow)
-        df['ema_s'] = es.fillna(df['average']) if es is not None else df['average']
+        ef = ta.ema(df['close'], length=ema_fast)
+        df['ema_f'] = ef.fillna(df['close']) if ef is not None else df['close']
+        es = ta.ema(df['close'], length=ema_slow)
+        df['ema_s'] = es.fillna(df['close']) if es is not None else df['close']
     df['buy_candidate'] = (df['ema_f'] > df['ema_s']) & (df['ema_f'].shift(1) <= df['ema_s'].shift(1))
     df['sell_candidate'] = (df['ema_f'] < df['ema_s']) & (df['ema_f'].shift(1) >= df['ema_s'].shift(1))
     return finalize_signals(df)
@@ -944,7 +944,7 @@ def strategy_double_ema_macd_rsi(df, config):
     device = config.get('device', torch.device('cpu'))
 
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
-        price_t = torch.tensor(df['average'].values, device=device, dtype=torch.float64)
+        price_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
         df['ema_f_strat'] = torch_ema(price_t, ema_fast).to('cpu').numpy()
         df['ema_s_strat'] = torch_ema(price_t, ema_slow).to('cpu').numpy()
         m_val, m_sig, _ = torch_macd(price_t, fast=macd_f, slow=macd_s, signal=macd_sig)
@@ -952,17 +952,17 @@ def strategy_double_ema_macd_rsi(df, config):
         df['macd_sig_strat'] = m_sig.to('cpu').numpy()
         df['rsi_strat'] = torch_rsi(price_t, rsi_p).to('cpu').numpy()
     else:
-        ef = ta.ema(df['average'], length=ema_fast)
-        df['ema_f_strat'] = ef.fillna(df['average']) if ef is not None else df['average']
-        es = ta.ema(df['average'], length=ema_slow)
-        df['ema_s_strat'] = es.fillna(df['average']) if es is not None else df['average']
-        macd = ta.macd(df['average'], fast=macd_f, slow=macd_s, signal=macd_sig)
+        ef = ta.ema(df['close'], length=ema_fast)
+        df['ema_f_strat'] = ef.fillna(df['close']) if ef is not None else df['close']
+        es = ta.ema(df['close'], length=ema_slow)
+        df['ema_s_strat'] = es.fillna(df['close']) if es is not None else df['close']
+        macd = ta.macd(df['close'], fast=macd_f, slow=macd_s, signal=macd_sig)
         if macd is not None and not macd.empty:
             df['macd_val_strat'] = macd.iloc[:, 0].fillna(0)
             df['macd_sig_strat'] = macd.iloc[:, 1].fillna(0)
         else:
             df['macd_val_strat'] = df['macd_sig_strat'] = 0
-        rp = ta.rsi(df['average'], length=rsi_p)
+        rp = ta.rsi(df['close'], length=rsi_p)
         df['rsi_strat'] = rp.fillna(50) if rp is not None else 50
 
     df['ema_up'] = (df['ema_f_strat'] > df['ema_s_strat']) & (df['ema_f_strat'].shift(1) <= df['ema_s_strat'].shift(1))

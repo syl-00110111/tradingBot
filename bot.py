@@ -74,7 +74,20 @@ def update_available_assets_live(exchange, config):
 def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, global_config, engine=None):
     try:
         patterns = pattern_manager.get_patterns(symbol)
-        term = global_config.get('_active_term', 'short'); term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
+
+        # Determine analysis term based on open positions
+        open_positions = data_manager.get_positions(symbol) if data_manager else []
+        term_order = ['short', 'medium', 'long']
+        active_term = global_config.get('_active_term', 'short')
+
+        if open_positions:
+            # Find the "longest" term among open positions for this symbol
+            max_term_idx = max([term_order.index(p.get('term', 'short')) for p in open_positions])
+            term = term_order[max_term_idx]
+        else:
+            term = active_term
+
+        term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
         timeframe = term_cfg.get('timeframe', '5m')
 
         ohlcv_data = fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=500)
@@ -86,7 +99,6 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         if df.empty:
             return None
 
-        df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
         device = global_config.get('device', torch.device('cpu'))
         df = get_common_indicators(df, device)
 
@@ -218,7 +230,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
                 'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
                 'active_pattern_id': active_pattern_id,
                 'pattern_match_ts': pattern_match_ts,
-                'last_20_candles': {'prices': df['average'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()}
+                'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()}
             }
             return new_data
         else:
@@ -280,7 +292,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                         signal_arrival_times.pop(symbol, None)
 
                     if data['consecutive_buys'] >= 1 and not data['position']:
-                        if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs):
+                        active_term = config.get('_active_term', 'short')
+                        if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs, term=active_term):
                             data['last_action'] = 'BUY'
                             data['position'] = data_manager.get_position(symbol)
                             data['positions'] = data_manager.get_positions(symbol)
@@ -297,13 +310,22 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                      play_sound("sell", config)
                                      break
                              elif data['consecutive_sells'] >= 3:
-                                 # Non-profitable: trigger proposal on 3rd signal
-                                 with bot_lock:
-                                     if ui.sell_proposal_pair is None:
-                                         ui.sell_proposal_pair = symbol
-                                         ui.sell_proposal_profit = (data['price'] - pos['entry_price']) / pos['entry_price'] * 100
-                                         ui.sell_proposal_time = time.time()
-                                         logging.warning(f"[{symbol}] 3rd consecutive SELL signal received at non-profitable price ({format_price(data['price'])} < {format_price(pos['entry_price'])}). Manual confirmation required.")
+                                 # Non-profitable: shift to longer term if possible, otherwise trigger proposal
+                                 current_term = pos.get('term', 'short')
+                                 term_order = ['short', 'medium', 'long']
+                                 if current_term in term_order and term_order.index(current_term) < len(term_order) - 1:
+                                     new_term = term_order[term_order.index(current_term) + 1]
+                                     if data_manager.update_position_term(symbol, idx, new_term):
+                                         logging.info(f"[{symbol}] Position not profitable in {current_term} term. Shifting to {new_term} term to regain profitability.")
+                                         # Reset signals to avoid immediate trigger in new term
+                                         data['consecutive_sells'] = 0
+                                 else:
+                                     with bot_lock:
+                                         if ui.sell_proposal_pair is None:
+                                             ui.sell_proposal_pair = symbol
+                                             ui.sell_proposal_profit = (data['price'] - pos['entry_price']) / pos['entry_price'] * 100
+                                             ui.sell_proposal_time = time.time()
+                                             logging.warning(f"[{symbol}] 3rd consecutive SELL signal received at non-profitable price ({format_price(data['price'])} < {format_price(pos['entry_price'])}). Manual confirmation required.")
 
             if not pending_asset_update and time.time() % 30 < 1:
                 pending_asset_update = True

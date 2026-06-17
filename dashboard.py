@@ -24,7 +24,6 @@ class DashboardUI:
     def __init__(self, console):
         self.console = console
         self.pairs_scroll_offset = 0
-        self.logs_scroll_offset = 0
         self.focused_panel = "pairs"
         self.all_logs = []
         self.status_scroll_index = 0
@@ -66,7 +65,7 @@ class DashboardUI:
                 Layout(name="footer", size=3)
             )
             layout["body"].split_row(
-                Layout(name="pairs", ratio=2),
+                Layout(name="pairs", ratio=4),
                 Layout(name="logs", ratio=1)
             )
 
@@ -296,29 +295,11 @@ class DashboardUI:
             # Logs Panel
             log_height = self.console.height - 9
             if log_height < 3: log_height = 3
-            max_logs_offset = max(0, len(self.all_logs) - log_height)
-
-            if max_logs_offset > 0 and should_step:
-                 if now_ts > self.logs_pause_until:
-                      if self.logs_marquee_dir == 1:
-                           if self.logs_scroll_offset < max_logs_offset:
-                                self.logs_scroll_offset += 1
-                           if self.logs_scroll_offset >= max_logs_offset:
-                                self.logs_marquee_dir = -1
-                                self.logs_pause_until = now_ts + 5
-                      else:
-                           if self.logs_scroll_offset > 0:
-                                self.logs_scroll_offset -= 1
-                           else:
-                                self.logs_marquee_dir = 1
-                                self.logs_pause_until = now_ts + 5
-
-            self.logs_scroll_offset = max(0, min(self.logs_scroll_offset, max_logs_offset))
 
             log_text = Text()
-            start = max(0, len(self.all_logs) - log_height - self.logs_scroll_offset)
-            end = max(0, len(self.all_logs) - self.logs_scroll_offset)
-            for log_entry in self.all_logs[start:end]:
+            # No scrolling, always show latest
+            start = max(0, len(self.all_logs) - log_height)
+            for log_entry in self.all_logs[start:]:
                 style = "dim" if log_entry.get('expiry') and now > log_entry['expiry'] else ""
                 try:
                     log_text.append(Text.from_markup(log_entry['msg'], style=style))
@@ -326,16 +307,15 @@ class DashboardUI:
                     log_text.append(log_entry['msg'], style=style)
                 log_text.append("\n")
 
-            # Add 3 blank lines at the end to allow scrolling past the last message
-            if self.logs_scroll_offset == 0:
-                log_text.append("\n\n\n")
+            # Add 3 blank lines at the end for breathing room
+            log_text.append("\n\n\n")
 
             layout["logs"].update(Panel(log_text, title="[bold cyan]System Logs[/]", border_style="bright_blue" if self.focused_panel == "logs" else "dim white"))
 
             # Overlay Help
             if self.show_help:
                  help_text = Text("""
-                 [UP/DOWN]   Scroll through pairs or logs
+                 [UP/DOWN]   Scroll through trading pairs
                  [TAB]       Switch focus between Pairs and Logs
                  [ENTER]     Show 20-candle chart for selected pair
                  [B]         Manual Market BUY for selected pair
@@ -402,7 +382,6 @@ class DashboardUI:
                             self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        self.logs_scroll_offset = min(500, self.logs_scroll_offset + 1)
                         self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
@@ -412,7 +391,6 @@ class DashboardUI:
                             self.pairs_scroll_offset = self.selected_pair_index - pairs_height + 1
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        self.logs_scroll_offset = max(0, self.logs_scroll_offset - 1)
                         self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.ENTER:
                     if self.focused_panel == "pairs" and sorted_symbols:
@@ -464,47 +442,68 @@ class DashboardHandler(logging.Handler):
         self.ui = ui
         self.bot_lock = bot_lock
         self.duration = duration
+        self.trigger_cache = {} # (trigger, symbol_tag) -> log_entry_ref
 
     def emit(self, record):
         msg = self.format(record)
-        timestamp = datetime.now().strftime("%H:%M:%S")
         expiry = datetime.now() + timedelta(seconds=self.duration)
 
         with self.bot_lock:
             # Connection pool log filtering
             pool_msg = "Connection pool is full, discarding connection: api.binance.com"
             if pool_msg in msg:
+                 if pool_msg in self.trigger_cache:
+                      log = self.trigger_cache[pool_msg]
+                      log['msg'] = msg
+                      log['expiry'] = expiry
+                      return
                  for log in self.ui.all_logs:
                       if pool_msg in log['msg']:
-                           log['msg'] = f"[{timestamp}] {msg}"
+                           self.trigger_cache[pool_msg] = log
+                           log['msg'] = msg
                            log['expiry'] = expiry
                            return
 
             # Simulation init replacement
             if "Simulation initialization complete" in msg or "Initialization of the simulation positions completed" in msg:
                  replacement = "Initialization of the simulation positions completed."
+                 search_key = "Initializing Simulation positions"
+                 if search_key in self.trigger_cache:
+                      log = self.trigger_cache[search_key]
+                      log['msg'] = replacement
+                      log['expiry'] = expiry
+                      return
                  for log in self.ui.all_logs:
-                      if "Initializing Simulation positions" in log['msg']:
-                           log['msg'] = f"[{timestamp}] {replacement}"
+                      if search_key in log['msg']:
+                           self.trigger_cache[search_key] = log
+                           log['msg'] = replacement
                            log['expiry'] = expiry
                            return
 
-            # Deduplication for specific log types (Profitability check or Stop-loss)
+            # Deduplication for specific log types
             dedup_triggers = ["Profitability check failed", "Stop-loss triggered", "SELL signal received at non-profitable price", "Benchmarking all strategies"]
             matching_trigger = next((t for t in dedup_triggers if t in msg), None)
 
             if matching_trigger:
                  symbol_tag = msg.split(']')[0] + ']' if ']' in msg else ""
-                 # Find existing and update
+                 cache_key = (matching_trigger, symbol_tag)
+                 if cache_key in self.trigger_cache:
+                      log = self.trigger_cache[cache_key]
+                      log['msg'] = msg
+                      log['expiry'] = expiry
+                      return
                  for log in self.ui.all_logs:
                       if matching_trigger in log['msg'] and symbol_tag in log['msg']:
-                           log['msg'] = f"[{timestamp}] {msg}"
+                           self.trigger_cache[cache_key] = log
+                           log['msg'] = msg
                            log['expiry'] = expiry
                            return
 
-            self.ui.all_logs.append({'msg': f"[{timestamp}] {msg}", 'expiry': expiry})
-            # Auto-scroll to latest only if user is not actively scrolling
-            if time.time() > self.ui.logs_pause_until:
-                self.ui.logs_scroll_offset = 0
+            new_log = {'msg': msg, 'expiry': expiry}
+            self.ui.all_logs.append(new_log)
+            if matching_trigger:
+                 self.trigger_cache[(matching_trigger, symbol_tag)] = new_log
+
             if len(self.ui.all_logs) > 500:
-                self.ui.all_logs.pop(0)
+                popped = self.ui.all_logs.pop(0)
+                self.trigger_cache = {k: v for k, v in self.trigger_cache.items() if v is not popped}
