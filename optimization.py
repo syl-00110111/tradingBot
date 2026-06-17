@@ -289,8 +289,16 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             if cached_patterns:
                 best_cached = cached_patterns[0]
                 now_ts = time.time()
-                # If patterns are older than 1 day, let's try to refresh them with priority to positions
-                if now_ts - best_cached.get('last_bench_ts', 0) > (3600 * 24):
+
+                # Instruction: Only test the benchmarks if at least 5% of the SPM has elapsed relative to real time.
+                p_len = len(best_cached.get('prices', []))
+                tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+                tf_secs = tf_map.get(timeframe, 300)
+                p_duration_secs = p_len * tf_secs
+                spm_threshold_secs = p_duration_secs * 0.05 if p_len > 0 else (3600 * 24)
+
+                # If patterns are older than threshold, let's try to refresh them
+                if now_ts - best_cached.get('last_bench_ts', 0) > spm_threshold_secs:
                     force_refresh = True
                 else:
                     return sym, None, cached_patterns, best_cached
