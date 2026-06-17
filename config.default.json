@@ -4,10 +4,10 @@
     "base_bet": "10%",
     "global_risk_multiplier": 1.2,
     "profit_thresholds": {
-        "min_pattern_profit": 0.015,
-        "no_patterns_msg_threshold": 0.022,
-        "no_patterns_msg_threshold_pct": 0.01,
-        "bench_avg_threshold": 0.22,
+        "min_pattern_profit": 0.01,
+        "no_patterns_msg_threshold": 0.01,
+        "no_patterns_msg_threshold_pct": 0.005,
+        "bench_avg_threshold": 0.05,
         "mc_validation_hurdle": 0.0015
     },
     "win_streak_bonus": {

@@ -16,6 +16,7 @@
 
 import numpy as np
 import torch
+import gc
 
 class MonteCarloEngine:
     def __init__(self, num_simulations=5000, timeframe_candles=100):
@@ -65,6 +66,11 @@ class MonteCarloEngine:
              price_paths = curr_p * torch.exp(torch.cumsum(returns, dim=1))
              ones = torch.ones((self.num_simulations, 1), device=self.device) * curr_p
              price_paths = torch.cat((ones, price_paths), dim=1)
+
+        # Aggressive memory purging after simulation
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         return price_paths
 

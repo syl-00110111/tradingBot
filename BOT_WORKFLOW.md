@@ -52,11 +52,12 @@ Real-time trading on supported exchanges (Binance, Kraken, Bitvavo, etc.).
 ### Process Workflow
 1. **Initialization**: Syncs existing positions from the exchange API and populates the `DataManager`.
 2. **Parallel Analysis**: The trading thread utilizes a `ThreadPoolExecutor` to analyze all configured pairs concurrently.
-3. **Real-Time SPM Matching**: For every candle, the bot compares the current market "shape" and "state" to the stored Success Patterns:
+3. **Adaptive Scan Check**: Skips pairs that are currently in backoff periods due to lack of profitable patterns.
+4. **Real-Time SPM Matching**: For every candle, the bot compares the current market "shape" and "state" to the stored Success Patterns:
    - **Shape Correlation (70%)**: GPU-accelerated Pearson correlation of price action.
    - **Technical State (30%)**: Euclidean distance of current RSI/ADX/EMA vs. pattern states.
    - **Threshold**: Similarity must exceed 70% to trigger strategy injection.
-4. **Dynamic Risk Engine**:
+5. **Dynamic Risk Engine**:
    - **Strong Trend (ADX > 25)**: Switches to aggressive settings (shorter EMAs: 10/30, wider RSI: 40/60).
    - **High Volatility (> 0.015)**: Switches to defensive settings (longer EMAs: 30/100, tight RSI: 20/80).
 5. **Strategy Injection**: If a pattern matches, its specific `strategy` and `aggr` settings are dynamically applied to the current pair.
@@ -89,6 +90,11 @@ Functional equivalent of Live mode but with virtual execution.
 - **Simulation Count**: 100 (Benchmark/Backtest), 1000 (Live/Simulation)
 - **Time Horizon**: 20 candles
 - **Profit Probability Hurdle**: 1.0015 (0.15% profit floor)
+
+### Adaptive Scanning & Backoff
+- **Failure Handling**: Increment `scan_attempts` on unsuccessful pattern searches.
+- **Linear Backoff**: Delay next scan by `attempts * 60` seconds.
+- **Timeframe Escalation**: After 5 failed attempts, switch to the next timeframe (Short -> Medium -> Long).
 
 ### Dynamic Risk Engine
 - **Strong Trend**: ADX > 25

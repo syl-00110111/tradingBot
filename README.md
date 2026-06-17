@@ -12,6 +12,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **ETH Strategy (Stochastic RSI)**: Optimized for Ethereum's volatility, following the findings of *Zhang et al. (2020)*.
 - **Market Regime Detection**: Utilizes volatility-based switching between Mean-Reversion and Trend-Following (*Baur & Dimpfl, 2021*).
 - **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for every signal, penalizing high-risk setups.
+- **Adaptive Scanning & Backoff**: Automatically adjusts scanning frequency and timeframes (short to long) based on market pattern availability, preventing redundant API calls and processing.
 
 ---
 
@@ -19,6 +20,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 
 ### ⚡ Performance & Reliability
 - **GPU Acceleration**: Calculations are offloaded to the graphics chip via PyTorch. Supported backends: **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** and **ROCm**.
+- **Memory Management**: Aggressive garbage collection and GPU cache purging to ensure long-term stability and prevent memory leaks during heavy computations.
 - **Multi-Processing Benchmark**: Strategy optimization is parallelized across all CPU cores.
 - **Fresh Ticker Price**: Fetches a fresh price from the exchange immediately before placing a Buy order to ensure compliance with Spot market NOTIONAL limits and reduce "Filter failure" errors.
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
@@ -56,9 +58,22 @@ Store your credentials and preferred exchange:
     "max_open_positions": 10,
     "// Note": "base_bet: % of available quote asset (USDT/USDC/etc) per trade. '10%' uses 10% of balance.",
     "base_bet": "10%",
-    "global_risk_multiplier": 1.2
+    "global_risk_multiplier": 1.2,
+    "profit_thresholds": {
+        "min_pattern_profit": 0.01,
+        "bench_avg_threshold": 0.05
+    }
 }
 ```
+
+---
+
+## 📈 Trading Principles & Best Practices
+The bot is designed with the following empirical principles in mind:
+- **Capital Preservation**: Use the `base_bet` and `global_risk_multiplier` to control exposure.
+- **Selectivity**: The bot only enters trades when technical similarity and Monte Carlo validation hurdles are met.
+- **Automatic Execution**: Removes emotional bias by automating buy and sell actions based on proven historical patterns.
+- **Timeframe Scaling**: Shifting from short-term to longer-term timeframes when local volatility is low, as recommended in *Cryptocurrency - A Trader's Handbook*.
 
 ---
 
