@@ -354,7 +354,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             cpu_usage = psutil.cpu_percent(interval=0.5)
             mem_available = psutil.virtual_memory().available
 
-            if cpu_usage < 40 and mem_available > footprint:
+            if cpu_usage < 40 and mem_available > footprint*2:
                 max_workers += 1
         except Exception as e:
             logging.debug(f"Failed to calculate dynamic workers: {e}")
@@ -388,7 +388,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                          time.sleep(0.5)
                          mem_after = psutil.virtual_memory().used
                          diff = max(100 * 1024 * 1024, mem_after - mem_before)
-                         logging.info(f"Instrumented Benchmark process footprint: {diff / (1024*1024):.2f} MB")
+                         # logging.info(f"Instrumented Benchmark process footprint: {diff / (1024*1024):.2f} MB")
                          instrumented = True
 
                 for future in concurrent.futures.as_completed(futures):

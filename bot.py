@@ -384,7 +384,7 @@ class AnalysisWorker(threading.Thread):
             try:
                 cpu_usage = psutil.cpu_percent(interval=0.1)
                 mem_available = psutil.virtual_memory().available
-                if cpu_usage < 40 and mem_available > footprint:
+                if cpu_usage < 40 and mem_available > footprint*2:
                     max_workers += 1
             except: pass
 
@@ -475,7 +475,7 @@ class AnalysisWorker(threading.Thread):
                             with bot_lock:
                                 instrumented_mem_footprint['analysis'] = diff
                                 instrumented_mem_footprint['analysis_done'] = True
-                                logging.info(f"Instrumented Analysis process footprint: {diff / (1024*1024):.2f} MB")
+                                # logging.info(f"Instrumented Analysis process footprint: {diff / (1024*1024):.2f} MB")
 
                     for f in concurrent.futures.as_completed(futures):
                         p, gid, sym = futures[f]
