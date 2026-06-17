@@ -72,7 +72,11 @@ class CandleDownloader(threading.Thread):
         while not shutdown_event.is_set():
             try:
                 # Priority, Symbol, Timeframe, Limit, Since
-                priority, symbol, timeframe, limit, since = candle_queue.get(timeout=1)
+                item = candle_queue.get(timeout=1)
+                priority, symbol, timeframe, limit, since = item
+
+                # Check if we can group similar requests?
+                # For now, simple execution
                 fetch_ohlcv_incremental(self.exchange, symbol, timeframe, self.ohlcv_cache_manager, limit=limit, since=since)
                 candle_queue.task_done()
             except queue.Empty:
@@ -416,10 +420,9 @@ def main():
     global ohlcv_cache_manager
     migrate_fresh_files_to_archive()
     load_from_archive()
-    ohlcv_cache_manager = OHLCVCacheManager(mode=args.mode)
 
     parser = argparse.ArgumentParser(description='Cryptocurrencies Multiplatform Trading Bot')
-    parser.add_argument('--mode', choices=['live', 'simulation', 'backtest', 'benchmark', 'sell', 'balance'], default='simulation')
+    parser.add_argument('--mode', choices=['live', 'simulation', 'backtest', 'benchmark', 'sell', 'balance', 'virtual'], default='simulation')
     parser.add_argument('--symbol', help='Symbol for backtest/benchmark')
     parser.add_argument('--strategy', choices=STRATEGIES, help='Strategy for backtest')
     parser.add_argument('--term', choices=['short', 'medium', 'long'], default='short', help='Term for optimization/backtest/benchmark')
@@ -430,7 +433,10 @@ def main():
     parser.add_argument('--until', help='End date for backtest (YYYY-MM-DD)')
     parser.add_argument('--every-symbol', action='store_true', help='Benchmark all symbols in pairs.txt')
     parser.add_argument('--backtest-positions', action='store_true', help='Show positions during backtest')
+    parser.add_argument('--wallet', help='Initial wallet for virtual mode (e.g. "100 USDC")')
     args = parser.parse_args()
+
+    ohlcv_cache_manager = OHLCVCacheManager(mode=args.mode)
 
     num_cores = os.cpu_count() or 1
     torch.set_num_threads(num_cores)
@@ -495,7 +501,7 @@ def main():
             logging.info(hw_msg)
         except: pass
 
-        data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation', 'sell'] else None
+        data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation', 'sell', 'virtual'] else None
         pattern_manager = PatternManager()
         engine = TradingEngine(config)
 
@@ -505,6 +511,15 @@ def main():
 
         if args.mode == 'live': exchange = ex_class(api_key, api_secret)
         elif args.mode == 'simulation': exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange)
+        elif args.mode == 'virtual':
+            exchange = MockExchange(exchange_type=args.exchange)
+            if args.wallet:
+                try:
+                    amount, asset = args.wallet.split()
+                    exchange.balance = {asset: float(amount)}
+                    logging.info(f"Virtual mode initialized with wallet: {amount} {asset}")
+                except:
+                    logging.warning("Failed to parse wallet argument. Using default virtual balance.")
         elif args.mode == 'sell':
             exchange = ex_class(api_key, api_secret) if api_key not in [None, "YOUR_API_KEY"] else MockExchange(exchange_type=args.exchange)
             status.stop(); trading_engine.interactive_sell(exchange, data_manager, engine, config, console); return
@@ -538,7 +553,7 @@ def main():
         for h in all_other_handlers:
             logging.root.removeHandler(h)
 
-        if args.mode in ['live', 'simulation']:
+        if args.mode in ['live', 'simulation', 'virtual']:
             # Re-initialize bot_state to ensure keys exist before benchmarking
             for symbol in config['pairs']:
                 pos_list = data_manager.get_positions(symbol) if data_manager else []
@@ -562,7 +577,7 @@ def main():
                     pair_priorities.append((sym, best['profit']))
             config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
 
-            if args.mode == 'simulation':
+            if args.mode in ['simulation', 'virtual']:
                 trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
 
             for symbol in config['pairs']:
@@ -582,6 +597,8 @@ def main():
             for h in all_other_handlers:
                 logging.root.addHandler(h)
 
+    if ohlcv_cache_manager:
+        ohlcv_cache_manager.flush_all()
     archiver.stop()
     shutdown_msg = "Bot shutdown gracefully."
     console.print(f"[bold green]{shutdown_msg}[/]")
