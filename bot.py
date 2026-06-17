@@ -605,10 +605,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             }
 
     # Start workers
-    cpu_count = os.cpu_count() or 1
-    for _ in range(cpu_count):
-        AnalysisWorker(exchange, data_manager, pattern_manager, engine, config).start()
-
+    AnalysisWorker(exchange, data_manager, pattern_manager, engine, config).start()
     ExecutionWorker(exchange, data_manager, engine, config).start()
 
     import optimization
