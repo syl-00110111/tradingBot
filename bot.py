@@ -27,6 +27,7 @@ import signal
 import random
 import concurrent.futures
 import torch
+import gc
 from datetime import datetime
 
 from rich.live import Live
@@ -85,7 +86,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             max_term_idx = max([term_order.index(p.get('term', 'short')) for p in open_positions])
             term = term_order[max_term_idx]
         else:
-            term = active_term
+            term = pair_config.get('term_override', active_term)
 
         term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
         timeframe = term_cfg.get('timeframe', '5m')
@@ -185,6 +186,11 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             active_pattern_id = candidates[0]['id']
 
         if active_pattern:
+            with bot_lock:
+                if symbol in bot_state:
+                    bot_state[symbol]['scan_attempts'] = 0
+                    bot_state[symbol]['next_scan_allowed'] = 0
+
             if active_pattern_id != current_pattern_id:
                 pattern_match_ts = candle_ts
                 current_pattern_id = active_pattern_id
@@ -234,7 +240,32 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             }
             return new_data
         else:
-            with bot_lock: benchmarking_pairs.add(symbol)
+            with bot_lock:
+                if symbol in bot_state:
+                    bot_state[symbol]['scan_attempts'] = bot_state[symbol].get('scan_attempts', 0) + 1
+                    attempts = bot_state[symbol]['scan_attempts']
+                    # Linear backoff: 1 min, 2 min, 3 min...
+                    bot_state[symbol]['next_scan_allowed'] = time.time() + (attempts * 60)
+                    logging.info(f"[{symbol}] No profitable patterns found (Attempt {attempts}). Next scan allowed in {attempts} minutes.")
+
+                    if attempts >= 5:
+                        # Switch timeframe
+                        current_term = pair_config.get('term_override', global_config.get('_active_term', 'short'))
+                        term_order = ['short', 'medium', 'long']
+                        if current_term in term_order:
+                            idx = term_order.index(current_term)
+                            if idx < len(term_order) - 1:
+                                new_term = term_order[idx + 1]
+                                # Note: This affects global term for this pair if we can isolate it,
+                                # but currently _active_term is global.
+                                # Let's see if we can override it in pair_config.
+                                pair_config['term_override'] = new_term
+                                bot_state[symbol]['scan_attempts'] = 0
+                                logging.info(f"[{symbol}] Max scan attempts reached. Switching to {new_term} term.")
+                            else:
+                                logging.info(f"[{symbol}] Max scan attempts reached on longest term (long).")
+
+                benchmarking_pairs.add(symbol)
             return None
     except Exception as e:
         logging.error(f"Error in analyze_pair for {symbol}: {e}")
@@ -255,7 +286,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                 'price': 0, 'positions': data_manager.get_positions(sym),
                 'position': data_manager.get_position(sym),
                 'strategy': 'Benchmarking...', 'aggr': 'N/A', 'bench_profit': 0,
-                'consecutive_buys': 0, 'consecutive_sells': 0, 'last_action': 'WAITING'
+                'consecutive_buys': 0, 'consecutive_sells': 0, 'last_action': 'WAITING',
+                'scan_attempts': 0, 'next_scan_allowed': 0
             }
 
     import optimization
@@ -271,6 +303,10 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
         for symbol in all_symbols:
             if shutdown_event.is_set(): break
             if symbol in suspended_pairs: continue
+
+            with bot_lock:
+                if time.time() < bot_state[symbol].get('next_scan_allowed', 0):
+                    continue
 
             res = analyze_pair(exchange, data_manager, pattern_manager, symbol, pairs_dict[symbol], config, engine)
             if res:
@@ -320,16 +356,23 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                          # Reset signals to avoid immediate trigger in new term
                                          data['consecutive_sells'] = 0
                                  else:
-                                     with bot_lock:
-                                         if ui.sell_proposal_pair is None:
-                                             ui.sell_proposal_pair = symbol
-                                             ui.sell_proposal_profit = (data['price'] - pos['entry_price']) / pos['entry_price'] * 100
-                                             ui.sell_proposal_time = time.time()
-                                             logging.warning(f"[{symbol}] 3rd consecutive SELL signal received at non-profitable price ({format_price(data['price'])} < {format_price(pos['entry_price'])}). Manual confirmation required.")
+                                     # Non-profitable and already on longest term: auto-sell
+                                     if engine.validate_trade_mc(symbol, data, config) and trading_engine.execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=idx):
+                                         data['last_action'] = 'SELL'
+                                         data['positions'] = data_manager.get_positions(symbol)
+                                         data['position'] = data_manager.get_position(symbol)
+                                         play_sound("sell", config)
+                                         logging.warning(f"[{symbol}] 3rd consecutive SELL signal received at non-profitable price on longest term. Auto-executing sell.")
+                                         break
 
             if not pending_asset_update and time.time() % 30 < 1:
                 pending_asset_update = True
                 threading.Thread(target=update_available_assets_live, args=(exchange, config), daemon=True).start()
+
+            # Routine memory management
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         elapsed = time.time() - start_time
         if elapsed < 1.0: time.sleep(1.0 - elapsed)
@@ -503,21 +546,6 @@ def main():
             threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
             while not shutdown_event.is_set():
                 now_ts = time.time()
-                # Check for expired sell proposals (auto-execute after 60s)
-                with bot_lock:
-                    if ui.sell_proposal_pair and (now_ts - ui.sell_proposal_time >= 60):
-                        symbol = ui.sell_proposal_pair
-                        def async_auto_sell(s):
-                            data = bot_state.get(s, {})
-                            if trading_engine.execute_sell(exchange, data_manager, engine, s, data, config, position_idx=0):
-                                 with bot_lock:
-                                     data['last_action'] = 'SELL'
-                                     data['positions'] = data_manager.get_positions(s)
-                                     data['position'] = data_manager.get_position(s)
-                                 play_sound("sell", config)
-                        threading.Thread(target=async_auto_sell, args=(symbol,), daemon=True).start()
-                        ui.sell_proposal_pair = None
-                        ui.sell_proposal_time = 0
 
                 live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
                 time.sleep(0.5)

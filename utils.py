@@ -9,9 +9,54 @@ import random
 import threading
 import signal
 import logging
+import queue
 from rich.console import Console
 
 console = Console()
+
+# Background sound thread initialization
+sound_queue = queue.Queue()
+
+def sound_worker():
+    while True:
+        try:
+            action, config = sound_queue.get()
+            if action == "shutdown":
+                break
+            _execute_play_sound(action, config)
+            sound_queue.task_done()
+        except Exception:
+            pass
+
+threading.Thread(target=sound_worker, daemon=True).start()
+
+def _execute_play_sound(action, config):
+    system = platform.system().lower()
+    try:
+        if system == "windows":
+            import winsound
+            if action == "startup":
+                 # Randomized sequence equal to max_open_positions
+                 num_blips = int(config.get('max_open_positions', 5)) if config else 5
+                 for _ in range(num_blips):
+                      freq = random.randint(400, 1200)
+                      dur = random.randint(100, 300)
+                      winsound.Beep(freq, dur)
+                 return
+            frequency = 1000 if action == "buy" else 1500
+            winsound.Beep(frequency, 200)
+        else:
+            if action == "startup":
+                 sys.stdout.write("\a"); sys.stdout.flush()
+                 return
+            bell_char = "\a" if action == "buy" else "\a\a"
+            # Use os.write to ensure it's written even if stdout is buffered or redirected
+            try:
+                os.write(sys.stdout.fileno(), bell_char.encode())
+            except:
+                sys.stdout.write(bell_char)
+                sys.stdout.flush()
+    except Exception: pass
 
 def format_price(price):
     """
@@ -98,32 +143,5 @@ def load_config():
     return load_config_from_path(path)
 
 def play_sound(action, config=None):
-    """Plays notification sounds in a non-blocking daemon thread."""
-    def _play():
-        system = platform.system().lower()
-        try:
-            if system == "windows":
-                import winsound
-                if action == "startup":
-                     # Randomized sequence equal to max_open_positions
-                     num_blips = int(config.get('max_open_positions', 5)) if config else 5
-                     for _ in range(num_blips):
-                          freq = random.randint(400, 1200)
-                          dur = random.randint(100, 300)
-                          winsound.Beep(freq, dur)
-                     return
-                frequency = 1000 if action == "buy" else 1500
-                winsound.Beep(frequency, 200)
-            else:
-                if action == "startup":
-                     sys.stdout.write("\a"); sys.stdout.flush()
-                     return
-                bell_char = "\a" if action == "buy" else "\a\a"
-                # Use os.write to ensure it's written even if stdout is buffered or redirected
-                try:
-                    os.write(sys.stdout.fileno(), bell_char.encode())
-                except:
-                    sys.stdout.write(bell_char)
-                    sys.stdout.flush()
-        except Exception: pass
-    threading.Thread(target=_play, daemon=True).start()
+    """Adds a sound notification to the background queue."""
+    sound_queue.put((action, config))

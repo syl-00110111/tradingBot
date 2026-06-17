@@ -32,10 +32,6 @@ class DashboardUI:
         self.marquee_enabled = True
         self.selected_pair_index = 0
         self.show_candles_for_pair = None
-        self.sell_proposal_pair = None
-        self.sell_proposal_profit = 0
-        self.sell_proposal_time = 0
-        self.last_sell_proposal_check = 0
 
         # Marquee Timing Control
         self.last_marquee_update = 0
@@ -132,41 +128,7 @@ class DashboardUI:
 
             sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
 
-            if self.sell_proposal_pair and (now_ts - self.sell_proposal_time < 61):
-                symbol = self.sell_proposal_pair
-                data = bot_state.get(symbol, {})
-                candles_text = Text()
-                time_left = max(0, int(61 - (now_ts - self.sell_proposal_time)))
-                candles_text.append(f"PROPOSAL: SELL {symbol} for {format_price(self.sell_proposal_profit)}% profit?\n", style="bold yellow")
-                candles_text.append(f"Confirm sell? [Y/n] (Auto-exec in {time_left}s)\n\n", style="dim")
-                if 'last_20_candles' in data:
-                    prices = data['last_20_candles']['prices']
-                    volumes = data['last_20_candles']['volumes']
-                    min_p, max_p = min(prices), max(prices)
-                    diff = max_p - min_p if max_p > min_p else 1.0
-                    chart_height = 5
-                    for h in reversed(range(chart_height)):
-                        for p in prices:
-                            norm_p = (p - min_p) / diff
-                            scaled_p = norm_p * chart_height
-                            if scaled_p >= h: candles_text.append("█ ", style="red")
-                            else: candles_text.append("  ")
-                        candles_text.append("\n")
-
-                    if volumes:
-                        min_v, max_v = min(volumes), max(volumes)
-                        diff_v = max_v - min_v if max_v > min_v else 1.0
-                        vol_height = 2
-                        candles_text.append("\n")
-                        for vh in reversed(range(vol_height)):
-                            for v in volumes:
-                                norm_v = (v - min_v) / diff_v
-                                scaled_v = norm_v * vol_height
-                                if scaled_v >= vh: candles_text.append("█ ", style="blue")
-                                else: candles_text.append("  ")
-                            candles_text.append("\n")
-                pairs_panel = Panel(candles_text, title="[bold red]SELL PROPOSAL[/]", border_style="bold red")
-            elif self.show_candles_for_pair:
+            if self.show_candles_for_pair:
                 symbol = self.show_candles_for_pair
                 data = bot_state.get(symbol, {})
                 candles_text = Text()
@@ -333,39 +295,6 @@ class DashboardUI:
         while not shutdown_event.is_set():
             try:
                 key = readchar.readkey()
-
-                # Handle sell proposal
-                if self.sell_proposal_pair and (time.time() - self.sell_proposal_time < 61):
-                    if key.lower() == 'y' or key == readchar.key.ENTER:
-                        symbol = self.sell_proposal_pair
-                        def async_sell():
-                            data = bot_state.get(symbol, {})
-                            # Note: Sell proposals are only triggered after signals, so MC check is already implied,
-                            # but we can re-verify here if needed.
-                            if execute_sell_func(exchange, data_manager, engine, symbol, data, config, position_idx=0):
-                                 with bot_lock:
-                                     data['last_action'] = 'SELL'
-                                     data['positions'] = data_manager.get_positions(symbol)
-                                     data['position'] = data_manager.get_position(symbol)
-                                 play_sound_func("sell", config)
-                        threading.Thread(target=async_sell, daemon=True).start()
-                        with bot_lock:
-                             self.sell_proposal_pair = None
-                             self.sell_proposal_time = 0
-                             self.sell_proposal_profit = 0
-                        continue
-                    elif key.lower() == 'n':
-                        with bot_lock:
-                             self.sell_proposal_pair = None
-                             self.sell_proposal_time = 0
-                             self.sell_proposal_profit = 0
-                        continue
-                else:
-                    if self.sell_proposal_pair:
-                        with bot_lock:
-                             self.sell_proposal_pair = None
-                             self.sell_proposal_time = 0
-                             self.sell_proposal_profit = 0
 
                 if self.show_candles_for_pair:
                     self.show_candles_for_pair = None

@@ -8,6 +8,7 @@ import os
 import signal
 import threading
 import concurrent.futures
+import gc
 import pandas as pd
 import numpy as np
 import torch
@@ -385,6 +386,9 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 patterns = pattern_manager.get_patterns(sym)
                 global_pattern_pool.extend(patterns)
             benchmarking_pairs.difference_update(set(symbols))
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return optimization_map
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
