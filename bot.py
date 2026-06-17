@@ -384,7 +384,7 @@ class AnalysisWorker(threading.Thread):
             try:
                 cpu_usage = psutil.cpu_percent(interval=0.1)
                 mem_available = psutil.virtual_memory().available
-                if cpu_usage < 40 and mem_available > footprint*2:
+                if cpu_usage < 40 and mem_available > footprint*max_workers:
                     max_workers += 1
             except: pass
 
