@@ -29,6 +29,7 @@ import concurrent.futures
 import queue
 import torch
 import gc
+import importlib.util
 from datetime import datetime
 
 from rich.live import Live
@@ -399,8 +400,16 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
             # Routine memory management
             gc.collect()
-            if torch.cuda.is_available():
+            if device.type == 'cuda' and torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            elif device.type == 'xpu':
+                try:
+                    import intel_extension_for_pytorch as ipex
+                    torch.xpu.empty_cache()
+                except: pass
+            elif device.type == 'mps':
+                try: torch.mps.empty_cache()
+                except: pass
 
         elapsed = time.time() - start_time
         if elapsed < 1.0: time.sleep(1.0 - elapsed)
@@ -449,13 +458,33 @@ def main():
     if args.no_gpu:
         device = torch.device('cpu')
     else:
+        # 1. CUDA (NVIDIA)
         if torch.cuda.is_available():
             device = torch.device('cuda'); gpu_enabled = True; gpu_accel = "CUDA"
-        elif torch.backends.mkldnn.is_available():
-            device = torch.device('cpu'); gpu_enabled = True; torch.backends.mkldnn.enabled = True; gpu_accel = "oneDNN"
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        # 2. ROCm (AMD via CUDA shim or native)
+        elif hasattr(torch, 'version') and torch.version.hip:
+            device = torch.device('cuda'); gpu_enabled = True; gpu_accel = "ROCm"
+        # 3. IPEX (Intel XPU)
+        elif 'ipex' in sys.modules or (lambda: (importlib.util.find_spec('intel_extension_for_pytorch') is not None) if 'importlib' in sys.modules else False)():
+            try:
+                import intel_extension_for_pytorch as ipex
+                if hasattr(ipex, 'xpu') and ipex.xpu.is_available():
+                    device = torch.device('xpu'); gpu_enabled = True; gpu_accel = "IPEX"
+            except: pass
+        # 4. MPS (Apple Silicon)
+        if not gpu_enabled and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device('mps'); gpu_enabled = True; gpu_accel = "MPS"
-        else:
+        # 5. Vulkan (via Torch-Vulkan if available)
+        if not gpu_enabled:
+            try:
+                if 'vulkan' in torch.backends.__dict__ and torch.backends.vulkan.is_available():
+                     device = torch.device('vulkan'); gpu_enabled = True; gpu_accel = "Vulkan"
+            except: pass
+        # 6. oneDNN (CPU Acceleration)
+        if not gpu_enabled and torch.backends.mkldnn.is_available():
+            device = torch.device('cpu'); gpu_enabled = True; torch.backends.mkldnn.enabled = True; gpu_accel = "oneDNN"
+
+        if not gpu_enabled:
             device = torch.device('cpu')
 
     if args.config: config = load_config_from_path(args.config)

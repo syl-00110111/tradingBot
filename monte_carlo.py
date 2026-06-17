@@ -69,8 +69,16 @@ class MonteCarloEngine:
 
         # Aggressive memory purging after simulation
         gc.collect()
-        if torch.cuda.is_available():
+        if self.device.type == 'cuda' and torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif self.device.type == 'xpu':
+            try:
+                import intel_extension_for_pytorch as ipex
+                torch.xpu.empty_cache()
+            except: pass
+        elif self.device.type == 'mps':
+            try: torch.mps.empty_cache()
+            except: pass
 
         return price_paths
 

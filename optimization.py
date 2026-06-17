@@ -401,8 +401,16 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 global_pattern_pool.extend(patterns)
             benchmarking_pairs.difference_update(set(symbols))
         gc.collect()
-        if torch.cuda.is_available():
+        if device.type == 'cuda' and torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif device.type == 'xpu':
+            try:
+                import intel_extension_for_pytorch as ipex
+                torch.xpu.empty_cache()
+            except: pass
+        elif device.type == 'mps':
+            try: torch.mps.empty_cache()
+            except: pass
         return optimization_map
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
