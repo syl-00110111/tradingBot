@@ -47,12 +47,20 @@ A high-performance optimization phase that identifies historical "Success Patter
 Real-time trading on supported exchanges (Binance, Kraken, Bitvavo, etc.).
 
 ### Execution Path
-`main()` → **Auto-Optimization** (Full Benchmark) → `trading_thread_func` + `input_thread_func`
+`main()` → **Auto-Optimization** (Full Benchmark) → `trading_thread_func` (Worker Initialization)
+
+### Parallel Queued Architecture
+The bot uses a multi-threaded queued system for maximum throughput and reliability:
+1. **Candle Downloader**: High-priority sequential queue for OHLCV data.
+2. **Analysis Workers**: Dynamic pool of threads (scaled by CPU/RAM) that perform technical analysis and SPM matching.
+3. **Execution Worker**: Single-threaded consumer that handles trade execution to ensure order consistency and balance safety.
+4. **Benchmark Worker**: Background task that refreshes success patterns without blocking the trading loop.
 
 ### Process Workflow
-1. **Initialization**: Syncs existing positions from the exchange API and populates the `DataManager`.
-2. **Parallel Analysis**: The trading thread utilizes a `ThreadPoolExecutor` to analyze all configured pairs concurrently.
-3. **Adaptive Scan Check**: Skips pairs that are currently in backoff periods due to lack of profitable patterns.
+1. **Initialization**: Syncs existing positions and starts the background worker threads.
+2. **Analysis Grouping**: Pairs are grouped by quote currency and priority (positions first) in the `analysis_queue`.
+3. **Task Recouping**: If a worker fails, the task is automatically re-queued with a lower priority.
+4. **Adaptive Scan Check**: Skips pairs in backoff or those with unchanged data.
 4. **Real-Time SPM Matching**: For every candle, the bot compares the current market "shape" and "state" to the stored Success Patterns:
    - **Shape Correlation (70%)**: GPU-accelerated Pearson correlation of price action.
    - **Technical State (30%)**: Euclidean distance of current RSI/ADX/EMA vs. pattern states.
