@@ -354,7 +354,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             cpu_usage = psutil.cpu_percent(interval=0.5)
             mem_available = psutil.virtual_memory().available
 
-            if cpu_usage < 40 and mem_available > footprint*max_workers:
+            if cpu_usage < 40 and mem_available > footprint*(max_workers+2):
                 max_workers += 1
         except Exception as e:
             logging.debug(f"Failed to calculate dynamic workers: {e}")
