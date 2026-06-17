@@ -345,20 +345,22 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
         if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
 
         cpu_count = os.cpu_count() or 1
-        max_workers = cpu_count
+        max_workers = max(1, cpu_count // 2)
+
+        # Default footprint
+        footprint = 1.0 * 1024 * 1024 * 1024
 
         try:
             cpu_usage = psutil.cpu_percent(interval=0.5)
-            mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024) # GB
+            mem_available = psutil.virtual_memory().available
 
-            # Instruction: if below 40% cpu usage and still 1G is free, allocate one process more
-            if cpu_usage < 40 and mem_available > 1.0:
+            if cpu_usage < 40 and mem_available > footprint:
                 max_workers += 1
-                logging.info(f"Dynamic worker allocation: Boosting to {max_workers} processes (CPU: {cpu_usage}%, RAM Free: {mem_available:.2f}GB)")
         except Exception as e:
             logging.debug(f"Failed to calculate dynamic workers: {e}")
 
         executor_class = concurrent.futures.ProcessPoolExecutor
+        mem_before = psutil.virtual_memory().used
         with executor_class(max_workers=max_workers, initializer=silent_worker_init) as executor:
             original_handler = None
             if threading.current_thread() == threading.main_thread():
@@ -366,7 +368,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             try:
                 futures = []
                 conv_cache = {}
-                for sym in symbols_to_bench:
+                instrumented = False
+                for i, sym in enumerate(symbols_to_bench):
                     if sym not in symbol_data_map: continue
                     quote = sym.split('/')[1]
                     if quote not in conv_cache:
@@ -378,7 +381,16 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                                     t_conv = ticker['last']
                             except: pass
                         conv_cache[quote] = t_conv
-                    futures.append(executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device, threshold_conv=conv_cache[quote]))
+                    f = executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device, threshold_conv=conv_cache[quote])
+                    futures.append(f)
+
+                    if not instrumented:
+                         time.sleep(0.5)
+                         mem_after = psutil.virtual_memory().used
+                         diff = max(100 * 1024 * 1024, mem_after - mem_before)
+                         logging.info(f"Instrumented Benchmark process footprint: {diff / (1024*1024):.2f} MB")
+                         instrumented = True
+
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
