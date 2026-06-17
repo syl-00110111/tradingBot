@@ -57,6 +57,7 @@ execution_queue = queue.Queue()
 pending_analysis = set()
 pending_downloads = set()
 last_download_time = {}
+instrumented_mem_footprint = {'analysis': 1.0 * 1024 * 1024 * 1024}
 bot_state = {}
 available_assets = []
 benchmarking_pairs = set()
@@ -372,18 +373,25 @@ class AnalysisWorker(threading.Thread):
         self.config = config
 
     def run(self):
+        global instrumented_mem_footprint
         while not shutdown_event.is_set():
             cpu_count = os.cpu_count() or 1
-            max_workers = cpu_count
+            max_workers = max(1, cpu_count // 2)
+
+            with bot_lock:
+                footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
+
             try:
                 cpu_usage = psutil.cpu_percent(interval=0.1)
-                mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)
-                if cpu_usage < 40 and mem_available > 1.0:
+                mem_available = psutil.virtual_memory().available
+                if cpu_usage < 40 and mem_available > footprint:
                     max_workers += 1
             except: pass
 
             batch = []
-            while len(batch) < max_workers:
+            # Allow at least 1 even if cpu/mem are high
+            batch_limit = max(1, max_workers)
+            while len(batch) < batch_limit:
                 try:
                     batch.append(analysis_queue.get(timeout=0.5))
                 except queue.Empty:
@@ -392,9 +400,10 @@ class AnalysisWorker(threading.Thread):
             if not batch: continue
 
             try:
+                mem_before = psutil.virtual_memory().used
                 with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=silent_worker_init) as process_executor:
                     futures = {}
-                    for item in batch:
+                    for i, item in enumerate(batch):
                         priority, group_id, symbol = item
                         pairs_dict = self.config.get('pairs', {})
                         pair_cfg = pairs_dict.get(symbol, {})
@@ -457,6 +466,16 @@ class AnalysisWorker(threading.Thread):
 
                         f = process_executor.submit(wrapped_analysis_task, symbol, timeframe, tf_secs, df, search_pool, glite, pinfo)
                         futures[f] = item
+
+                        # Instrumentation on first launch
+                        if i == 0 and instrumented_mem_footprint.get('analysis_done') is not True:
+                            time.sleep(0.5) # Wait for process to init
+                            mem_after = psutil.virtual_memory().used
+                            diff = max(100 * 1024 * 1024, mem_after - mem_before) # At least 100MB
+                            with bot_lock:
+                                instrumented_mem_footprint['analysis'] = diff
+                                instrumented_mem_footprint['analysis_done'] = True
+                                logging.info(f"Instrumented Analysis process footprint: {diff / (1024*1024):.2f} MB")
 
                     for f in concurrent.futures.as_completed(futures):
                         p, gid, sym = futures[f]
@@ -798,8 +817,12 @@ def main():
         while not shutdown_event.is_set():
             try:
                 cpu_usage = psutil.cpu_percent(interval=1.0)
-                mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)
-                if cpu_usage < 30 and mem_available > 2.0:
+                mem_available = psutil.virtual_memory().available
+
+                with bot_lock:
+                    footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
+
+                if cpu_usage < 30 and mem_available > (footprint * 2):
                     with bot_lock:
                         if not benchmarking_pairs and config.get('pairs'):
                             all_syms = list(config['pairs'].keys())
