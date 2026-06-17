@@ -51,6 +51,8 @@ from utils import format_price, format_amount, get_base_currency, play_sound, si
 ohlcv_cache_manager = None
 global_pattern_pool = []
 candle_queue = queue.PriorityQueue()
+pending_downloads = set()
+last_download_time = {}
 bot_state = {}
 available_assets = []
 benchmarking_pairs = set()
@@ -76,10 +78,13 @@ class CandleDownloader(threading.Thread):
                 item = candle_queue.get(timeout=1)
                 priority, symbol, timeframe, limit, since = item
 
-                # Check if we can group similar requests?
-                # For now, simple execution
-                fetch_ohlcv_incremental(self.exchange, symbol, timeframe, self.ohlcv_cache_manager, limit=limit, since=since)
-                candle_queue.task_done()
+                try:
+                    fetch_ohlcv_incremental(self.exchange, symbol, timeframe, self.ohlcv_cache_manager, limit=limit, since=since)
+                finally:
+                    with bot_lock:
+                        pending_downloads.discard((symbol, timeframe))
+                        last_download_time[(symbol, timeframe)] = time.time()
+                    candle_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
@@ -117,8 +122,13 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         timeframe = term_cfg.get('timeframe', '5m')
 
         # Request candle update from background downloader
-        priority = 0 if open_positions else 1
-        candle_queue.put((priority, symbol, timeframe, 500, None))
+        with bot_lock:
+            download_key = (symbol, timeframe)
+            now_ts = time.time()
+            if download_key not in pending_downloads and (now_ts - last_download_time.get(download_key, 0) > 30):
+                priority = 0 if open_positions else 1
+                pending_downloads.add(download_key)
+                candle_queue.put((priority, symbol, timeframe, 500, None))
 
         cached = ohlcv_cache_manager.get(symbol, timeframe)
         if not cached:
@@ -136,11 +146,17 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             current_data = bot_state.get(symbol, {})
             current_pattern_id = current_data.get('active_pattern_id')
             pattern_match_ts = current_data.get('pattern_match_ts', 0)
+            last_mc_ts = current_data.get('last_mc_ts', 0)
+            last_mc_score = current_data.get('mc_score', 1.1)
+            cached_sim_candidates = current_data.get('cached_sim_candidates', [])
+            last_processed_ts = current_data.get('last_processed_ts', 0)
 
         latest_row_base = df.iloc[-1]
         candle_ts = latest_row_base['timestamp']
 
-        # Cross-pair pattern matching
+        # Efficiency optimization: only re-process if new data or pattern list changed
+        if candle_ts == last_processed_ts and not benchmarking_pairs:
+             return current_data
         with bot_lock:
             current_global_pool = list(global_pattern_pool)
         search_pool = patterns + current_global_pool; active_patterns = []
@@ -183,26 +199,46 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
         valid_candidates = []
         if candidates:
-            def validate_candidate_mc(c):
-                p = c['pattern']
-                mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
-                mc_engine.set_device(device)
-                temp_cfg = {'strategy': p['strategy'], 'device': device}
-                df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
-                score = mc_engine.validate_strategy(df_mc)
-                hurdle = global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
-                p['mc_score'] = score
-                return c, (score > 1.0 + hurdle)
+            # Check if we should reuse MC scores based on the 5% threshold
+            # Total real-time duration of pattern: length * timeframe_seconds
+            p_len_max = max([len(c['pattern']['prices']) for c in candidates])
+            p_duration_secs = p_len_max * tf_secs
+            spm_threshold_secs = p_duration_secs * 0.05
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), 10)) as mc_executor:
-                mc_futures = [mc_executor.submit(validate_candidate_mc, c) for c in candidates]
-                for f in concurrent.futures.as_completed(mc_futures):
-                    try:
-                        c_res, is_valid = f.result()
-                        if is_valid:
-                            valid_candidates.append(c_res)
-                    except Exception as e:
-                        logging.error(f"Error in MC validation for {symbol}: {e}")
+            can_reuse_mc = (current_pattern_id is not None) and (time.time() - last_mc_ts < spm_threshold_secs)
+
+            if can_reuse_mc and last_mc_score > 0:
+                 # Reuse last score for candidates matching current pattern ID
+                 for c in candidates:
+                     p = c['pattern']
+                     p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
+                     if p_id == current_pattern_id:
+                          p['mc_score'] = last_mc_score
+                          valid_candidates.append(c)
+                 if not valid_candidates: can_reuse_mc = False # Force recalculate if current ID not found
+
+            if not can_reuse_mc:
+                def validate_candidate_mc(c):
+                    p = c['pattern']
+                    mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
+                    mc_engine.set_device(device)
+                    temp_cfg = {'strategy': p['strategy'], 'device': device}
+                    df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
+                    score = mc_engine.validate_strategy(df_mc)
+                    hurdle = global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
+                    p['mc_score'] = score
+                    return c, (score > 1.0 + hurdle)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), 10)) as mc_executor:
+                    mc_futures = [mc_executor.submit(validate_candidate_mc, c) for c in candidates]
+                    for f in concurrent.futures.as_completed(mc_futures):
+                        try:
+                            c_res, is_valid = f.result()
+                            if is_valid:
+                                valid_candidates.append(c_res)
+                        except Exception as e:
+                            logging.error(f"Error in MC validation for {symbol}: {e}")
+                last_mc_ts = time.time()
 
         active_pattern_id = None
         if valid_candidates:
@@ -236,7 +272,13 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: regime_shift = True
 
             if expired or regime_shift:
-                with bot_lock: benchmarking_pairs.add(symbol)
+                p_len = len(active_pattern['prices'])
+                p_duration_secs = p_len * tf_secs
+                spm_threshold_secs = p_duration_secs * 0.05
+
+                # Instruction: only re-benchmark if at least 5% of pattern duration has elapsed
+                if (time.time() - pattern_match_ts) > spm_threshold_secs:
+                    with bot_lock: benchmarking_pairs.add(symbol)
 
             strategy = active_pattern['strategy']
             aggr = active_pattern['aggr']
@@ -265,6 +307,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
                 'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
                 'active_pattern_id': active_pattern_id,
                 'pattern_match_ts': pattern_match_ts,
+                'last_mc_ts': last_mc_ts,
+                'mc_score': active_pattern.get('mc_score', 1.1),
+                'last_processed_ts': candle_ts,
                 'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()}
             }
             return new_data
@@ -316,7 +361,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                 'position': data_manager.get_position(sym),
                 'strategy': 'Benchmarking...', 'aggr': 'N/A', 'bench_profit': 0,
                 'consecutive_buys': 0, 'consecutive_sells': 0, 'last_action': 'WAITING',
-                'scan_attempts': 0, 'next_scan_allowed': 0
+                'scan_attempts': 0, 'next_scan_allowed': 0,
+                'last_mc_ts': 0, 'mc_score': 1.1, 'last_processed_ts': 0
             }
 
     import optimization
