@@ -106,7 +106,7 @@ class MonteCarloEngine:
         """
         if len(df) < 20: return 1.0
 
-        close = df["average"].values
+        close = df["close"].values
         valid_indices = ~np.isnan(close)
         close = close[valid_indices]
 
