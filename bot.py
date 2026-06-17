@@ -26,6 +26,7 @@ import threading
 import signal
 import random
 import concurrent.futures
+import queue
 import torch
 import gc
 from datetime import datetime
@@ -48,6 +49,7 @@ from utils import format_price, format_amount, get_base_currency, play_sound, si
 # Global objects
 ohlcv_cache_manager = None
 global_pattern_pool = []
+candle_queue = queue.PriorityQueue()
 bot_state = {}
 available_assets = []
 benchmarking_pairs = set()
@@ -59,6 +61,24 @@ pending_asset_update = False
 
 console = Console()
 ui = dashboard.DashboardUI(console)
+
+class CandleDownloader(threading.Thread):
+    def __init__(self, exchange, ohlcv_cache_manager):
+        super().__init__(daemon=True)
+        self.exchange = exchange
+        self.ohlcv_cache_manager = ohlcv_cache_manager
+
+    def run(self):
+        while not shutdown_event.is_set():
+            try:
+                # Priority, Symbol, Timeframe, Limit, Since
+                priority, symbol, timeframe, limit, since = candle_queue.get(timeout=1)
+                fetch_ohlcv_incremental(self.exchange, symbol, timeframe, self.ohlcv_cache_manager, limit=limit, since=since)
+                candle_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logging.error(f"CandleDownloader error: {e}")
 
 def update_available_assets_live(exchange, config):
     global pending_asset_update
@@ -91,11 +111,15 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
         timeframe = term_cfg.get('timeframe', '5m')
 
-        ohlcv_data = fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=500)
-        if not ohlcv_data or not isinstance(ohlcv_data, tuple) or not ohlcv_data[0]:
+        # Request candle update from background downloader
+        priority = 0 if open_positions else 1
+        candle_queue.put((priority, symbol, timeframe, 500, None))
+
+        cached = ohlcv_cache_manager.get(symbol, timeframe)
+        if not cached:
             return None
 
-        ohlcv = ohlcv_data[0]
+        ohlcv = cached[-500:]
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         if df.empty:
             return None
@@ -392,7 +416,7 @@ def main():
     global ohlcv_cache_manager
     migrate_fresh_files_to_archive()
     load_from_archive()
-    ohlcv_cache_manager = OHLCVCacheManager()
+    ohlcv_cache_manager = OHLCVCacheManager(mode=args.mode)
 
     parser = argparse.ArgumentParser(description='Cryptocurrencies Multiplatform Trading Bot')
     parser.add_argument('--mode', choices=['live', 'simulation', 'backtest', 'benchmark', 'sell', 'balance'], default='simulation')
@@ -501,6 +525,10 @@ def main():
         try:
             available_assets[:] = trading_engine.get_sellable_assets(exchange, config)
         except: pass
+
+    # Start candle downloader
+    downloader = CandleDownloader(exchange, ohlcv_cache_manager)
+    downloader.start()
 
     # Silence ALL other handlers during Dashboard execution, keeping ONLY DashboardHandler
     all_other_handlers = [h for h in logging.root.handlers if not isinstance(h, dashboard.DashboardHandler)]

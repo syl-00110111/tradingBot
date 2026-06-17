@@ -256,10 +256,18 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
         symbols = symbols_to_process
     else:
         symbols = all_pairs
-        if priority_symbols:
-            # Move priority symbols to the front
-            priority_set = set(priority_symbols)
-            symbols = [s for s in symbols if s.split('/')[0] in priority_set] + [s for s in symbols if s.split('/')[0] not in priority_set]
+    # Prioritize symbols with open positions
+    open_pos_symbols = []
+    if data_manager:
+        open_pos_symbols = [s for s, pos in data_manager.get_open_positions().items() if pos]
+
+    if open_pos_symbols:
+        priority_set = set(open_pos_symbols)
+        symbols = [s for s in symbols if s in priority_set] + [s for s in symbols if s not in priority_set]
+    elif priority_symbols:
+        # Move priority symbols to the front
+        priority_set = set(priority_symbols)
+        symbols = [s for s in symbols if s.split('/')[0] in priority_set] + [s for s in symbols if s.split('/')[0] not in priority_set]
     base_bet_curr = get_base_currency(None, config)
 
     cache_mgr = CacheManager()
@@ -274,11 +282,17 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
         try:
             cached_patterns = cache_mgr.get(sym, term_to_test)
             best_cached = None
+            # If we have cached patterns, we MUST retry them on new candles if possible
+            # BUT we still prioritize symbols without ANY patterns or with old ones.
+
+            force_refresh = False
             if cached_patterns:
                 best_cached = cached_patterns[0]
                 now_ts = time.time()
-                # Use a longer cache validity (7 days) for benchmarks
-                if now_ts - best_cached.get('last_bench_ts', 0) < (3600 * 24 * 7):
+                # If patterns are older than 1 day, let's try to refresh them with priority to positions
+                if now_ts - best_cached.get('last_bench_ts', 0) > (3600 * 24):
+                    force_refresh = True
+                else:
                     return sym, None, cached_patterns, best_cached
 
             limit = 20000 if term_to_test == 'short' else 40000

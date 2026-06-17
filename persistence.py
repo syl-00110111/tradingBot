@@ -326,9 +326,11 @@ class CacheManager:
         self._save()
 
 class OHLCVCacheManager:
-    def __init__(self, directory=OHLCV_DIR):
+    def __init__(self, directory=OHLCV_DIR, mode='simulation'):
         self.directory = directory
-        if not os.path.exists(self.directory):
+        self.mode = mode
+        self.memory_cache = {}
+        if self.mode != 'live' and not os.path.exists(self.directory):
             os.makedirs(self.directory, exist_ok=True)
 
     def _get_path(self, symbol, timeframe):
@@ -336,17 +338,32 @@ class OHLCVCacheManager:
         return os.path.join(self.directory, f"{safe_sym}_{timeframe}.pkl")
 
     def get(self, symbol, timeframe):
+        key = (symbol, timeframe)
+        if key in self.memory_cache:
+            return self.memory_cache[key]
+
+        if self.mode == 'live':
+            return None
+
         path = self._get_path(symbol, timeframe)
         with persistence_lock:
             if os.path.exists(path):
                 try:
                     with open(path, 'rb') as f:
-                        return pickle.load(f)
+                        data = pickle.load(f)
+                        self.memory_cache[key] = data
+                        return data
                 except Exception as e:
                     logging.error(f"Failed to load OHLCV cache for {symbol}: {e}")
         return None
 
     def set(self, symbol, timeframe, data):
+        key = (symbol, timeframe)
+        self.memory_cache[key] = data
+
+        if self.mode == 'live':
+            return
+
         path = self._get_path(symbol, timeframe)
         with persistence_lock:
             try:

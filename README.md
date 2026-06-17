@@ -13,6 +13,8 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **Market Regime Detection**: Utilizes volatility-based switching between Mean-Reversion and Trend-Following (*Baur & Dimpfl, 2021*).
 - **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for every signal, penalizing high-risk setups.
 - **Adaptive Scanning & Backoff**: Automatically adjusts scanning frequency and timeframes (short to long) based on market pattern availability, preventing redundant API calls and processing.
+- **Priority Candle Downloader**: Dedicated background thread with a priority queue for OHLCV data, ensuring that pairs with open positions are updated first.
+- **Memory-Optimized Live Mode**: In live mode, OHLCV data is kept in memory to prevent unnecessary disk I/O and paging issues.
 
 ---
 
