@@ -12,6 +12,7 @@ import gc
 import pandas as pd
 import numpy as np
 import torch
+import psutil
 import matplotlib.pyplot as plt
 from rich.console import Console
 
@@ -342,8 +343,23 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
              raise KeyboardInterrupt
 
         if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
+
+        cpu_count = os.cpu_count() or 1
+        max_workers = cpu_count
+
+        try:
+            cpu_usage = psutil.cpu_percent(interval=0.5)
+            mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024) # GB
+
+            # Instruction: if below 40% cpu usage and still 1G is free, allocate one process more
+            if cpu_usage < 40 and mem_available > 1.0:
+                max_workers += 1
+                logging.info(f"Dynamic worker allocation: Boosting to {max_workers} processes (CPU: {cpu_usage}%, RAM Free: {mem_available:.2f}GB)")
+        except Exception as e:
+            logging.debug(f"Failed to calculate dynamic workers: {e}")
+
         executor_class = concurrent.futures.ProcessPoolExecutor
-        with executor_class(max_workers=os.cpu_count() or 1, initializer=silent_worker_init) as executor:
+        with executor_class(max_workers=max_workers, initializer=silent_worker_init) as executor:
             original_handler = None
             if threading.current_thread() == threading.main_thread():
                 original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)

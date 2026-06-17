@@ -6,3 +6,4 @@ readchar
 matplotlib
 torch
 py-cpuinfo
+psutil
