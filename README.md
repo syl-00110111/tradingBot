@@ -106,6 +106,7 @@ The bot is designed with the following empirical principles in mind:
 To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to trigger the entire dependency upgrade process.
 
 ### Execution Modes
+- **Virtual wallet and positions, NO API NEEDED, market values real**: `python bot.py --mode virtual --wallet "100 USDC"`
 - **Simulation**: `python bot.py --mode simulation --term short`
 - **Live**: `python bot.py --mode live --term medium`
 - **Benchmark**: `python bot.py --mode benchmark --every-symbol`
