@@ -364,6 +364,9 @@ class OHLCVCacheManager:
         if self.mode == 'live':
             return
 
+        self.flush_to_disk(symbol, timeframe, data)
+
+    def flush_to_disk(self, symbol, timeframe, data):
         path = self._get_path(symbol, timeframe)
         with persistence_lock:
             try:
@@ -373,6 +376,11 @@ class OHLCVCacheManager:
                 archiver.trigger()
             except Exception as e:
                 logging.error(f"Failed to save OHLCV cache for {symbol}: {e}")
+
+    def flush_all(self):
+        logging.info("Forcing flush of all memory-cached candles to disk...")
+        for (symbol, timeframe), data in self.memory_cache.items():
+            self.flush_to_disk(symbol, timeframe, data)
 
 class MonteCarloCacheManager:
     def __init__(self, directory=os.path.join(CACHE_DIR, 'mc')):
