@@ -3,8 +3,12 @@
 
 import logging
 import time
+import pandas as pd
+import torch
 from utils import format_price, format_amount, get_base_currency, play_sound
 from exchange_handler import MockExchange
+from monte_carlo import MonteCarloEngine
+from indicators import get_signals
 
 class TradingEngine:
     def __init__(self, config):
@@ -54,21 +58,27 @@ class TradingEngine:
         """Perform Monte Carlo sanity check before trade execution."""
         if config.get('mode') == 'sell': return True # Skip for manual sell mode
         try:
-            from monte_carlo import MonteCarloEngine
-            from indicators import get_signals
-            import pandas as pd
-            import torch
-
-            # Use last 100 candles for a quick sanity check
-            # We assume 'last_20_candles' or recent OHLCV is available in bot_state or can be fetched
-            # For simplicity and speed, we use the strategy already identified
             strategy = data.get('strategy')
             if not strategy: return True
 
-            # Since we are in the trading loop, we should ideally have the full DF.
-            # If not, we might need to rely on the score from analyze_pair.
-            # For now, let's look for 'mc_score' or similar in data
-            mc_score = data.get('mc_score', 1.1)
+            last_100 = data.get('last_100_candles')
+            if not last_100 or not last_100.get('prices'):
+                return True
+
+            df_mc = pd.DataFrame(last_100)
+            if 'close' not in df_mc.columns:
+                df_mc['close'] = df_mc['prices']
+            if 'volume' not in df_mc.columns:
+                df_mc['volume'] = df_mc['volumes']
+
+            device = config.get('device', torch.device('cpu'))
+            mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
+            mc_engine.set_device(device)
+
+            temp_cfg = {'strategy': strategy, 'device': device}
+            df_mc = get_signals(df_mc, temp_cfg, is_backtest=False)
+
+            mc_score = mc_engine.validate_strategy(df_mc)
             hurdle = config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
 
             if mc_score > 1.0 + hurdle:
