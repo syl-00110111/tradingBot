@@ -109,7 +109,8 @@ def get_common_indicators(df, device=torch.device('cpu')):
     if device.type == 'cpu' and torch.backends.mkldnn.is_available():
         torch.backends.mkldnn.enabled = True
 
-    use_acceleration = (device.type not in ['cpu']) or (device.type == 'cpu' and torch.backends.mkldnn.enabled)
+    # mkldnn is good for some operations but torch JIT loops for EMA are slow on CPU
+    use_acceleration = (device.type not in ['cpu'])
 
     # Only calculate if missing to save CPU during benchmarking
     missing_basics = any(c not in df.columns for c in ['ema_f', 'ema_s', 'macd_val', 'rsi', 'adx'])

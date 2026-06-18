@@ -845,8 +845,9 @@ def main():
         pattern_manager = PatternManager()
         engine = TradingEngine(config)
 
-        api_key = api_creds.get('api_key') or config.get('api_key')
-        api_secret = api_creds.get('api_secret') or config.get('api_secret')
+        # Priority: Environment Variables -> api.json -> config.json
+        api_key = os.environ.get('api_key') or api_creds.get('api_key') or config.get('api_key')
+        api_secret = os.environ.get('api_secret') or api_creds.get('api_secret') or config.get('api_secret')
         market_type = api_creds.get('market', config.get('market', 'spot'))
         ex_class = EXCHANGE_MAPPING.get(args.exchange, MockExchange)
 

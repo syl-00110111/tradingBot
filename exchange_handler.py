@@ -4,6 +4,7 @@
 import ccxt
 import ccxt.pro as ccxtpro
 import asyncio
+import os
 import time
 import logging
 import threading
@@ -97,6 +98,21 @@ class CCXTExchange(ExchangeInterface):
             'options': {'poolSize': 50, 'adjustForTimeDifference': True, 'defaultType': market_type},
             'session': create_ccxt_session()
         }
+
+        # Proxy support: prioritizes standard env vars, then 'proxy' var
+        # Support full URL in 'proxy' or fallback to socks5://{proxy}:1080
+        proxy_url = os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY') or os.environ.get('proxy')
+        if proxy_url:
+            if '://' not in proxy_url:
+                proxy_url = f'socks5://{proxy_url}'
+                if ':' not in proxy_url.split('://')[1]:
+                    proxy_url += ':1080'
+
+            default_options['proxies'] = {
+                'http': proxy_url,
+                'https': proxy_url,
+            }
+
         if options: default_options.update(options)
         self.exchange = ThrottledExchange(ex_class(default_options))
 
@@ -287,6 +303,12 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, li
         try:
             target_limit = limit if limit else 500
             fetch_since = int(since) if since is not None else None
+
+            # If we need deep history and don't have 'since', calculate it to avoid small default fetches
+            if fetch_since is None and target_limit > 1000:
+                tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+                duration_ms = target_limit * tf_map.get(timeframe, 300) * 1000
+                fetch_since = int(time.time() * 1000 - duration_ms)
 
             # Optimization: Try to fetch as many as possible in fewer calls
             while len(cached_data) < target_limit:
