@@ -36,7 +36,7 @@ class TradingEngine:
                 "ema_fast": 10, "ema_slow": 30,
                 "rsi_buy": 40, "rsi_sell": 60,
             })
-        elif volatility > self.config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015):
+        elif volatility > self.config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01):
             settings.update({
                 "ema_fast": 30, "ema_slow": 100,
                 "rsi_buy": 20, "rsi_sell": 80,

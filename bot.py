@@ -315,7 +315,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         global_config_lite = {
             'device': global_config.get('device'),
             'mc_hurdle': global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015),
-            'min_profit': global_config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015)
+            'min_profit': global_config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
         }
 
         pattern_info = {
@@ -837,12 +837,13 @@ def main():
 
         api_key = api_creds.get('api_key') or config.get('api_key')
         api_secret = api_creds.get('api_secret') or config.get('api_secret')
+        market_type = api_creds.get('market', config.get('market', 'spot'))
         ex_class = EXCHANGE_MAPPING.get(args.exchange, MockExchange)
 
-        if args.mode == 'live': exchange = ex_class(api_key, api_secret)
-        elif args.mode == 'simulation': exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange)
+        if args.mode == 'live': exchange = ex_class(api_key, api_secret, market_type=market_type)
+        elif args.mode == 'simulation': exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange, market_type=market_type)
         elif args.mode == 'virtual':
-            exchange = MockExchange(exchange_type=args.exchange)
+            exchange = MockExchange(exchange_type=args.exchange, market_type=market_type)
             if args.wallet:
                 try:
                     amount, asset = args.wallet.split()
@@ -872,17 +873,26 @@ def main():
         except: pass
 
     # Start Websocket manager if not in backtest/sell/balance mode
+    ws_started = False
     if args.mode in ['live', 'simulation', 'virtual'] and args.exchange != 'mock':
         from exchange_handler import AsyncExchangeManager
         timeframes = [config.get('expected_profit_terms', {}).get(t, {}).get('timeframe', '5m') for t in ['short', 'medium', 'long']]
+        market_type = api_creds.get('market', config.get('market', 'spot'))
         async_manager = AsyncExchangeManager(
             args.exchange, api_key, api_secret,
             list(config['pairs'].keys()),
             list(set(timeframes)),
-            bot_state, bot_lock, ohlcv_cache_manager, shutdown_event
+            bot_state, bot_lock, ohlcv_cache_manager, shutdown_event,
+            market_type=market_type
         )
-        async_manager.start()
-    else:
+        if async_manager.is_supported:
+            async_manager.start()
+            ws_started = True
+            logging.info(f"Websockets enabled for {args.exchange} ({market_type}).")
+        else:
+            logging.warning(f"Websockets not supported by ccxt.pro for {args.exchange}. Falling back to polling.")
+
+    if not ws_started:
         # Start candle downloader fallback
         downloader = CandleDownloader(exchange, ohlcv_cache_manager)
         downloader.start()
@@ -930,18 +940,18 @@ def main():
                 live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
                 run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=ui)
 
-        try:
-            threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
-            threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
-            while not shutdown_event.is_set():
-                now_ts = time.time()
+            try:
+                threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
+                threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
+                while not shutdown_event.is_set():
+                    now_ts = time.time()
 
-                live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
-                time.sleep(0.5)
-        finally:
-            # Restore console logging on exit
-            for h in all_other_handlers:
-                logging.root.addHandler(h)
+                    live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
+                    time.sleep(0.5)
+            finally:
+                # Restore console logging on exit
+                for h in all_other_handlers:
+                    logging.root.addHandler(h)
 
     if ohlcv_cache_manager:
         ohlcv_cache_manager.flush_all()

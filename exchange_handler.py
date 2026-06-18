@@ -12,7 +12,7 @@ import pandas as pd
 from requests.adapters import HTTPAdapter
 
 class ThrottledExchange:
-    def __init__(self, exchange, delay_ms=42):
+    def __init__(self, exchange, delay_ms=2):
         self.exchange = exchange
         self.base_delay_s = delay_ms / 1000.0
         self.delay_s = self.base_delay_s
@@ -53,12 +53,14 @@ class ThrottledExchange:
         if callable(attr):
             def throttled_wrapper(*args, **kwargs):
                 retries = 3
+                last_error = None
                 while retries > 0:
                     try:
                         self._wait()
                         return attr(*args, **kwargs)
                     except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
                         retries -= 1
+                        last_error = e
                         wait_time = float(getattr(e, 'retry_after', 5)) or 5
                         logging.warning(f"Rate limit exceeded. Waiting {wait_time}s... ({retries} retries left)")
                         time.sleep(wait_time)
@@ -67,6 +69,8 @@ class ThrottledExchange:
                             self.max_burst = max(1, self.max_burst - 1)
                     except Exception as e:
                         raise e
+                if last_error:
+                    raise last_error
                 return None
             return throttled_wrapper
         return attr
@@ -86,11 +90,11 @@ class ExchangeInterface:
     def fetch_trading_fee(self, symbol): raise NotImplementedError
 
 class CCXTExchange(ExchangeInterface):
-    def __init__(self, exchange_id, api_key, api_secret, options=None):
+    def __init__(self, exchange_id, api_key, api_secret, options=None, market_type='spot'):
         ex_class = getattr(ccxt, exchange_id)
         default_options = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'options': {'poolSize': 50, 'adjustForTimeDifference': True},
+            'options': {'poolSize': 50, 'adjustForTimeDifference': True, 'defaultType': market_type},
             'session': create_ccxt_session()
         }
         if options: default_options.update(options)
@@ -165,60 +169,60 @@ class CCXTExchange(ExchangeInterface):
             logging.error(f"Error during {side} order on {symbol}: {e}"); return None
 
 class BinanceExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('binance', api_key, api_secret, options={'options': {'defaultType': 'spot', 'poolSize': 50}})
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('binance', api_key, api_secret, options={'options': {'defaultType': market_type, 'poolSize': 50}}, market_type=market_type)
 
 class KrakenExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('kraken', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('kraken', api_key, api_secret, market_type=market_type)
 
 class BitvavoExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('bitvavo', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('bitvavo', api_key, api_secret, market_type=market_type)
 
 class CoinbaseExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('coinbaseexchange', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('coinbaseexchange', api_key, api_secret, market_type=market_type)
 
 class GeminiExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('gemini', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('gemini', api_key, api_secret, market_type=market_type)
 
 class MercadoBitcoinExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('mercado', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('mercado', api_key, api_secret, market_type=market_type)
 
 class BitsoExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('bitso', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('bitso', api_key, api_secret, market_type=market_type)
 
 class BitstampExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('bitstamp', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('bitstamp', api_key, api_secret, market_type=market_type)
 
 class WhiteBITExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('whitebit', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('whitebit', api_key, api_secret, market_type=market_type)
 
 class IndodaxExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('indodax', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('indodax', api_key, api_secret, market_type=market_type)
 
 class UpbitExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('upbit', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('upbit', api_key, api_secret, market_type=market_type)
 
 class LunoExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('luno', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('luno', api_key, api_secret, market_type=market_type)
 
 class IndependentReserveExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('independentreserve', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('independentreserve', api_key, api_secret, market_type=market_type)
 
 class BTCMarketsExchange(CCXTExchange):
-    def __init__(self, api_key, api_secret):
-        super().__init__('btcmarkets', api_key, api_secret)
+    def __init__(self, api_key, api_secret, market_type='spot'):
+        super().__init__('btcmarkets', api_key, api_secret, market_type=market_type)
 
 
 def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=500, since=None):
@@ -326,7 +330,8 @@ EXCHANGE_MAPPING = {
 }
 
 class AsyncExchangeManager:
-    def __init__(self, exchange_id, api_key, api_secret, symbols, timeframes, bot_state, bot_lock, ohlcv_cache_manager, shutdown_event):
+    def __init__(self, exchange_id, api_key, api_secret, symbols, timeframes, bot_state, bot_lock, ohlcv_cache_manager, shutdown_event, market_type='spot'):
+        self.is_supported = exchange_id in ccxtpro.exchanges
         self.exchange_id = exchange_id
         self.api_key = api_key
         self.api_secret = api_secret
@@ -336,6 +341,7 @@ class AsyncExchangeManager:
         self.bot_lock = bot_lock
         self.ohlcv_cache_manager = ohlcv_cache_manager
         self.external_shutdown_event = shutdown_event
+        self.market_type = market_type
         self.loop = None
         self.exchange = None
 
@@ -360,7 +366,7 @@ class AsyncExchangeManager:
             'enableRateLimit': True,
         }
         if self.exchange_id == 'binance':
-            options['options'] = {'defaultType': 'spot'}
+            options['options'] = {'defaultType': self.market_type}
 
         self.exchange = ex_class(options)
 
@@ -426,19 +432,20 @@ class AsyncExchangeManager:
                 else: break
 
 class MockExchange(ExchangeInterface):
-    def __init__(self, api_key=None, api_secret=None, exchange_type='binance'):
+    def __init__(self, api_key=None, api_secret=None, exchange_type='binance', market_type='spot'):
         self.balance = {'USDT': 1000.0, 'USDC': 1000.0}
         self.ohlcv_data = {}
         self.real_exchange = None
         self.fee_rate = 0.001
         self.markets = {}
         self.exchange_type = exchange_type
+        self.market_type = market_type
         self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
                 ex_class = EXCHANGE_MAPPING.get(exchange_type, BinanceExchange)
-                self.real_exchange = ex_class(api_key, api_secret)
-                logging.info(f"Mock initialized with real {exchange_type} balance discovery (deferred)")
+                self.real_exchange = ex_class(api_key, api_secret, market_type=market_type)
+                logging.info(f"Mock initialized with real {exchange_type} ({market_type}) balance discovery (deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")
 
     def _init_balance(self):
