@@ -56,7 +56,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config)
     plt.close()
 
 def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=True, return_full_df=False, copy_df=True, ohlcv_cache_manager=None):
-    """Core backtesting simulation logic."""
+    """Core backtesting simulation logic optimized for speed."""
     fee_rate = 0.001
     if exchange:
         try:
@@ -64,52 +64,42 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         except Exception:
             pass
 
-    if engine and df_in is not None and not df_in.empty:
-         base_df = get_common_indicators(df_in.copy(), device if device is not None else torch.device("cpu"))
-         latest = base_df.iloc[-1]
-         aggr_settings = engine.get_dynamic_settings(latest.get('adx', 0), latest.get('volatility', 0))
-    else:
-         aggr_settings = {
-             "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-         }
-
-    mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
-    mc.set_device(device if device is not None else torch.device("cpu"))
-
     term_settings = config.get('expected_profit_terms', {}).get(term, {})
     if not term_settings:
         return None
-
-    test_config = aggr_settings.copy()
-    test_config['strategy'] = strategy
     timeframe = term_settings.get('timeframe', '5m')
 
     if df_in is None:
         try:
             ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=limit)
+            if not ohlcv: return None
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         except Exception as e:
-            console.print(f"[red]Error fetching OHLCV for {symbol} ({timeframe}): {e}[/]")
+            logging.error(f"Error fetching OHLCV for {symbol} ({timeframe}): {e}")
             return None
-
-        if not ohlcv:
-            console.print(f"[red]No OHLCV returned for {symbol} ({timeframe}).[/]")
-            return None
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     else:
         df = df_in.copy() if copy_df else df_in
 
+    if engine and not df.empty:
+         # Use pre-calculated indicators if available for dynamic settings
+         latest = df.iloc[-1]
+         adx_v = latest.get('adx', 0)
+         vol_v = latest.get('volatility', 0)
+         aggr_settings = engine.get_dynamic_settings(adx_v, vol_v)
+    else:
+         aggr_settings = {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9}
+
     if 'buy_signal' not in df.columns:
         try:
-            test_config['device'] = device if device is not None else torch.device('cpu')
+            test_config = aggr_settings.copy()
+            test_config.update({'strategy': strategy, 'device': device or torch.device('cpu')})
             df = get_signals(df, test_config, is_backtest=True)
         except Exception as e:
-            if exchange is not None:
-                 console.print(f"[red]Error calculating signals for {symbol}: {e}[/]")
+            logging.error(f"Error calculating signals for {symbol}: {e}")
             return None
 
-    if df is None or df.empty:
-        return None
+    if df is None or df.empty: return None
 
     eval_window_base = term_settings.get('eval_candles', 60)
     max_rand = max(1, int(eval_window_base * 0.1))
@@ -120,14 +110,13 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     balance = 100.0
     position = None
     trades = []
-    equity_curve = []
 
-    for i in range(len(df)):
-        if i < start_idx:
-            equity_curve.append(balance)
-            continue
+    # Optimized loop: only iterate over the evaluation window
+    eval_part = df.iloc[start_idx:]
+    equity_curve = [balance] * start_idx
 
-        row = df.iloc[i]
+    for i in range(len(eval_part)):
+        row = eval_part.iloc[i]
         price = row['close']
 
         if position and row['sell_signal']:
@@ -150,9 +139,11 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
 
         equity_curve.append(balance + (position['amount'] * price if position else 0))
 
-    total_profit = equity_curve[-1] - equity_curve[start_idx] if len(equity_curve) > start_idx else 0
+    total_profit = equity_curve[-1] - equity_curve[start_idx]
 
     if not skip_mc:
+        mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20) # Low sims for benchmark speed
+        mc.set_device(device or torch.device("cpu"))
         mc_score = mc.validate_strategy(df)
         total_profit *= mc_score
     else:
@@ -160,35 +151,23 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
 
     wins = [t for t in trades if t['profit'] > 0]
     win_rate = len(wins) / len(trades) if trades else 0
-
     equity_series = pd.Series(equity_curve)
     max_dd = (equity_series.cummax() - equity_series).max() / equity_series.cummax().max() if not equity_series.empty else 0
 
-    eval_df = df.iloc[start_idx:] if start_idx < len(df) else df.iloc[-1:]
-    start_time_dt = eval_df['timestamp'].iloc[0]
-    end_time_dt = eval_df['timestamp'].iloc[-1]
+    start_time_dt = eval_part['timestamp'].iloc[0]
+    end_time_dt = eval_part['timestamp'].iloc[-1]
 
     latest = df.iloc[-1]
-    tech_state = {
-        'rsi': float(latest.get('rsi', 50)),
-        'adx': float(latest.get('adx', 0)),
-        'volatility': float(latest.get('volatility', 0)),
-        'ema_f': float(latest.get('ema_f', 0)),
-        'ema_s': float(latest.get('ema_s', 0))
-    }
-
     return {
-        'df': df,
-        'profit': total_profit,
-        'profit_raw': total_profit,
-        'win_rate': win_rate,
-        'max_dd': max_dd,
-        'trades_count': len(trades),
-        'start_time': start_time_dt.strftime("%Y-%m-%d %H:%M"),
-        'end_time': end_time_dt.strftime("%Y-%m-%d %H:%M"),
-        'start_ts': start_time_dt.timestamp(),
-        'prices': eval_df['close'].tolist(), 'volumes': eval_df['volume'].tolist(),
-        'tech_state': tech_state,
+        'df': df, 'profit': total_profit, 'win_rate': win_rate, 'max_dd': max_dd,
+        'trades_count': len(trades), 'start_time': start_time_dt.strftime("%Y-%m-%d %H:%M"),
+        'end_time': end_time_dt.strftime("%Y-%m-%d %H:%M"), 'start_ts': start_time_dt.timestamp(),
+        'prices': eval_part['close'].tolist(), 'volumes': eval_part['volume'].tolist(),
+        'tech_state': {
+            'rsi': float(latest.get('rsi', 50)), 'adx': float(latest.get('adx', 0)),
+            'volatility': float(latest.get('volatility', 0)), 'ema_f': float(latest.get('ema_f', 0)),
+            'ema_s': float(latest.get('ema_s', 0))
+        },
         'equity_curve': equity_curve if return_full_df else []
     }
 
@@ -233,11 +212,18 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     now_ts = time.time()
     patterns = []
 
-    df_with_common = get_common_indicators(df_in.copy(), device)
+    # Calculate basics once
+    df_base = get_common_indicators(df_in, device)
+
+    # Pre-drop signals to avoid inter-strategy leakage
+    base_cols = [c for c in df_base.columns if c not in ['buy_signal', 'sell_signal', 'buy_candidate', 'sell_candidate', 'tendency']]
+    df_base = df_base[base_cols]
 
     for strategy in strategies:
+        # Each strategy gets a fresh copy of indicators but no signals
+        df_strat = df_base.copy()
         for aggr in aggrs:
-            p = run_benchmark_for_strategy(symbol, strategy, config, term_to_test, aggr, df_with_common, engine, device, eval_window, profit_threshold, now_ts)
+            p = run_benchmark_for_strategy(symbol, strategy, config, term_to_test, aggr, df_strat, engine, device, eval_window, profit_threshold, now_ts)
             if p: patterns.append(p)
 
     patterns.sort(key=lambda x: x['profit'], reverse=True)
@@ -304,7 +290,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 else:
                     return sym, None, cached_patterns, best_cached
 
-            limit = 20000 if term_to_test == 'short' else 40000
+            # Reduced limit for faster discovery (still plenty for technical indicators)
+            limit = 5000 if term_to_test == 'short' else 10000
             ohlcv, _ = fetch_ohlcv_incremental(exchange, sym, timeframe, ohlcv_cache_manager, limit=limit)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -314,7 +301,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             logging.error(f"Error preparing {sym}: {e}")
             return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Increased max_workers for faster parallel historical data fetching
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         futures = {executor.submit(fetch_and_validate, sym): sym for sym in symbols}
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             res = future.result()
@@ -345,7 +333,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
         if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
 
         cpu_count = os.cpu_count() or 1
-        max_workers = max(1, cpu_count // 2)
+        # Increased workers to fully utilize CPU during benchmark
+        max_workers = max(1, cpu_count - 1)
 
         # Default footprint
         footprint = 1.0 * 1024 * 1024 * 1024
