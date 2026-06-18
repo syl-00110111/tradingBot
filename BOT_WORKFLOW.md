@@ -50,11 +50,11 @@ Real-time trading on supported exchanges (Binance, Kraken, Bitvavo, etc.).
 `main()` → **Auto-Optimization** (Full Benchmark) → `trading_thread_func` (Worker Initialization)
 
 ### Parallel Queued Architecture
-The bot uses a multi-threaded queued system for maximum throughput and reliability:
-1. **Candle Downloader**: High-priority sequential queue for OHLCV data.
-2. **Analysis Workers**: Dynamic pool of threads (scaled by CPU/RAM) that perform technical analysis and SPM matching.
+The bot uses a hybrid multi-threaded and multi-processed queued system for maximum throughput and reliability:
+1. **Candle Downloader**: High-priority sequential queue or WebSocket streams for OHLCV data.
+2. **Analysis Workers**: Multi-threaded pool that offloads heavy technical calculations and Monte Carlo simulations to a dynamic `ProcessPoolExecutor` (scaled by CPU/RAM).
 3. **Execution Worker**: Single-threaded consumer that handles trade execution to ensure order consistency and balance safety.
-4. **Benchmark Worker**: Background task that refreshes success patterns without blocking the trading loop.
+4. **Benchmark Worker**: Dynamic background task that refreshes success patterns using available system resources without blocking the live trading loop.
 
 ### Process Workflow
 1. **Initialization**: Syncs existing positions and starts the background worker threads.
@@ -89,8 +89,9 @@ Functional equivalent of Live mode but with virtual execution.
 ## 5. Key Algorithms & Parameters
 
 ### Success Pattern Matching (SPM)
-- **Pearson Weight**: 0.7 (Shape)
-- **Euclidean Weight**: 0.3 (RSI/ADX State)
+- **Price Shape Weight**: 0.5 (Pearson correlation)
+- **Volume Shape Weight**: 0.2 (Pearson correlation)
+- **Technical State Weight**: 0.3 (RSI/ADX Euclidean distance)
 - **Similarity Threshold**: 0.70 (70%)
 
 ### Monte Carlo Engine

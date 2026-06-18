@@ -33,8 +33,15 @@ This bot implements strategies and logic recommended by leading empirical studie
 ---
 
 ## 📈 Supported Strategies
-The bot features 30+ distinct trading strategies, including:
-`moving_averages`, `ichimoku_cloud`, `parabolic_sar`, `rsi_support_resistance`, `bollinger_bands`, `macd_range`, `breakout_volume`, `donchian_channels`, `atr_breakout`, `stochastic_rsi`, `williams_r`, `vwap_momentum`, `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`, `macd_bollinger_bands`, `double_ema`, `double_ema_macd_rsi`, `scientific_ensemble`, and various Monte Carlo based approaches.
+The bot features 35+ distinct trading strategies, including:
+
+- **Trend Following**: `simple_ema`, `simple_sma`, `moving_closes`, `ichimoku_cloud`, `parabolic_sar`, `double_ema`, `double_ema_macd_rsi`, `adx_trend_strength`, `halving_cycle_proxy`.
+- **Mean Reversion & Range**: `rsi_support_resistance`, `bollinger_bands`, `macd_range`, `macd_bollinger_bands`, `pairs_trading_proxy`.
+- **Breakout**: `breakout_volume`, `donchian_channels`, `atr_breakout`, `listing_surge_proxy`.
+- **Momentum**: `stochastic_rsi`, `williams_r`, `vwap_momentum`, `sentiment_momentum_proxy`.
+- **Scalping & Order Flow**: `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`.
+- **Monte Carlo Based**: `mc_mean_reversion`, `mc_momentum`, `mc_dynamic_allocation`, `mc_market_making`, `mc_stop_loss_eval`, `mc_options_pricing`.
+- **Advanced Proxies**: `whale_detection_proxy`, `pump_dump_proxy`, `market_regime_proxy`, `scientific_ensemble`, `liquidation_cascade_proxy`, `mvrv_proxy`.
 
 ---
 
