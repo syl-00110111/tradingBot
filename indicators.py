@@ -96,6 +96,11 @@ STRATEGIES = [
     'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy'
 ]
 
+CORE_STRATEGIES = [
+    'simple_ema', 'macd_range', 'rsi_support_resistance',
+    'bollinger_bands', 'stochastic_rsi', 'adx_trend_strength'
+]
+
 # Global MC engine for reuse
 _mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
 

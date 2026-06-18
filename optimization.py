@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from rich.console import Console
 
 from utils import format_price, format_amount, parse_base_bet, get_base_currency, silent_worker_init
-from indicators import get_signals, get_common_indicators, STRATEGIES
+from indicators import get_signals, get_common_indicators, STRATEGIES, CORE_STRATEGIES
 from exchange_handler import fetch_ohlcv_incremental
 from monte_carlo import MonteCarloEngine
 from persistence import CacheManager
@@ -235,7 +235,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
     term_cfg = terms_cfg.get(term_to_test, {})
     timeframe = term_cfg.get('timeframe', '5m')
 
-    strategies = STRATEGIES
+    strategies = CORE_STRATEGIES
     aggrs = ['balanced']
 
     all_pairs = list(config.get('pairs', {}).keys())
@@ -291,7 +291,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                     return sym, None, cached_patterns, best_cached
 
             # Reduced limit for faster discovery (still plenty for technical indicators)
-            limit = 5000 if term_to_test == 'short' else 10000
+            limit = 1000
             ohlcv, _ = fetch_ohlcv_incremental(exchange, sym, timeframe, ohlcv_cache_manager, limit=limit)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -362,29 +362,10 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
                 futures = []
-                conv_cache = {}
-                instrumented = False
                 for i, sym in enumerate(symbols_to_bench):
                     if sym not in symbol_data_map: continue
-                    quote = sym.split('/')[1]
-                    if quote not in conv_cache:
-                        t_conv = 1.0
-                        if quote != base_bet_curr:
-                            try:
-                                ticker = exchange.fetch_ticker(f'{base_bet_curr}/{quote}')
-                                if ticker and ticker.get('last'):
-                                    t_conv = ticker['last']
-                            except: pass
-                        conv_cache[quote] = t_conv
-                    f = executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device, threshold_conv=conv_cache[quote])
+                    f = executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device, threshold_conv=1.0)
                     futures.append(f)
-
-                    if not instrumented:
-                         time.sleep(0.5)
-                         mem_after = psutil.virtual_memory().used
-                         diff = max(100 * 1024 * 1024, mem_after - mem_before)
-                         # logging.info(f"Instrumented Benchmark process footprint: {diff / (1024*1024):.2f} MB")
-                         instrumented = True
 
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break

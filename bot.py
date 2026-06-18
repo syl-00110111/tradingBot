@@ -159,12 +159,12 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
             active_pattern = candidates[0]['pattern']
             active_pattern_id = candidates[0]['id']
 
+        latest = df.iloc[-1]
         if active_pattern:
             if active_pattern_id != current_pattern_id:
                 pattern_match_ts = candle_ts
                 current_pattern_id = active_pattern_id
 
-            latest = df.iloc[-1]
             curr_adx = latest.get('adx', 0)
             curr_vol = latest.get('volatility', 0)
 
@@ -206,8 +206,8 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
                 'whale_active': latest.get('whale_active', 0),
                 'is_mean_rev': latest.get('is_mean_rev', 0),
                 'tendency': latest.get('tendency', 'Neutral'),
-                'buy_signal': latest['buy_signal'],
-                'sell_signal': latest['sell_signal'],
+                'buy_signal': latest.get('buy_signal', False),
+                'sell_signal': latest.get('sell_signal', False),
                 'strategy': active_pattern['strategy'],
                 'aggr': active_pattern['aggr'],
                 'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
@@ -221,7 +221,7 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
             }
             return res
         else:
-            return {'symbol': symbol, 'trigger_rebenchmark': True, 'no_patterns': True}
+            return {'symbol': symbol, 'price': latest['close'], 'trigger_rebenchmark': True, 'no_patterns': True, 'buy_signal': False, 'sell_signal': False}
     except Exception as e:
         return {'symbol': symbol, 'error': str(e)}
 
@@ -520,11 +520,11 @@ class ExecutionWorker(threading.Thread):
                         bot_state[symbol].update(res)
                         data = bot_state[symbol]
 
-                        if res['buy_signal']:
+                        if res.get('buy_signal', False):
                             data['consecutive_buys'] += 1
                             data['consecutive_sells'] = 0
                             if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
-                        elif res['sell_signal']:
+                        elif res.get('sell_signal', False):
                             data['consecutive_sells'] += 1
                             data['consecutive_buys'] = 0
                             if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
@@ -626,7 +626,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             bot_state[sym] = {
                 'price': 0, 'positions': data_manager.get_positions(sym),
                 'position': data_manager.get_position(sym),
-                'strategy': 'Benchmarking...', 'aggr': 'N/A', 'bench_profit': 0,
+                'strategy': 'Discovering...', 'aggr': 'N/A', 'bench_profit': 0,
                 'consecutive_buys': 0, 'consecutive_sells': 0, 'last_action': 'WAITING',
                 'scan_attempts': 0, 'next_scan_allowed': 0,
                 'last_mc_ts': 0, 'mc_score': 1.1, 'last_processed_ts': 0
@@ -694,7 +694,7 @@ def setup_bot_state(config, data_manager, bot_state):
         pos_list = data_manager.get_positions(symbol) if data_manager else []
         bot_state[symbol] = {
             'aggr': 'N/A',
-            'strategy': 'Benchmarking...',
+            'strategy': 'Discovering...',
             'last_action': 'BUY' if pos_list else 'Waiting',
             'positions': pos_list,
             'position': pos_list[0] if pos_list else None,
@@ -711,40 +711,55 @@ def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, g
         with bot_lock: available_assets[:] = sellable
     except: pass
 
-    # Initial re-benchmarking
-    opt_map = optimization.run_benchmark_mode(
-        exchange, config, args, shutdown_event, bot_lock, global_pattern_pool,
-        benchmarking_pairs, term_override=args.term, status=None,
-        data_manager=data_manager, pattern_manager=pattern_manager,
-        engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager,
-        priority_symbols=sellable, bot_state=bot_state
-    )
+    # Set default priority
+    config['_priority_pairs'] = sorted(list(config['pairs'].keys()))
 
-    pair_priorities = []
-    for sym, best in opt_map.items():
-        if sym in config['pairs']:
-            config['pairs'][sym].update({
-                'aggr': best['aggr'],
-                'strategy': best['strategy'],
-                'expected_profit': best.get('avg_bench_profit', best['profit'])
-            })
-            pair_priorities.append((sym, best['profit']))
+    def bg_benchmark():
+        # Initial re-benchmarking
+        opt_map = optimization.run_benchmark_mode(
+            exchange, config, args, shutdown_event, bot_lock, global_pattern_pool,
+            benchmarking_pairs, term_override=args.term, status=None,
+            data_manager=data_manager, pattern_manager=pattern_manager,
+            engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager,
+            priority_symbols=sellable, bot_state=bot_state
+        )
 
-    config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
+        pair_priorities = []
+        for sym, best in opt_map.items():
+            if sym in config['pairs']:
+                with bot_lock:
+                    config['pairs'][sym].update({
+                        'aggr': best['aggr'],
+                        'strategy': best['strategy'],
+                        'expected_profit': best.get('avg_bench_profit', best['profit'])
+                    })
+                pair_priorities.append((sym, best['profit']))
+
+        if pair_priorities:
+            with bot_lock:
+                config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
+
+    threading.Thread(target=bg_benchmark, daemon=True).start()
 
     if args.mode in ['simulation', 'virtual']:
         trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
 
     for symbol in config['pairs']:
         pos_list = data_manager.get_positions(symbol)
-        bot_state[symbol].update({
-            'aggr': config['pairs'][symbol].get('aggr', 'normal'),
-            'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'),
-            'last_action': 'BUY' if pos_list else 'Waiting',
-            'positions': pos_list,
-            'position': pos_list[0] if pos_list else None,
-            'bench_profit': config['pairs'][symbol].get('expected_profit', 0)
-        })
+        with bot_lock:
+            # Ensure keys exist for the trading loop
+            if 'aggr' not in config['pairs'][symbol]: config['pairs'][symbol]['aggr'] = 'normal'
+            if 'strategy' not in config['pairs'][symbol]: config['pairs'][symbol]['strategy'] = 'simple_ema'
+            if 'expected_profit' not in config['pairs'][symbol]: config['pairs'][symbol]['expected_profit'] = 0
+
+            bot_state[symbol].update({
+                'aggr': config['pairs'][symbol]['aggr'],
+                'strategy': config['pairs'][symbol]['strategy'],
+                'last_action': 'BUY' if pos_list else 'Waiting',
+                'positions': pos_list,
+                'position': pos_list[0] if pos_list else None,
+                'bench_profit': config['pairs'][symbol]['expected_profit']
+            })
 
 def main():
     parser = argparse.ArgumentParser(description='Cryptocurrencies Multiplatform Trading Bot')
