@@ -18,6 +18,7 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 import torch
+from collections import defaultdict
 from monte_carlo import MonteCarloEngine
 
 @torch.jit.script
@@ -276,92 +277,86 @@ def normalize_series(series):
         return series * 0
     return (series - series.min()) / (series.max() - series.min())
 
-def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
+def calculate_similarity_batch(buffer_df, patterns, device=torch.device('cpu')):
     """
-    Calculates similarity between current buffer and a success pattern.
-    Combines price shape correlation, volume shape correlation (scaled), and technical state distance.
-    Uses GPU acceleration via PyTorch if available.
+    Highly optimized batch similarity calculation for a pool of patterns.
+    Uses vectorized PyTorch operations to avoid per-pattern loops and redundant tensor creation.
     """
-    p_prices = pattern.get('prices', [])
-    if len(buffer_df) != len(p_prices) or not p_prices:
-        return 0.0
+    if not patterns: return []
 
-    # GPU-accelerated Similarity
-    try:
-        # 1. Price Similarity (Shape Correlation with Scaling)
-        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
-        p_vals = torch.tensor(p_prices, device=device, dtype=torch.float64)
+    # 1. Prepare Buffer Tensors
+    c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
+    c_vol = torch.tensor(buffer_df['volume'].values, device=device, dtype=torch.float64) if 'volume' in buffer_df.columns else None
 
-        # Proportional scaling of price to current levels
-        c_p_mean = c_vals.mean()
-        p_p_mean = p_vals.mean()
-        if p_p_mean > 0 and c_p_mean > 0:
-            p_vals_scaled = p_vals * (c_p_mean / p_p_mean)
-        else:
-            p_vals_scaled = p_vals
-
-        # Pearson Correlation (Price)
-        stacked_p = torch.stack([c_vals, p_vals_scaled])
-        corr_mat_p = torch.corrcoef(stacked_p)
-        price_corr = float(corr_mat_p[0, 1].item())
-        if np.isnan(price_corr): price_corr = 0.0
-
-        # 2. Volume Similarity (Scaling and Volume-Driver)
-        vol_corr = 0.0
-        p_vols = pattern.get('volumes', [])
-        if p_vols and 'volume' in buffer_df.columns:
-            c_vol = torch.tensor(buffer_df['volume'].values, device=device, dtype=torch.float64)
-            p_vol = torch.tensor(p_vols, device=device, dtype=torch.float64)
-
-            # Proportional scaling of volume to current levels
-            c_vol_mean = c_vol.mean()
-            p_vol_mean = p_vol.mean()
-            if p_vol_mean > 0 and c_vol_mean > 0:
-                p_vol_scaled = p_vol * (c_vol_mean / p_vol_mean)
-            else:
-                p_vol_scaled = p_vol
-
-            # Pearson Correlation (Volume)
-            stacked_v = torch.stack([c_vol, p_vol_scaled])
-            corr_mat_v = torch.corrcoef(stacked_v)
-            vol_corr = float(corr_mat_v[0, 1].item())
-            if np.isnan(vol_corr): vol_corr = 0.0
-
-    except Exception:
-        # Fallback to CPU/Pandas
-        c_p = buffer_df['close']
-        p_p = pd.Series(p_prices)
-        if p_p.mean() > 0:
-            p_p_scaled = p_p * (c_p.mean() / p_p.mean())
-        else:
-            p_p_scaled = p_p
-        price_corr = c_p.corr(p_p_scaled)
-        if np.isnan(price_corr): price_corr = 0.0
-
-        vol_corr = 0.0
-        p_vols = pattern.get('volumes', [])
-        if p_vols and 'volume' in buffer_df.columns:
-            c_vol = buffer_df['volume']
-            p_vol = pd.Series(p_vols)
-            if p_vol.mean() > 0:
-                p_vol_scaled = p_vol * (c_vol.mean() / p_vol.mean())
-            else:
-                p_vol_scaled = p_vol
-            vol_corr = c_vol.corr(p_vol_scaled)
-            if np.isnan(vol_corr): vol_corr = 0.0
-
-    # 3. Technical State Distance
     curr_rsi = buffer_df['rsi'].iloc[-1]
     curr_adx = buffer_df['adx'].iloc[-1]
-    p_tech = pattern.get('tech_state', {'rsi': 50, 'adx': 0})
 
-    dist_rsi = abs(curr_rsi - p_tech.get('rsi', 50)) / 100.0
-    dist_adx = abs(curr_adx - p_tech.get('adx', 0)) / 100.0
-    tech_sim = 1.0 - (dist_rsi + dist_adx) / 2.0
+    # Normalize buffer for correlation
+    c_vals_norm = c_vals - c_vals.mean()
+    c_vals_std = torch.norm(c_vals_norm)
 
-    # Combined Score (Weights: 50% Price, 20% Volume, 30% Tech)
-    combined = (0.5 * max(0, price_corr)) + (0.2 * max(0, vol_corr)) + (0.3 * max(0, tech_sim))
-    return combined
+    if c_vol is not None:
+        c_vol_norm = c_vol - c_vol.mean()
+        c_vol_std = torch.norm(c_vol_norm)
+
+    results = []
+
+    # Group patterns by length to allow vectorized correlation
+    by_len = defaultdict(list)
+    for p in patterns:
+        by_len[len(p['prices'])].append(p)
+
+    for p_len, p_list in by_len.items():
+        if len(buffer_df) < p_len: continue
+
+        # Sliced buffer for this length
+        c_slice = c_vals[-p_len:]
+        c_slice_norm = c_slice - c_slice.mean()
+        c_slice_std = torch.norm(c_slice_norm)
+
+        # Batch Pattern Tensor
+        p_vals = torch.tensor([p['prices'] for p in p_list], device=device, dtype=torch.float64)
+        p_vals_norm = p_vals - p_vals.mean(dim=1, keepdim=True)
+        p_vals_std = torch.norm(p_vals_norm, dim=1)
+
+        # Vectorized Pearson Correlation (Price)
+        price_corrs = torch.matmul(p_vals_norm, c_slice_norm) / (p_vals_std * c_slice_std + 1e-10)
+
+        # Volume Correlation
+        vol_corrs = torch.zeros(len(p_list), device=device, dtype=torch.float64)
+        if c_vol is not None:
+            cv_slice = c_vol[-p_len:]
+            cv_slice_norm = cv_slice - cv_slice.mean()
+            cv_slice_std = torch.norm(cv_slice_norm)
+
+            pv_vals = torch.tensor([p.get('volumes', [0]*p_len) for p in p_list], device=device, dtype=torch.float64)
+            pv_vals_norm = pv_vals - pv_vals.mean(dim=1, keepdim=True)
+            pv_vals_std = torch.norm(pv_vals_norm, dim=1)
+
+            vol_corrs = torch.matmul(pv_vals_norm, cv_slice_norm) / (pv_vals_std * cv_slice_std + 1e-10)
+
+        # Tech State Distance
+        rsi_targets = torch.tensor([p.get('tech_state', {}).get('rsi', 50) for p in p_list], device=device, dtype=torch.float64)
+        adx_targets = torch.tensor([p.get('tech_state', {}).get('adx', 0) for p in p_list], device=device, dtype=torch.float64)
+
+        dist_rsi = torch.abs(curr_rsi - rsi_targets) / 100.0
+        dist_adx = torch.abs(curr_adx - adx_targets) / 100.0
+        tech_sims = 1.0 - (dist_rsi + dist_adx) / 2.0
+
+        # Combined Scores
+        combined = (0.5 * torch.clamp(price_corrs, min=0)) + (0.2 * torch.clamp(vol_corrs, min=0)) + (0.3 * tech_sims)
+
+        for i, p in enumerate(p_list):
+            sim = float(combined[i].item())
+            if sim > 0.70:
+                results.append({'sim': sim, 'pattern': p})
+
+    return results
+
+def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
+    """Legacy wrapper for single pattern similarity."""
+    res = calculate_similarity_batch(buffer_df, [pattern], device=device)
+    return res[0]['sim'] if res else 0.0
 
 def handle_mc_strategies(df, strategy, config, is_backtest):
     """Helper to run MC strategies using batch vectorization."""
