@@ -211,7 +211,7 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
             }
             if curr_adx > 25:
                 settings.update({"ema_fast": 10, "ema_slow": 30, "rsi_buy": 40, "rsi_sell": 60})
-            elif curr_vol > global_config_lite.get('min_profit', 0.015):
+            elif curr_vol > global_config_lite.get('min_profit', 0.01):
                 settings.update({"ema_fast": 30, "ema_slow": 100, "rsi_buy": 20, "rsi_sell": 80})
 
             settings.update({'strategy': active_pattern['strategy'], 'device': device})
