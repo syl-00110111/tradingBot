@@ -157,40 +157,10 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
             item['id'] = p_id
             candidates.append(item)
 
-        # 3. MC Validation
-        valid_candidates = []
-        if candidates:
-            p_len_max = max([len(c['pattern']['prices']) for c in candidates])
-            p_duration_secs = p_len_max * tf_secs
-            spm_threshold_secs = p_duration_secs * 0.05
-            can_reuse_mc = (current_pattern_id is not None) and (time.time() - last_mc_ts < spm_threshold_secs)
-
-            if can_reuse_mc and last_mc_score > 0:
-                 for c in candidates:
-                     if c['id'] == current_pattern_id:
-                          c['pattern']['mc_score'] = last_mc_score
-                          valid_candidates.append(c)
-
-            if not valid_candidates:
-                mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
-                mc_engine.set_device(device)
-                for c in candidates:
-                    p = c['pattern']
-                    temp_cfg = {'strategy': p['strategy'], 'device': device}
-                    df_mc = get_signals(df.tail(100).copy(), temp_cfg, is_backtest=False)
-                    score = mc_engine.validate_strategy(df_mc)
-                    hurdle = global_config_lite.get('mc_hurdle', 0.0015)
-                    p['mc_score'] = score
-                    if score > 1.0 + hurdle:
-                        valid_candidates.append(c)
-                last_mc_ts = time.time()
-
+        # 3. Selection
         active_pattern = None
-        if valid_candidates:
-            valid_candidates.sort(key=lambda x: x['sim'], reverse=True)
-            active_pattern = valid_candidates[0]['pattern']
-            active_pattern_id = valid_candidates[0]['id']
-        elif candidates:
+        active_pattern_id = None
+        if candidates:
             candidates.sort(key=lambda x: x['sim'], reverse=True)
             active_pattern = candidates[0]['pattern']
             active_pattern_id = candidates[0]['id']
@@ -252,6 +222,7 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
                 'last_mc_ts': last_mc_ts,
                 'last_processed_ts': candle_ts,
                 'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()},
+                'last_100_candles': {'prices': df['close'].tail(100).tolist(), 'volumes': df['volume'].tail(100).tolist()},
                 'trigger_rebenchmark': trigger_rebench
             }
             return res
