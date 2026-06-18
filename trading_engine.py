@@ -90,15 +90,20 @@ class TradingEngine:
             logging.debug(f"MC validation failed for {symbol}, defaulting to True: {e}")
             return True
 
-    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, exchange=None):
+    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, exchange=None, symbol=None):
         """
         Calculates position size based on a percentage of the available balance of the quote asset.
         """
         base_balance = 0
         if isinstance(balance, dict):
-            if 'free' in balance: base_balance = balance['free'].get(base_currency, 0)
-            else: base_balance = balance.get(base_currency, 0)
-        else: base_balance = balance.get(base_currency, 0)
+            if 'free' in balance and isinstance(balance['free'], dict):
+                base_balance = balance['free'].get(base_currency, 0)
+            else:
+                base_balance = balance.get(base_currency, 0)
+                if isinstance(base_balance, dict):
+                    base_balance = base_balance.get('free', 0)
+        else:
+            base_balance = 0
 
         base_percentage = self.parse_base_bet()
         trade_amount_base = base_balance * base_percentage
@@ -108,7 +113,7 @@ class TradingEngine:
         if ws_config.get('enabled') and win_streak >= ws_config.get('threshold', 2):
              multiplier = ws_config.get('multiplier', 1.3)
              trade_amount_base *= multiplier
-             logging.info(f"Win streak detected ({win_streak}), applying {multiplier}x multiplier. New target: {trade_amount_base:.2f} {base_currency}")
+             logging.info(f"[{symbol or 'N/A'}] Win streak detected ({win_streak}), applying {multiplier}x multiplier. New target: {trade_amount_base:.2f} {base_currency}")
 
         if trade_amount_base > base_balance: trade_amount_base = base_balance
         if current_price > 0: return trade_amount_base / current_price
@@ -127,7 +132,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
     current_price = fresh_ticker['last'] if fresh_ticker else data['price']
 
     base_curr = symbol.split('/')[1]
-    amount = engine.calculate_position_size(balance, current_price, base_curr, win_streak=win_streak, exchange=exchange)
+    amount = engine.calculate_position_size(balance, current_price, base_curr, win_streak=win_streak, exchange=exchange, symbol=symbol)
     base_currency = symbol.split('/')[1]
     if amount > 0:
         # Check if balance is sufficient before attempting order
