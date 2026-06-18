@@ -228,7 +228,7 @@ def run_benchmark_for_strategy(symbol, strategy, config, term_to_test, aggr, df_
 def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None, threshold_conv=1.0):
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
     eval_window = term_cfg.get('eval_candles', 60)
-    profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.015)
+    profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
     profit_threshold *= threshold_conv
     now_ts = time.time()
     patterns = []
@@ -396,7 +396,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                     sym, patterns = future.result()
                     if patterns:
                         msg_target = status.console if status else console
-                        bench_threshold = config.get('profit_thresholds', {}).get('bench_avg_threshold', 0.22)
+                        bench_threshold = config.get('profit_thresholds', {}).get('bench_avg_threshold', 0.05)
                         winning_patterns = [p for p in patterns if p['profit'] >= bench_threshold]
                         if winning_patterns:
                             avg_profit = sum(p['profit'] for p in winning_patterns) / len(winning_patterns)
@@ -471,11 +471,11 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
         except:
             total_balance = 0
 
-        threshold_pct = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold_pct', 0.01)
+        threshold_pct = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold_pct', 0.005)
         if total_balance > 0:
             msg_threshold_val = total_balance * threshold_pct
         else:
-            msg_threshold_val = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.022)
+            msg_threshold_val = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.01)
 
         msg_threshold = f"{msg_threshold_val:.4g} {base_bet_curr}"
         if symbols:
