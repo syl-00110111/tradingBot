@@ -111,6 +111,7 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
     """
     CPU-intensive analysis task designed to run in a subprocess.
     """
+    start_time = time.perf_counter()
     try:
         device = global_config_lite.get('device', torch.device('cpu'))
         # 1. Indicators
@@ -254,8 +255,12 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
                 'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()},
                 'trigger_rebenchmark': trigger_rebench
             }
+            duration = time.perf_counter() - start_time
+            logging.info(f"PROFILING: [Analysis] {symbol} took {duration:.4f} seconds.")
             return res
         else:
+            duration = time.perf_counter() - start_time
+            logging.info(f"PROFILING: [Analysis] {symbol} (no patterns) took {duration:.4f} seconds.")
             return {'symbol': symbol, 'trigger_rebenchmark': True, 'no_patterns': True}
     except Exception as e:
         return {'symbol': symbol, 'error': str(e)}

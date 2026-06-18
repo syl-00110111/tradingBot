@@ -84,6 +84,17 @@ class TradingEngine:
         """
         Calculates position size based on a percentage of the available balance of the quote asset.
         """
+        if 'fixed_trade_amount' in self.config:
+            trade_amount_base = float(self.config['fixed_trade_amount'])
+            return (trade_amount_base / current_price) if current_price > 0 else 0
+
+        if 'fixed_amount_usdc' in self.config and base_currency == 'USDC':
+            trade_amount_base = float(self.config['fixed_amount_usdc'])
+            return (trade_amount_base / current_price) if current_price > 0 else 0
+        if 'fixed_amount_usd' in self.config and base_currency == 'USD':
+            trade_amount_base = float(self.config['fixed_amount_usd'])
+            return (trade_amount_base / current_price) if current_price > 0 else 0
+
         base_balance = 0
         if isinstance(balance, dict):
             if 'free' in balance: base_balance = balance['free'].get(base_currency, 0)
@@ -140,7 +151,11 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
         except Exception as e:
             logging.debug(f"[{symbol}] Could not verify notional limit: {e}")
 
+        start_buy = time.perf_counter()
         order = exchange.create_order(symbol, 'buy', amount)
+        end_buy = time.perf_counter()
+        logging.info(f"PROFILING: [{symbol}] Order buy execution took {end_buy - start_buy:.4f} seconds.")
+
         if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
             logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
             suspended_pairs.add(symbol)
@@ -212,7 +227,11 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
             # For simplicity, we stick to tracked amount if balance is sufficient.
 
         if is_simulation or free_balance >= sell_amount:
+            start_sell = time.perf_counter()
             order = exchange.create_order(symbol, 'sell', sell_amount)
+            end_sell = time.perf_counter()
+            logging.info(f"PROFILING: [{symbol}] Order sell execution took {end_sell - start_sell:.4f} seconds.")
+
             if isinstance(order, dict) and order.get('error') == 'dust_limit':
                 logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
                 data_manager.flag_ignore_sell(symbol)

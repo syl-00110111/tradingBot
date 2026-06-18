@@ -63,16 +63,30 @@ class CCXTExchange(ExchangeInterface):
         except Exception as e: logging.error(f"Failed to load markets: {e}"); return {}
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
-        try: return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-        except Exception as e: logging.error(f"Error fetching OHLCV for {symbol}: {e}"); return None
+        start_time = time.perf_counter()
+        try:
+            res = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            duration = time.perf_counter() - start_time
+            logging.info(f"PROFILING: [API] fetch_ohlcv for {symbol} took {duration:.4f} seconds.")
+            return res
+        except Exception as e:
+            logging.error(f"Error fetching OHLCV for {symbol}: {e}")
+            return None
 
     def fetch_ticker(self, symbol):
         try: return self.exchange.fetch_ticker(symbol)
         except Exception as e: logging.error(f"Error fetching ticker for {symbol}: {e}"); return None
 
     def fetch_balance(self):
-        try: return self.exchange.fetch_balance()
-        except Exception as e: logging.error(f"Error fetching balance: {e}"); return None
+        start_time = time.perf_counter()
+        try:
+            res = self.exchange.fetch_balance()
+            duration = time.perf_counter() - start_time
+            logging.info(f"PROFILING: [API] fetch_balance took {duration:.4f} seconds.")
+            return res
+        except Exception as e:
+            logging.error(f"Error fetching balance: {e}")
+            return None
 
     def fetch_my_trades(self, symbol, limit=10):
         try: return self.exchange.fetch_my_trades(symbol, limit=limit)
@@ -292,6 +306,7 @@ class MockExchange(ExchangeInterface):
         self.balance = {'USDT': 1000.0, 'USDC': 1000.0}
         self.ohlcv_data = {}
         self.real_exchange = None
+        self.public_exchange = None
         self.fee_rate = 0.001
         self.markets = {}
         self.exchange_type = exchange_type
@@ -327,8 +342,13 @@ class MockExchange(ExchangeInterface):
         return {}
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
+        start_time = time.perf_counter()
         if self.real_exchange:
-             try: return self.real_exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+             try:
+                 res = self.real_exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+                 duration = time.perf_counter() - start_time
+                 logging.info(f"PROFILING: [Mock->Real API] fetch_ohlcv for {symbol} took {duration:.4f} seconds.")
+                 return res
              except Exception: pass
         if symbol not in self.ohlcv_data:
             try:
@@ -342,15 +362,23 @@ class MockExchange(ExchangeInterface):
              try: return self.real_exchange.fetch_ticker(symbol)
              except Exception: pass
         data = self.ohlcv_data.get(symbol, [])
-        if data: return {'last': data[-1][4]}
+        if data: return {'last': data[-1][4], 'bid': data[-1][4], 'ask': data[-1][4]}
         try:
-            public_ex = ccxt.binance({'session': create_ccxt_session()})
-            return public_ex.fetch_ticker(symbol)
-        except Exception: return {'last': 0.0}
+            if not self.public_exchange:
+                ex_id = self.exchange_type if self.exchange_type in ccxt.exchanges else 'binance'
+                ex_class = getattr(ccxt, ex_id)
+                self.public_exchange = ex_class({'session': create_ccxt_session()})
+            ticker = self.public_exchange.fetch_ticker(symbol)
+            return ticker
+        except Exception: return {'last': 0.0, 'bid': 0.0, 'ask': 0.0}
 
     def fetch_balance(self):
         self._init_balance()
-        return {'total': self.balance, 'free': self.balance}
+        bal = self.balance.copy()
+        res = {'total': bal, 'free': bal}
+        for k, v in bal.items():
+            res[k] = {'free': v, 'total': v}
+        return res
 
     def fetch_my_trades(self, symbol, limit=10):
         if self.real_exchange:
@@ -365,6 +393,7 @@ class MockExchange(ExchangeInterface):
         return self.fee_rate
 
     def create_order(self, symbol, side, amount, price=None):
+        start_time = time.perf_counter()
         self._init_balance()
         ticker = self.fetch_ticker(symbol)
         price = ticker['last']
@@ -378,14 +407,18 @@ class MockExchange(ExchangeInterface):
         free_quote = self.balance.get(quote, 0.0)
         free_base = self.balance.get(base, 0.0)
 
+        res = None
         if side == 'buy':
             if free_quote >= (cost + fee):
                 self.balance[quote] = free_quote - (cost + fee)
                 self.balance[base] = free_base + amount
-                return {'id': 'mock_buy_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
+                res = {'id': 'mock_buy_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
         else:
             if free_base >= amount:
                 self.balance[base] = free_base - amount
                 self.balance[quote] = free_quote + cost - fee
-                return {'id': 'mock_sell_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
-        return None
+                res = {'id': 'mock_sell_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
+
+        duration = time.perf_counter() - start_time
+        logging.info(f"PROFILING: [Mock] create_order took {duration:.4f} seconds.")
+        return res
