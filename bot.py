@@ -341,34 +341,39 @@ class AnalysisWorker(threading.Thread):
 
     def run(self):
         global instrumented_mem_footprint
+        last_metric_check = 0
         try:
             while not shutdown_event.is_set():
                 cpu_count = os.cpu_count() or 1
+                now = time.time()
 
-                with bot_lock:
-                    footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
+                # Check metrics and adjust workers every 10 seconds to avoid flapping and overhead
+                if now - last_metric_check > 10 or self.executor is None:
+                    last_metric_check = now
+                    with bot_lock:
+                        footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
 
-                try:
-                    mem_info = psutil.virtual_memory()
-                    mem_available = mem_info.available
+                    try:
+                        mem_info = psutil.virtual_memory()
+                        mem_available = mem_info.available
 
-                    # Conservative worker scaling: respect both CPU and Memory
-                    # We aim to use at most 70% of AVAILABLE memory for analysis workers
-                    mem_safe_workers = max(1, int((mem_available * 0.7) / footprint))
-                    new_max_workers = min(cpu_count, mem_safe_workers)
+                        # Conservative worker scaling: respect both CPU and Memory
+                        # We aim to use at most 70% of AVAILABLE memory for analysis workers
+                        mem_safe_workers = max(1, int((mem_available * 0.7) / footprint))
+                        new_max_workers = min(cpu_count, mem_safe_workers)
 
-                    cpu_usage = psutil.cpu_percent(interval=0.1)
-                    # If we have high CPU usage, further throttle workers
-                    if cpu_usage > 80:
-                        new_max_workers = max(1, int(new_max_workers * 0.5))
-                except:
-                    new_max_workers = max(1, int(cpu_count * 0.5))
+                        cpu_usage = psutil.cpu_percent(interval=None)
+                        # If we have high CPU usage, further throttle workers
+                        if cpu_usage > 80:
+                            new_max_workers = max(1, int(new_max_workers * 0.5))
+                    except:
+                        new_max_workers = max(1, int(cpu_count * 0.5))
 
-                if self.executor is None or self.max_workers != new_max_workers:
-                    if self.executor:
-                        self.executor.shutdown(wait=False)
-                    self.max_workers = new_max_workers
-                    self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers, initializer=silent_worker_init)
+                    if self.executor is None or self.max_workers != new_max_workers:
+                        if self.executor:
+                            self.executor.shutdown(wait=False)
+                        self.max_workers = new_max_workers
+                        self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers, initializer=silent_worker_init)
 
                 batch = []
                 # Allow at least 1 even if cpu/mem are high
@@ -650,7 +655,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             rebench_syms = list(benchmarking_pairs)
 
         if rebench_syms:
-            optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=config.get('_active_term', 'short'), data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=config.get('device'), symbols_to_process=rebench_syms, ohlcv_cache_manager=ohlcv_cache_manager)
+            optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=config.get('_active_term', 'short'), data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=config.get('device'), symbols_to_process=rebench_syms, ohlcv_cache_manager=ohlcv_cache_manager, bot_state=bot_state)
 
         for symbol in all_symbols:
             if symbol in suspended_pairs: continue
@@ -712,7 +717,7 @@ def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, g
         benchmarking_pairs, term_override=args.term, status=None,
         data_manager=data_manager, pattern_manager=pattern_manager,
         engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager,
-        priority_symbols=sellable
+        priority_symbols=sellable, bot_state=bot_state
     )
 
     pair_priorities = []
@@ -974,9 +979,10 @@ def main():
                     run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=ui)
 
                 threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
-                threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
 
             threading.Thread(target=startup_sequence, daemon=True).start()
+            # Start input thread IMMEDIATELY so TUI is responsive to keys like 'Q' or 'H'
+            threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
 
             try:
                 while not shutdown_event.is_set():

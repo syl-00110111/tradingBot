@@ -229,7 +229,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     patterns.sort(key=lambda x: x['profit'], reverse=True)
     return symbol, patterns[:5]
 
-def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None, ohlcv_cache_manager=None, priority_symbols=None):
+def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None, ohlcv_cache_manager=None, priority_symbols=None, bot_state=None):
     term_to_test = term_override if term_override else (args.term if args else 'short')
     terms_cfg = config.get('expected_profit_terms', {})
     term_cfg = terms_cfg.get(term_to_test, {})
@@ -346,10 +346,10 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             mem_safe_workers = max(1, int((mem_available * 0.7) / footprint))
             max_workers = min(cpu_count, mem_safe_workers)
 
-            cpu_usage = psutil.cpu_percent(interval=0.5)
+            cpu_usage = psutil.cpu_percent(interval=None)
             # If we have high CPU usage, further throttle workers
-            if cpu_usage > 80:
-                max_workers = max(1, int(max_workers * 0.5))
+            if cpu_usage > 85:
+                max_workers = max(1, int(max_workers * 0.7))
         except Exception as e:
             logging.debug(f"Failed to calculate dynamic workers: {e}")
             max_workers = max(1, int(cpu_count * 0.5))
@@ -403,6 +403,22 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                         best_per_symbol[sym] = best_for_symbol
                         if data_manager:
                             pattern_manager.set_patterns(sym, patterns, save=False)
+
+                        # Incremental update to bot_state if provided
+                        if bot_state is not None and sym in bot_state:
+                            with bot_lock:
+                                bot_state[sym].update({
+                                    'aggr': best_for_symbol['aggr'],
+                                    'strategy': best_for_symbol['strategy'],
+                                    'bench_profit': avg_profit
+                                })
+                                if sym in config.get('pairs', {}):
+                                    config['pairs'][sym].update({
+                                        'aggr': best_for_symbol['aggr'],
+                                        'strategy': best_for_symbol['strategy'],
+                                        'expected_profit': avg_profit
+                                    })
+                            logging.info(f"[{sym}] Benchmarking complete: {best_for_symbol['strategy']} ({avg_profit:.2f}%)")
 
                         period_str = f" [dim](From {best_for_symbol.get('start_time')} to {best_for_symbol.get('end_time')})[/]"
                         cache_mgr.set(sym, term_to_test, patterns, save=False)
