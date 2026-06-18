@@ -20,19 +20,19 @@ This report explains the configuration parameters found in `config.default.json`
 
 ### Profit Thresholds (`profit_thresholds`)
 
-*   **`min_pattern_profit`** (Default: `0.015` / 1.5%)
+*   **`min_pattern_profit`** (Default: `0.01` / 1.0%)
     *   **Description**: The minimum profit a pattern must generate during the benchmarking phase to be considered a "Success Pattern" (SPM).
     *   **Influence**: Filters out low-performing signals during historical analysis. Only strategies that yield at least this much profit in the test window are saved.
 
-*   **`no_patterns_msg_threshold`** (Default: `0.022`)
+*   **`no_patterns_msg_threshold`** (Default: `0.01`)
     *   **Description**: A fallback absolute profit threshold used to display a warning if no profitable patterns are found.
     *   **Influence**: Only affects UI feedback. If the best found pattern's profit is below this (and the dynamic % threshold), the bot informs the user that no high-quality patterns were found.
 
-*   **`no_patterns_msg_threshold_pct`** (Default: `0.01` / 1%)
+*   **`no_patterns_msg_threshold_pct`** (Default: `0.005` / 0.5%)
     *   **Description**: The percentage of the total balance used to calculate a dynamic threshold for the "no patterns" warning.
     *   **Influence**: Ensures the UI warning is relevant to the user's account size.
 
-*   **`bench_avg_threshold`** (Default: `0.22`)
+*   **`bench_avg_threshold`** (Default: `0.05` / 5.0%)
     *   **Description**: A threshold used during benchmarking to identify "winning" patterns for calculating an average benchmark profit.
     *   **Influence**: It helps the bot calculate a more realistic "average" expectation by focusing on patterns that met this specific profit hurdle.
 
