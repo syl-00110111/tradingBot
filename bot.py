@@ -40,7 +40,7 @@ from rich.table import Table
 
 import dashboard
 from exchange_handler import EXCHANGE_MAPPING, MockExchange, fetch_ohlcv_incremental
-from indicators import get_signals, get_common_indicators, calculate_similarity, STRATEGIES
+from indicators import get_signals, get_common_indicators, calculate_similarity, calculate_similarity_batch, STRATEGIES
 from persistence import DataManager, CacheManager, PatternManager, OHLCVCacheManager, archiver, migrate_fresh_files_to_archive, load_from_archive
 import trading_engine
 from trading_engine import TradingEngine
@@ -122,16 +122,10 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
         last_mc_score = pattern_info.get('mc_score', 1.1)
         candle_ts = df.iloc[-1]['timestamp']
 
-        # 2. Similarity Matching
+        # 2. Similarity Matching (Vectorized Batch)
         active_patterns = []
         if search_pool:
-            for p in search_pool:
-                p_len = len(p['prices'])
-                if len(df) < p_len: continue
-                buffer_window = df.iloc[-p_len:]
-                sim = calculate_similarity(buffer_window, p, device=device)
-                if sim > 0.70:
-                    active_patterns.append({'sim': sim, 'pattern': p.copy()})
+            active_patterns = calculate_similarity_batch(df, search_pool, device=device)
 
         candidates = []
         for item in active_patterns:
@@ -619,6 +613,17 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     # Start workers
     AnalysisWorker(exchange, data_manager, pattern_manager, engine, config).start()
     ExecutionWorker(exchange, data_manager, engine, config).start()
+
+    # Pre-warm OHLCV cache for all symbols in parallel
+    logging.info("Pre-warming OHLCV cache for all symbols...")
+    with bot_lock:
+        term = config.get('_active_term', 'short')
+        term_cfg = config.get('expected_profit_terms', {}).get(term, {})
+        timeframe = term_cfg.get('timeframe', '5m')
+        for sym in all_symbols:
+            if (sym, timeframe) not in pending_downloads:
+                candle_queue.put((2, sym, timeframe, 500, None))
+                pending_downloads.add((sym, timeframe))
 
     import optimization
     while not shutdown_event.is_set():

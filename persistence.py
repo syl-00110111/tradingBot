@@ -288,8 +288,11 @@ class PatternManager:
     def get_patterns(self, symbol):
         return self.patterns.get(symbol, [])
 
-    def set_patterns(self, symbol, patterns):
+    def set_patterns(self, symbol, patterns, save=True):
         self.patterns[symbol] = patterns
+        if save: self._save()
+
+    def save_all(self):
         self._save()
 
 class CacheManager:
@@ -320,9 +323,12 @@ class CacheManager:
         key = f"{symbol}_{term}"
         return self.cache.get(key)
 
-    def set(self, symbol, term, data):
+    def set(self, symbol, term, data, save=True):
         key = f"{symbol}_{term}"
         self.cache[key] = data
+        if save: self._save()
+
+    def save_all(self):
         self._save()
 
 class OHLCVCacheManager:

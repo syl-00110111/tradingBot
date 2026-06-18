@@ -396,10 +396,10 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                         best_for_symbol['avg_bench_profit'] = avg_profit
                         best_per_symbol[sym] = best_for_symbol
                         if data_manager:
-                             pattern_manager.set_patterns(sym, patterns)
+                     pattern_manager.set_patterns(sym, patterns, save=False)
 
                         period_str = f" [dim](From {best_for_symbol.get('start_time')} to {best_for_symbol.get('end_time')})[/]"
-                        cache_mgr.set(sym, term_to_test, patterns)
+                cache_mgr.set(sym, term_to_test, patterns, save=False)
 
                         if term_override:
                             optimization_map[sym] = best_for_symbol
@@ -413,6 +413,9 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 if original_handler:
                     signal.signal(signal.SIGINT, original_handler)
                 symbol_data_map.clear()
+                # Batch save all results at the end
+                if data_manager: pattern_manager.save_all()
+                cache_mgr.save_all()
 
     if term_override:
         if status: status.update('[bold green]Optimization complete.')
