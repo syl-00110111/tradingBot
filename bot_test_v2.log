@@ -1,0 +1,2 @@
+{"timestamp": "2026-06-18T06:41:51.634598", "level": "INFO", "message": "Syncing disk files to archive...", "module": "persistence", "funcName": "migrate_fresh_files_to_archive", "lineNo": 154}
+{"timestamp": "2026-06-18T06:41:52.861851", "level": "INFO", "message": "Hardware optimization level: [bold blue]AVX2[/] (Intel(R) Xeon(R) Processor @ 2.30GHz)", "module": "bot", "funcName": "main", "lineNo": 831}

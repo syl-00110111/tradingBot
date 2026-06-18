@@ -23,8 +23,8 @@ from monte_carlo import MonteCarloEngine
 @torch.jit.script
 def torch_ema_kernel(series: torch.Tensor, alpha: float):
     n = series.size(0)
+    if n == 0: return torch.empty(0, device=series.device, dtype=series.dtype)
     ema = torch.empty_like(series)
-    if n == 0: return ema
     ema[0] = series[0]
     one_minus_alpha = 1.0 - alpha
     for i in range(1, n):
@@ -43,8 +43,8 @@ def torch_rsi(series, length):
     delta = series[1:] - series[:-1]
     gain = torch.clamp(delta, min=0)
     loss = torch.clamp(-delta, min=0)
-    gain = torch.cat([torch.tensor([0.0], device=series.device), gain])
-    loss = torch.cat([torch.tensor([0.0], device=series.device), loss])
+    gain = torch.cat([torch.zeros(1, device=series.device, dtype=series.dtype), gain])
+    loss = torch.cat([torch.zeros(1, device=series.device, dtype=series.dtype), loss])
     alpha_wilder = 1.0 / length
     avg_gain = torch_ema_kernel(gain, float(alpha_wilder))
     avg_loss = torch_ema_kernel(loss, float(alpha_wilder))
@@ -66,15 +66,15 @@ def torch_adx(high, low, close, length=14):
         return torch.zeros_like(close)
     up = high[1:] - high[:-1]
     down = low[:-1] - low[1:]
-    up = torch.cat([torch.tensor([0.0], device=high.device), up])
-    down = torch.cat([torch.tensor([0.0], device=low.device), down])
-    plus_dm = torch.where((up > down) & (up > 0), up, torch.tensor(0.0, device=high.device))
-    minus_dm = torch.where((down > up) & (down > 0), down, torch.tensor(0.0, device=high.device))
+    up = torch.cat([torch.zeros(1, device=high.device, dtype=high.dtype), up])
+    down = torch.cat([torch.zeros(1, device=low.device, dtype=low.dtype), down])
+    plus_dm = torch.where((up > down) & (up > 0), up, torch.zeros(1, device=high.device, dtype=high.dtype))
+    minus_dm = torch.where((down > up) & (down > 0), down, torch.zeros(1, device=low.device, dtype=low.dtype))
     tr1 = high[1:] - low[1:]
     tr2 = torch.abs(high[1:] - close[:-1])
     tr3 = torch.abs(low[1:] - close[:-1])
     tr = torch.maximum(torch.maximum(tr1, tr2), tr3)
-    tr = torch.cat([torch.tensor([0.0], device=high.device), tr])
+    tr = torch.cat([torch.zeros(1, device=high.device, dtype=high.dtype), tr])
     atr = torch_ema(tr, 2 * length - 1)
     plus_di = 100 * torch_ema(plus_dm, 2 * length - 1) / (atr + 1e-10)
     minus_di = 100 * torch_ema(minus_dm, 2 * length - 1) / (atr + 1e-10)

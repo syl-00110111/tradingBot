@@ -2,6 +2,8 @@
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import ccxt
+import ccxt.pro as ccxtpro
+import asyncio
 import time
 import logging
 import threading
@@ -12,13 +14,35 @@ from requests.adapters import HTTPAdapter
 class ThrottledExchange:
     def __init__(self, exchange, delay_ms=42):
         self.exchange = exchange
-        self.delay_s = delay_ms / 1000.0
+        self.base_delay_s = delay_ms / 1000.0
+        self.delay_s = self.base_delay_s
         self.lock = threading.Lock()
         self.last_request_time = 0
+        self.burst_count = 0
+        self.base_max_burst = 10
+        self.max_burst = self.base_max_burst
+        self.last_burst_reset = time.time()
 
     def _wait(self):
         with self.lock:
             now = time.time()
+
+            # Reset burst every second
+            if now - self.last_burst_reset > 1.0:
+                self.burst_count = 0
+                self.last_burst_reset = now
+
+                # Recovery mechanism: gradually return to base settings
+                if self.delay_s > self.base_delay_s:
+                    self.delay_s = max(self.base_delay_s, self.delay_s * 0.95)
+                if self.max_burst < self.base_max_burst:
+                    self.max_burst = min(self.base_max_burst, self.max_burst + 1)
+
+            if self.burst_count < self.max_burst:
+                self.burst_count += 1
+                self.last_request_time = now
+                return
+
             elapsed = now - self.last_request_time
             if elapsed < self.delay_s:
                 time.sleep(self.delay_s - elapsed)
@@ -28,8 +52,22 @@ class ThrottledExchange:
         attr = getattr(self.exchange, name)
         if callable(attr):
             def throttled_wrapper(*args, **kwargs):
-                self._wait()
-                return attr(*args, **kwargs)
+                retries = 3
+                while retries > 0:
+                    try:
+                        self._wait()
+                        return attr(*args, **kwargs)
+                    except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
+                        retries -= 1
+                        wait_time = float(getattr(e, 'retry_after', 5)) or 5
+                        logging.warning(f"Rate limit exceeded. Waiting {wait_time}s... ({retries} retries left)")
+                        time.sleep(wait_time)
+                        with self.lock:
+                            self.delay_s *= 1.2 # Dynamically increase delay
+                            self.max_burst = max(1, self.max_burst - 1)
+                    except Exception as e:
+                        raise e
+                return None
             return throttled_wrapper
         return attr
 
@@ -286,6 +324,106 @@ EXCHANGE_MAPPING = {
     'indodax': IndodaxExchange, 'upbit': UpbitExchange, 'luno': LunoExchange,
     'independentreserve': IndependentReserveExchange, 'btcmarkets': BTCMarketsExchange
 }
+
+class AsyncExchangeManager:
+    def __init__(self, exchange_id, api_key, api_secret, symbols, timeframes, bot_state, bot_lock, ohlcv_cache_manager, shutdown_event):
+        self.exchange_id = exchange_id
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.symbols = symbols
+        self.timeframes = timeframes
+        self.bot_state = bot_state
+        self.bot_lock = bot_lock
+        self.ohlcv_cache_manager = ohlcv_cache_manager
+        self.external_shutdown_event = shutdown_event
+        self.loop = None
+        self.exchange = None
+
+    def start(self):
+        threading.Thread(target=self._run_loop, daemon=True).start()
+
+    def _run_loop(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self.main())
+        except Exception as e:
+            logging.error(f"AsyncExchangeManager loop error: {e}")
+        finally:
+            self.loop.close()
+
+    async def main(self):
+        ex_class = getattr(ccxtpro, self.exchange_id)
+        options = {
+            'apiKey': self.api_key,
+            'secret': self.api_secret,
+            'enableRateLimit': True,
+        }
+        if self.exchange_id == 'binance':
+            options['options'] = {'defaultType': 'spot'}
+
+        self.exchange = ex_class(options)
+
+        tasks = []
+        for symbol in self.symbols:
+            tasks.append(self.watch_ticker_loop(symbol))
+            for tf in self.timeframes:
+                tasks.append(self.watch_ohlcv_loop(symbol, tf))
+
+        # Monitor shutdown
+        tasks.append(self.shutdown_monitor())
+
+        await asyncio.gather(*tasks)
+        await self.exchange.close()
+
+    async def shutdown_monitor(self):
+        while not self.external_shutdown_event.is_set():
+            await asyncio.sleep(1)
+        logging.info("AsyncExchangeManager shutting down...")
+
+    async def watch_ticker_loop(self, symbol):
+        while not self.external_shutdown_event.is_set():
+            try:
+                ticker = await self.exchange.watch_ticker(symbol)
+                with self.bot_lock:
+                    if symbol in self.bot_state:
+                        self.bot_state[symbol]['price'] = ticker['last']
+            except Exception as e:
+                if not self.external_shutdown_event.is_set():
+                    logging.debug(f"WS Ticker Error for {symbol}: {e}")
+                    await asyncio.sleep(5)
+                else: break
+
+    async def watch_ohlcv_loop(self, symbol, timeframe):
+        while not self.external_shutdown_event.is_set():
+            try:
+                ohlcvs = await self.exchange.watch_ohlcv(symbol, timeframe)
+                if ohlcvs:
+                    # Update cache
+                    with self.bot_lock:
+                        cached = self.ohlcv_cache_manager.get(symbol, timeframe)
+                        if not cached: cached = []
+
+                        # Convert to list if it's a DataFrame (shouldn't happen with OHLCVCacheManager usually but safety first)
+                        if isinstance(cached, pd.DataFrame):
+                            cached = cached.values.tolist()
+
+                        # Merge new candles
+                        last_ts = cached[-1][0] if cached else -1
+                        new_candles = [c for c in ohlcvs if c[0] > last_ts]
+
+                        if new_candles:
+                            new_cached = cached + new_candles
+                            # Keep it sane
+                            if len(new_cached) > 150000:
+                                new_cached = new_cached[-150000:]
+                            self.ohlcv_cache_manager.set(symbol, timeframe, new_cached)
+                        # logging.debug(f"WS OHLCV Update for {symbol} {timeframe}: {len(new_candles)} new candles")
+            except Exception as e:
+                if not self.external_shutdown_event.is_set():
+                    logging.debug(f"WS OHLCV Error for {symbol} {timeframe}: {e}")
+                    await asyncio.sleep(5)
+                else: break
 
 class MockExchange(ExchangeInterface):
     def __init__(self, api_key=None, api_secret=None, exchange_type='binance'):

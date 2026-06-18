@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import platform
+import datetime
 import random
 import threading
 import signal
@@ -145,3 +146,17 @@ def load_config():
 def play_sound(action, config=None):
     """Adds a sound notification to the background queue."""
     sound_queue.put((action, config))
+
+class JSONLoggingHandler(logging.Handler):
+    def emit(self, record):
+        log_entry = {
+            "timestamp": datetime.datetime.fromtimestamp(record.created).isoformat(),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "module": record.module,
+            "funcName": record.funcName,
+            "lineNo": record.lineno,
+        }
+        if record.exc_info:
+            log_entry["exc_info"] = logging.Formatter().formatException(record.exc_info)
+        print(json.dumps(log_entry))

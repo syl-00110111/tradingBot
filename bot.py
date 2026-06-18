@@ -376,7 +376,8 @@ class AnalysisWorker(threading.Thread):
         global instrumented_mem_footprint
         while not shutdown_event.is_set():
             cpu_count = os.cpu_count() or 1
-            max_workers = max(1, cpu_count // 2)
+            # Aggressive worker scaling
+            max_workers = max(1, int(cpu_count * 0.8))
 
             with bot_lock:
                 footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
@@ -384,8 +385,9 @@ class AnalysisWorker(threading.Thread):
             try:
                 cpu_usage = psutil.cpu_percent(interval=0.1)
                 mem_available = psutil.virtual_memory().available
-                if cpu_usage < 40 and mem_available > footprint*(max_workers+2):
-                    max_workers += 1
+                # If we have headroom, push even further
+                if cpu_usage < 60 and mem_available > footprint * (max_workers + 1):
+                    max_workers = min(cpu_count * 2, max_workers + 2)
             except: pass
 
             batch = []
@@ -649,22 +651,65 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
         elapsed = time.time() - start_time
         if elapsed < 5.0: time.sleep(5.0 - elapsed)
 
-def main():
-    # Initialize logging early to capture all events in Dashboard
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    db_handler = dashboard.DashboardHandler(ui, bot_lock)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(message)s',
-        handlers=[db_handler, RichHandler(console=console, show_time=False, show_level=False, show_path=False)]
+def setup_bot_state(config, data_manager, bot_state):
+    """Initializes the bot state for all configured pairs."""
+    for symbol in config['pairs']:
+        pos_list = data_manager.get_positions(symbol) if data_manager else []
+        bot_state[symbol] = {
+            'aggr': 'N/A',
+            'strategy': 'Benchmarking...',
+            'last_action': 'BUY' if pos_list else 'Waiting',
+            'positions': pos_list,
+            'position': pos_list[0] if pos_list else None,
+            'bench_profit': 0
+        }
+
+def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=None):
+    """Runs the initial benchmarking and sets pair priorities."""
+    config['_active_term'] = args.term
+    import optimization
+    sellable = []
+    try:
+        sellable = trading_engine.get_sellable_assets(exchange, config)
+        with bot_lock: available_assets[:] = sellable
+    except: pass
+
+    # Initial re-benchmarking
+    opt_map = optimization.run_benchmark_mode(
+        exchange, config, args, shutdown_event, bot_lock, global_pattern_pool,
+        benchmarking_pairs, term_override=args.term, status=None,
+        data_manager=data_manager, pattern_manager=pattern_manager,
+        engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager,
+        priority_symbols=sellable
     )
-    logging.root.setLevel(logging.INFO)
 
-    global ohlcv_cache_manager
-    migrate_fresh_files_to_archive()
-    load_from_archive()
+    pair_priorities = []
+    for sym, best in opt_map.items():
+        if sym in config['pairs']:
+            config['pairs'][sym].update({
+                'aggr': best['aggr'],
+                'strategy': best['strategy'],
+                'expected_profit': best.get('avg_bench_profit', best['profit'])
+            })
+            pair_priorities.append((sym, best['profit']))
 
+    config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
+
+    if args.mode in ['simulation', 'virtual']:
+        trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
+
+    for symbol in config['pairs']:
+        pos_list = data_manager.get_positions(symbol)
+        bot_state[symbol].update({
+            'aggr': config['pairs'][symbol].get('aggr', 'normal'),
+            'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'),
+            'last_action': 'BUY' if pos_list else 'Waiting',
+            'positions': pos_list,
+            'position': pos_list[0] if pos_list else None,
+            'bench_profit': config['pairs'][symbol].get('expected_profit', 0)
+        })
+
+def main():
     parser = argparse.ArgumentParser(description='Cryptocurrencies Multiplatform Trading Bot')
     parser.add_argument('--mode', choices=['live', 'simulation', 'backtest', 'benchmark', 'sell', 'balance', 'virtual'], default='simulation')
     parser.add_argument('--symbol', help='Symbol for backtest/benchmark')
@@ -678,7 +723,28 @@ def main():
     parser.add_argument('--every-symbol', action='store_true', help='Benchmark all symbols in pairs.txt')
     parser.add_argument('--backtest-positions', action='store_true', help='Show positions during backtest')
     parser.add_argument('--wallet', help='Initial wallet for virtual mode (e.g. "100 USDC")')
-    args = parser.parse_args()
+    parser.add_argument('--headless', action='store_true', help='Disable TUI and use structured JSON logging')
+    args, unknown = parser.parse_known_args()
+
+    # Initialize logging early
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+
+    if args.headless:
+        logging.basicConfig(level=logging.INFO, handlers=[utils.JSONLoggingHandler()])
+    else:
+        db_handler = dashboard.DashboardHandler(ui, bot_lock)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(message)s',
+            handlers=[db_handler, RichHandler(console=console, show_time=False, show_level=False, show_path=False)]
+        )
+    logging.root.setLevel(logging.INFO)
+
+    global ohlcv_cache_manager
+    migrate_fresh_files_to_archive()
+    load_from_archive()
+
 
     ohlcv_cache_manager = OHLCVCacheManager(mode=args.mode)
 
@@ -805,9 +871,21 @@ def main():
             available_assets[:] = trading_engine.get_sellable_assets(exchange, config)
         except: pass
 
-    # Start candle downloader
-    downloader = CandleDownloader(exchange, ohlcv_cache_manager)
-    downloader.start()
+    # Start Websocket manager if not in backtest/sell/balance mode
+    if args.mode in ['live', 'simulation', 'virtual'] and args.exchange != 'mock':
+        from exchange_handler import AsyncExchangeManager
+        timeframes = [config.get('expected_profit_terms', {}).get(t, {}).get('timeframe', '5m') for t in ['short', 'medium', 'long']]
+        async_manager = AsyncExchangeManager(
+            args.exchange, api_key, api_secret,
+            list(config['pairs'].keys()),
+            list(set(timeframes)),
+            bot_state, bot_lock, ohlcv_cache_manager, shutdown_event
+        )
+        async_manager.start()
+    else:
+        # Start candle downloader fallback
+        downloader = CandleDownloader(exchange, ohlcv_cache_manager)
+        downloader.start()
 
     # Dynamic benchmarking if capacity exists
     def dynamic_benchmark_worker():
@@ -830,44 +908,27 @@ def main():
 
     threading.Thread(target=dynamic_benchmark_worker, daemon=True).start()
 
-    # Silence ALL other handlers during Dashboard execution, keeping ONLY DashboardHandler
-    all_other_handlers = [h for h in logging.root.handlers if not isinstance(h, dashboard.DashboardHandler)]
-
-    with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock), refresh_per_second=2, screen=True) as live:
-        # Silence console output once dashboard is live
-        for h in all_other_handlers:
-            logging.root.removeHandler(h)
-
+    if args.headless:
         if args.mode in ['live', 'simulation', 'virtual']:
-            # Re-initialize bot_state to ensure keys exist before benchmarking
-            for symbol in config['pairs']:
-                pos_list = data_manager.get_positions(symbol) if data_manager else []
-                bot_state[symbol] = {'aggr': 'N/A', 'strategy': 'Benchmarking...', 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': 0}
-            live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
+            setup_bot_state(config, data_manager, bot_state)
+            run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state)
 
-            config['_active_term'] = args.term
-            import optimization
-            sellable = []
-            try:
-                sellable = trading_engine.get_sellable_assets(exchange, config)
-                with bot_lock: available_assets[:] = sellable
-            except: pass
+        threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
+        while not shutdown_event.is_set():
+            time.sleep(1)
+    else:
+        # Silence ALL other handlers during Dashboard execution, keeping ONLY DashboardHandler
+        all_other_handlers = [h for h in logging.root.handlers if not isinstance(h, dashboard.DashboardHandler)]
 
-            # Initial re-benchmarking for live/simulation inside the dashboard context
-            opt_map = optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=args.term, status=None, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager, priority_symbols=sellable)
-            pair_priorities = []
-            for sym, best in opt_map.items():
-                if sym in config['pairs']:
-                    config['pairs'][sym].update({'aggr': best['aggr'], 'strategy': best['strategy'], 'expected_profit': best.get('avg_bench_profit', best['profit'])})
-                    pair_priorities.append((sym, best['profit']))
-            config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
+        with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock), refresh_per_second=2, screen=True) as live:
+            # Silence console output once dashboard is live
+            for h in all_other_handlers:
+                logging.root.removeHandler(h)
 
-            if args.mode in ['simulation', 'virtual']:
-                trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
-
-            for symbol in config['pairs']:
-                pos_list = data_manager.get_positions(symbol)
-                bot_state[symbol] = {'aggr': config['pairs'][symbol].get('aggr', 'normal'), 'strategy': config['pairs'][symbol].get('strategy', 'simple_ema'), 'last_action': 'BUY' if pos_list else 'Waiting', 'positions': pos_list, 'position': pos_list[0] if pos_list else None, 'bench_profit': config['pairs'][symbol].get('expected_profit', 0)}
+            if args.mode in ['live', 'simulation', 'virtual']:
+                setup_bot_state(config, data_manager, bot_state)
+                live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
+                run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=ui)
 
         try:
             threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
