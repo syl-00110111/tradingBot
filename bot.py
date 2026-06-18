@@ -336,39 +336,53 @@ class AnalysisWorker(threading.Thread):
         self.pattern_manager = pattern_manager
         self.engine = engine
         self.config = config
+        self.executor = None
+        self.max_workers = 0
 
     def run(self):
         global instrumented_mem_footprint
-        while not shutdown_event.is_set():
-            cpu_count = os.cpu_count() or 1
-            # Aggressive worker scaling
-            max_workers = max(1, int(cpu_count * 0.8))
+        try:
+            while not shutdown_event.is_set():
+                cpu_count = os.cpu_count() or 1
 
-            with bot_lock:
-                footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
+                with bot_lock:
+                    footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
 
-            try:
-                cpu_usage = psutil.cpu_percent(interval=0.1)
-                mem_available = psutil.virtual_memory().available
-                # If we have headroom, push even further
-                if cpu_usage < 60 and mem_available > footprint * (max_workers + 1):
-                    max_workers = min(cpu_count * 2, max_workers + 2)
-            except: pass
-
-            batch = []
-            # Allow at least 1 even if cpu/mem are high
-            batch_limit = max(1, max_workers)
-            while len(batch) < batch_limit:
                 try:
-                    batch.append(analysis_queue.get(timeout=0.5))
-                except queue.Empty:
-                    break
+                    mem_info = psutil.virtual_memory()
+                    mem_available = mem_info.available
 
-            if not batch: continue
+                    # Conservative worker scaling: respect both CPU and Memory
+                    # We aim to use at most 70% of AVAILABLE memory for analysis workers
+                    mem_safe_workers = max(1, int((mem_available * 0.7) / footprint))
+                    new_max_workers = min(cpu_count, mem_safe_workers)
 
-            try:
-                mem_before = psutil.virtual_memory().used
-                with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=silent_worker_init) as process_executor:
+                    cpu_usage = psutil.cpu_percent(interval=0.1)
+                    # If we have high CPU usage, further throttle workers
+                    if cpu_usage > 80:
+                        new_max_workers = max(1, int(new_max_workers * 0.5))
+                except:
+                    new_max_workers = max(1, int(cpu_count * 0.5))
+
+                if self.executor is None or self.max_workers != new_max_workers:
+                    if self.executor:
+                        self.executor.shutdown(wait=False)
+                    self.max_workers = new_max_workers
+                    self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers, initializer=silent_worker_init)
+
+                batch = []
+                # Allow at least 1 even if cpu/mem are high
+                batch_limit = max(1, self.max_workers)
+                while len(batch) < batch_limit:
+                    try:
+                        batch.append(analysis_queue.get(timeout=0.5))
+                    except queue.Empty:
+                        break
+
+                if not batch: continue
+
+                try:
+                    mem_before = psutil.virtual_memory().used
                     futures = {}
                     for i, item in enumerate(batch):
                         priority, group_id, symbol = item
@@ -431,7 +445,7 @@ class AnalysisWorker(threading.Thread):
                             'mc_score': current_data.get('mc_score', 1.1)
                         }
 
-                        f = process_executor.submit(wrapped_analysis_task, symbol, timeframe, tf_secs, df, search_pool, glite, pinfo)
+                        f = self.executor.submit(wrapped_analysis_task, symbol, timeframe, tf_secs, df, search_pool, glite, pinfo)
                         futures[f] = item
 
                         # Instrumentation on first launch
@@ -477,8 +491,11 @@ class AnalysisWorker(threading.Thread):
                         finally:
                             with bot_lock: pending_analysis.discard(sym)
                             analysis_queue.task_done()
-            except Exception as e:
-                logging.error(f"AnalysisWorker batch error: {e}")
+                except Exception as e:
+                    logging.error(f"AnalysisWorker batch error: {e}")
+        finally:
+            if self.executor:
+                self.executor.shutdown(wait=True)
 
 class ExecutionWorker(threading.Thread):
     def __init__(self, exchange, data_manager, engine, config):
@@ -951,17 +968,18 @@ def main():
             for h in all_other_handlers:
                 logging.root.removeHandler(h)
 
-            if args.mode in ['live', 'simulation', 'virtual']:
-                setup_bot_state(config, data_manager, bot_state)
-                live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
-                run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=ui)
+            def startup_sequence():
+                if args.mode in ['live', 'simulation', 'virtual']:
+                    setup_bot_state(config, data_manager, bot_state)
+                    run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=ui)
 
-            try:
                 threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
                 threading.Thread(target=ui.input_thread_func, args=(exchange, data_manager, engine, config, bot_state, bot_lock, shutdown_event, trading_engine.execute_buy, trading_engine.execute_sell, play_sound), daemon=True).start()
-                while not shutdown_event.is_set():
-                    now_ts = time.time()
 
+            threading.Thread(target=startup_sequence, daemon=True).start()
+
+            try:
+                while not shutdown_event.is_set():
                     live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
                     time.sleep(0.5)
             finally:

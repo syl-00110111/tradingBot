@@ -333,20 +333,26 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
         if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
 
         cpu_count = os.cpu_count() or 1
-        # Increased workers to fully utilize CPU during benchmark
-        max_workers = max(1, cpu_count - 1)
 
         # Default footprint
         footprint = 1.0 * 1024 * 1024 * 1024
 
         try:
-            cpu_usage = psutil.cpu_percent(interval=0.5)
-            mem_available = psutil.virtual_memory().available
+            mem_info = psutil.virtual_memory()
+            mem_available = mem_info.available
 
-            if cpu_usage < 40 and mem_available > footprint*(max_workers+2):
-                max_workers += 1
+            # Conservative worker scaling: respect both CPU and Memory
+            # We aim to use at most 70% of AVAILABLE memory for benchmark workers
+            mem_safe_workers = max(1, int((mem_available * 0.7) / footprint))
+            max_workers = min(cpu_count, mem_safe_workers)
+
+            cpu_usage = psutil.cpu_percent(interval=0.5)
+            # If we have high CPU usage, further throttle workers
+            if cpu_usage > 80:
+                max_workers = max(1, int(max_workers * 0.5))
         except Exception as e:
             logging.debug(f"Failed to calculate dynamic workers: {e}")
+            max_workers = max(1, int(cpu_count * 0.5))
 
         executor_class = concurrent.futures.ProcessPoolExecutor
         mem_before = psutil.virtual_memory().used
