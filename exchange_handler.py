@@ -11,6 +11,7 @@ import threading
 import requests
 import pandas as pd
 from requests.adapters import HTTPAdapter
+import datetime
 
 class ThrottledExchange:
     def __init__(self, exchange, delay_ms=2):
@@ -611,7 +612,7 @@ class MockExchange(ExchangeInterface):
             'bids': [[price * 0.999, 1000.0], [price * 0.998, 2000.0]],
             'asks': [[price * 1.001, 1000.0], [price * 1.002, 2000.0]],
             'timestamp': time.time() * 1000,
-            'datetime': datetime.utcnow().isoformat()
+            'datetime': datetime.datetime.utcnow().isoformat()
         }
 
     def get_effective_price(self, symbol, side, amount):

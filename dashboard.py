@@ -291,7 +291,7 @@ class DashboardUI:
 
             if len(self.all_logs) > visible_count and should_step and self.marquee_enabled:
                 if now_ts > self.logs_pause_until:
-                    self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(visible_count)
+                    self.logs_scroll_offset = (self.logs_scroll_offset + 1) % visible_count
             
             log_table = Table(expand=True, box=None, padding=0, show_header=False)
             log_table.add_column("Message")
