@@ -557,25 +557,14 @@ class ExecutionWorker(threading.Thread):
                         if data['consecutive_sells'] >= 1 and data['positions']:
                              for idx, pos in enumerate(data['positions']):
                                  if self.engine.is_profitable(data['price'], pos['entry_price']):
-                                     if self.engine.validate_trade_mc(symbol, data, self.config):
-                                         if trading_engine.execute_sell(self.exchange, self.data_manager, self.engine, symbol, data, self.config, position_idx=idx):
-                                             data['last_action'] = 'SELL'
-                                             data['positions'] = self.data_manager.get_positions(symbol)
-                                             data['position'] = self.data_manager.get_position(symbol)
-                                             play_sound("sell", self.config)
-                                             break
-                                     else:
-                                         with bot_lock:
-                                             benchmarking_pairs.add(symbol)
-                                             current_term = pos.get('term', 'short')
-                                             term_cfg = self.config.get('expected_profit_terms', {}).get(current_term, {})
-                                             timeframe = term_cfg.get('timeframe', '5m')
-                                             tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
-                                             eval_candles = term_cfg.get('eval_candles', 60)
-                                             backoff_secs = (eval_candles * tf_map.get(timeframe, 300)) * 0.25
-                                             data['next_scan_allowed'] = time.time() + backoff_secs
-                                             logging.info(f"[{symbol}] MC validation rejected sell. Re-benchmarking and backing off for {int(backoff_secs/60)}m.")
+                                     # Monte Carlo validation bypassed for ALL sells
+                                     if trading_engine.execute_sell(self.exchange, self.data_manager, self.engine, symbol, data, self.config, position_idx=idx):
+                                         data['last_action'] = 'SELL'
+                                         data['positions'] = self.data_manager.get_positions(symbol)
+                                         data['position'] = self.data_manager.get_position(symbol)
+                                         play_sound("sell", self.config)
                                          break
+                                     break
                                  elif data['consecutive_sells'] >= 3:
                                      current_term = pos.get('term', 'short')
                                      term_order = ['short', 'medium', 'long']
@@ -585,26 +574,15 @@ class ExecutionWorker(threading.Thread):
                                              logging.info(f"[{symbol}] Shifting to {new_term} term.")
                                              data['consecutive_sells'] = 0
                                      else:
-                                         if self.engine.validate_trade_mc(symbol, data, self.config):
-                                             if trading_engine.execute_sell(self.exchange, self.data_manager, self.engine, symbol, data, self.config, position_idx=idx):
-                                                 data['last_action'] = 'SELL'
-                                                 data['positions'] = self.data_manager.get_positions(symbol)
-                                                 data['position'] = self.data_manager.get_position(symbol)
-                                                 play_sound("sell", self.config)
-                                                 logging.warning(f"[{symbol}] Auto-executing sell on longest term.")
-                                                 break
-                                         else:
-                                             with bot_lock:
-                                                 benchmarking_pairs.add(symbol)
-                                                 current_term = pos.get('term', 'short')
-                                                 term_cfg = self.config.get('expected_profit_terms', {}).get(current_term, {})
-                                                 timeframe = term_cfg.get('timeframe', '5m')
-                                                 tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
-                                                 eval_candles = term_cfg.get('eval_candles', 60)
-                                                 backoff_secs = (eval_candles * tf_map.get(timeframe, 300)) * 0.25
-                                                 data['next_scan_allowed'] = time.time() + backoff_secs
-                                                 logging.info(f"[{symbol}] MC validation rejected auto-sell. Re-benchmarking and backing off for {int(backoff_secs/60)}m.")
+                                         # Auto-sell on longest term: bypass Monte Carlo as it is a last-resort exit
+                                         if trading_engine.execute_sell(self.exchange, self.data_manager, self.engine, symbol, data, self.config, position_idx=idx):
+                                             data['last_action'] = 'SELL'
+                                             data['positions'] = self.data_manager.get_positions(symbol)
+                                             data['position'] = self.data_manager.get_position(symbol)
+                                             play_sound("sell", self.config)
+                                             logging.warning(f"[{symbol}] Auto-executing sell on longest term.")
                                              break
+                                         break
                 except Exception as e:
                     logging.error(f"ExecutionWorker error for {symbol}: {e}")
                 finally:
