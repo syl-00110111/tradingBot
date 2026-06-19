@@ -197,6 +197,9 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
         logging.info(f"[{symbol}] Executing buy of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price paid: {format_price(total_paid)} {get_base_currency(symbol, config)}")
         data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid, term=term)
 
+        # Update Amt immediately in bot_state
+        data['amt'] = (data.get('amt', 0) or 0) + exec_amount
+
         # Immediately update Sellable list
         asset = symbol.split('/')[0]
         with bot_lock:
@@ -262,6 +265,8 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
             logging.info(f"[{symbol}] Executing sell of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price received: {format_price(total_received)} {get_base_currency(symbol, config)}")
             profit = total_received - position.get('entry_total_base', 0)
             data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, position_idx=position_idx)
+            # Update Amt immediately in bot_state
+            data['amt'] = max(0, (data.get('amt', 0) or 0) - exec_amount)
             return True
         else:
             logging.error(f"[{symbol}] Sell failed: Exchange rejected order for amount {format_amount(sell_amount)}")
