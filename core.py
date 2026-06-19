@@ -134,7 +134,6 @@ class ExecutionService:
         elif analysis_res.get('sell_signal'):
             positions = data.get('positions', [])
             if positions:
-                data['consecutive_sells'] = data.get('consecutive_sells', 0) + 1
                 for idx, pos in enumerate(positions):
                     # 1. Try to sell with sure profit
                     success = await self.core.run_in_thread(
@@ -144,27 +143,20 @@ class ExecutionService:
                     )
 
                     if success:
-                        data['consecutive_sells'] = 0
                         break
 
-                    # 2. If profit not sure, check for term escalation (3 consecutive signals)
-                    if data['consecutive_sells'] >= 3:
-                        current_term = pos.get('term', 'short')
-                        term_order = ['short', 'medium', 'long']
-                        if current_term in term_order and term_order.index(current_term) < len(term_order) - 1:
-                            new_term = term_order[term_order.index(current_term) + 1]
-                            if self.core.data_manager.update_position_term(symbol, idx, new_term):
-                                logging.info(f"[{symbol}] Escalating to {new_term} term.")
-                                data['consecutive_sells'] = 0
-                        else:
-                            # 3. Force sell on longest term if signals persist
-                            await self.core.run_in_thread(
-                                execute_sell,
-                                self.core.exchange, self.core.data_manager, self.core.engine,
-                                symbol, data, self.core.config, idx, True # Force
-                            )
-                            data['consecutive_sells'] = 0
-                            break
+                    # 2. If profit not sure, perform term escalation
+                    current_term = pos.get('term', 'short')
+                    term_order = ['short', 'medium', 'long']
+                    if current_term in term_order and term_order.index(current_term) < len(term_order) - 1:
+                        new_term = term_order[term_order.index(current_term) + 1]
+                        if self.core.data_manager.update_position_term(symbol, idx, new_term):
+                            logging.info(f"[{symbol}] Sure profit not met. Upgrading position and pair to {new_term} term.")
+                            # Persistent for the pair during this session and future analysis cycles
+                            self.core.config.setdefault('pairs', {}).setdefault(symbol, {})['term_override'] = new_term
+                    else:
+                        # Already at long term, just wait but warn user
+                        logging.warning(f"[{symbol}] Sure profit not met on LONG term position. Waiting for better price.")
 
 class TradingCore:
     """The 'Perfect Trader' Core with 10 hands (Services)."""
@@ -200,7 +192,16 @@ class TradingCore:
         while not self.shutdown_event.is_set():
             try:
                 pair_cfg = self.config.get('pairs', {}).get(symbol, {})
-                term = pair_cfg.get('term_override', self.config.get('_active_term', 'short'))
+
+                # Perfect Trader: prioritize term of open positions
+                open_positions = self.data_manager.get_positions(symbol)
+                term_order = ['short', 'medium', 'long']
+                if open_positions:
+                    max_term_idx = max([term_order.index(p.get('term', 'short')) for p in open_positions])
+                    term = term_order[max_term_idx]
+                else:
+                    term = pair_cfg.get('term_override', self.config.get('_active_term', 'short'))
+
                 term_cfg = self.config.get('expected_profit_terms', {}).get(term, {})
                 # Use 1m as default as per instruction
                 timeframe = term_cfg.get('timeframe', '1m')

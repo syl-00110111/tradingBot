@@ -55,7 +55,7 @@ class TradingEngine:
         Conservative profitability check accounting for fees on both sides.
         Default fee_rate 0.0015 (0.15%) to be safe.
         """
-        min_exit_price = entry_price + (fee_rate * 2)
+        min_exit_price = entry_price * (1 + fee_rate * 2)
         return exit_price > min_exit_price
 
     def check_sure_profit(self, exchange, symbol, amount, entry_price, fee_rate=0.0015):
@@ -164,13 +164,6 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
     if free_balance < cost:
         logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)}). Suspending pair.")
         suspended_pairs.add(symbol)
-        return False
-
-    # Perfect Trader: Simulate immediate sell to ensure profit is theoretically possible even with slippage
-    fee_rate = exchange.fetch_trading_fee(symbol)
-    effective_sell_price = exchange.get_effective_price(symbol, 'sell', amount)
-    if not engine.is_profitable(effective_sell_price, effective_buy_price, fee_rate=fee_rate):
-        logging.warning(f"[{symbol}] Buy aborted: Sure profit not guaranteed after slippage and fees (Buy: {effective_buy_price}, Est. Sell: {effective_sell_price})")
         return False
 
     # Check NOTIONAL / Minimum Cost filter

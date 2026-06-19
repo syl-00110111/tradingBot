@@ -138,12 +138,14 @@ def create_consolidated_archive(delete_after=True):
 
 def load_from_archive():
     """Extracts files from the consolidated archive back to disk."""
-    if not os.path.exists(ARCHIVE_NAME):
+    if not os.path.exists(ARCHIVE_NAME) or os.path.getsize(ARCHIVE_NAME) == 0:
         return
 
     with persistence_lock:
         try:
             with zipfile.ZipFile(ARCHIVE_NAME, 'r') as z:
+                if not z.namelist():
+                    return
                 z.extractall()
             logging.info(f"Successfully restored data from {ARCHIVE_NAME}")
         except Exception as e:
@@ -151,8 +153,22 @@ def load_from_archive():
 
 def migrate_fresh_files_to_archive():
     """One-time migration at startup to ensure disk files are in the zip and cleaned up."""
-    logging.info("Syncing disk files to archive...")
-    create_consolidated_archive(delete_after=True)
+    files_to_archive = [
+        'success_patterns.json',
+        'benchmark_cache.json',
+        'trades_history_live.json',
+        'trades_history_simulation.json'
+    ]
+    present = any(os.path.exists(f) for f in files_to_archive)
+    if not present and os.path.exists(OHLCV_DIR):
+        try:
+            if any(f.endswith('.pkl') for f in os.listdir(OHLCV_DIR)):
+                present = True
+        except: pass
+
+    if present:
+        logging.info("Syncing disk files to archive...")
+        create_consolidated_archive(delete_after=True)
 
 class DataManager:
     def __init__(self, mode='simulation'):
