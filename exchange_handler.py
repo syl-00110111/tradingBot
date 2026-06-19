@@ -164,13 +164,23 @@ class CCXTExchange(ExchangeInterface):
             if order and 'fee' in order and order['fee']:
                 fee_cost = order['fee'].get('cost', 0)
                 fee_currency = order['fee'].get('currency', '')
-                _, quote = symbol.split('/')
+                base, quote = symbol.split('/')
 
-                # If fee is in base currency, convert it to quote currency
+                # If fee is in a different currency than the quote asset, convert it to quote asset
                 if fee_currency != quote and fee_cost > 0:
-                    ticker = self.fetch_ticker(symbol)
-                    if ticker and ticker.get('last'):
-                        fee_cost = fee_cost * ticker['last']
+                    if fee_currency == base:
+                        ticker = self.fetch_ticker(symbol)
+                        if ticker and ticker.get('last'):
+                            fee_cost = fee_cost * ticker['last']
+                    else:
+                        # Try conversion via fee_currency/quote
+                        try:
+                            conv_ticker = self.fetch_ticker(f"{fee_currency}/{quote}")
+                            if conv_ticker and conv_ticker.get('last'):
+                                fee_cost = fee_cost * conv_ticker['last']
+                        except:
+                            # Fallback to pair price if it was somehow related or just keep as is
+                            pass
 
                 order['calculated_fee'] = fee_cost
             else:

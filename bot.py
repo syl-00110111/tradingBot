@@ -435,6 +435,12 @@ class AnalysisWorker(threading.Thread):
 
                         with bot_lock:
                             current_data = bot_state.get(symbol, {})
+                            # Eagerly update candle data for UI (candle charts) even before analysis
+                            current_data.update({
+                                'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()},
+                                'last_100_candles': {'prices': df['close'].tail(100).tolist(), 'volumes': df['volume'].tail(100).tolist()},
+                                'price': df.iloc[-1]['close']
+                            })
                             last_processed_ts = current_data.get('last_processed_ts', 0)
                             current_global_pool = list(global_pattern_pool)
 
@@ -566,7 +572,8 @@ class ExecutionWorker(threading.Thread):
 
                         if data['consecutive_sells'] >= 1 and data['positions']:
                              for idx, pos in enumerate(data['positions']):
-                                 if self.engine.is_profitable(data['price'], pos['entry_price']):
+                                 # Use a conservative fee rate for the profitability check
+                                 if self.engine.is_profitable(data['price'], pos['entry_price'], fee_rate=0.002):
                                      # Monte Carlo validation bypassed for ALL sells
                                      if trading_engine.execute_sell(self.exchange, self.data_manager, self.engine, symbol, data, self.config, position_idx=idx):
                                          data['last_action'] = 'SELL'
@@ -611,14 +618,21 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
     for sym in all_symbols:
         with bot_lock:
-            bot_state[sym] = {
-                'price': 0, 'positions': data_manager.get_positions(sym),
-                'position': data_manager.get_position(sym),
-                'strategy': 'Discovering...', 'aggr': 'N/A', 'bench_profit': 0,
-                'consecutive_buys': 0, 'consecutive_sells': 0, 'last_action': 'WAITING',
-                'scan_attempts': 0, 'next_scan_allowed': 0,
-                'last_mc_ts': 0, 'mc_score': 1.1, 'last_processed_ts': 0
-            }
+            if sym not in bot_state:
+                bot_state[sym] = {
+                    'price': 0, 'positions': data_manager.get_positions(sym),
+                    'position': data_manager.get_position(sym),
+                    'strategy': 'Discovering...', 'aggr': 'N/A', 'bench_profit': 0,
+                    'consecutive_buys': 0, 'consecutive_sells': 0, 'last_action': 'WAITING',
+                    'scan_attempts': 0, 'next_scan_allowed': 0,
+                    'last_mc_ts': 0, 'mc_score': 1.1, 'last_processed_ts': 0
+                }
+            else:
+                # Ensure latest positions are synced
+                bot_state[sym].update({
+                    'positions': data_manager.get_positions(sym),
+                    'position': data_manager.get_position(sym),
+                })
 
     # Start workers
     AnalysisWorker(exchange, data_manager, pattern_manager, engine, config).start()
@@ -684,16 +698,38 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
         if elapsed < 5.0: time.sleep(5.0 - elapsed)
 
 def setup_bot_state(config, data_manager, bot_state):
-    """Initializes the bot state for all configured pairs."""
+    """Initializes the bot state for all configured pairs, using cache if available."""
+    from persistence import CacheManager
+    cache_mgr = CacheManager()
+    active_term = config.get('_active_term', 'short')
+
     for symbol in config['pairs']:
         pos_list = data_manager.get_positions(symbol) if data_manager else []
+
+        # Load from cache to avoid "Discovering..." if we already know this pair
+        cached = cache_mgr.get(symbol, active_term)
+        if cached and isinstance(cached, list) and len(cached) > 0:
+            best = cached[0]
+            aggr = best.get('aggr', 'balanced')
+            strategy = best.get('strategy', 'simple_ema')
+            bench_profit = best.get('avg_bench_profit', best.get('profit', 0))
+        else:
+            aggr = 'N/A'
+            strategy = 'Discovering...'
+            bench_profit = 0
+
         bot_state[symbol] = {
-            'aggr': 'N/A',
-            'strategy': 'Discovering...',
+            'aggr': aggr,
+            'strategy': strategy,
             'last_action': 'BUY' if pos_list else 'Waiting',
             'positions': pos_list,
             'position': pos_list[0] if pos_list else None,
-            'bench_profit': 0
+            'bench_profit': bench_profit,
+            'consecutive_buys': 0,
+            'consecutive_sells': 0,
+            'last_mc_ts': 0,
+            'mc_score': 1.1,
+            'last_processed_ts': 0
         }
 
 def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=None):

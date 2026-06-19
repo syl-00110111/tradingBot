@@ -50,11 +50,15 @@ class TradingEngine:
             })
         return settings
 
-    def is_profitable(self, current_price, entry_price, fee_rate=0.001):
+    def is_profitable(self, current_price, entry_price, fee_rate=0.0015):
+        """
+        Conservative profitability check accounting for fees on both sides.
+        Default fee_rate 0.0015 (0.15%) to be safe.
+        """
         min_exit_price = entry_price * (1 + fee_rate * 2)
         return current_price > min_exit_price
 
-    def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
+    def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.0015):
         return self.is_profitable(current_price, entry_price, fee_rate)
 
     def validate_trade_mc(self, symbol, data, config):
@@ -328,21 +332,26 @@ def sync_live_positions(exchange, data_manager, config):
     """Verifies that all tracked positions in DataManager still exist in the exchange wallet."""
     balance = exchange.fetch_balance()
     if not balance: return
-    free_balances = balance.get('free', balance)
+
+    # Use 'total' balance if available to account for funds in orders,
+    # but 'free' is safer for immediate sellability.
+    # Standardizing on 'total' to avoid false pruning if user has manual orders.
+    balances = balance.get('total', balance)
 
     tracked_positions = data_manager.get_open_positions()
     for symbol, positions in tracked_positions.items():
         base_asset = symbol.split('/')[0]
-        actual_balance = free_balances.get(base_asset, 0)
+        actual_balance = balances.get(base_asset, 0)
 
         total_tracked_amount = sum(p['amount'] for p in positions)
 
-        # If real balance is significantly lower than tracked amount, prune tracking
+        # If real balance is significantly lower than tracked amount (5% tolerance), prune tracking
         if actual_balance < total_tracked_amount * 0.95:
              logging.warning(f"[{symbol}] Tracked amount ({total_tracked_amount}) exceeds real balance ({actual_balance}). Pruning tracking.")
              # We clear and wait for next sync or manual intervention
-             for _ in range(len(positions)):
-                  data_manager.close_position(symbol, 0, 0, 0, {"note": "Pruned during sync"}, time.time())
+             # Pass a dummy position_idx=0 to pop the first one repeatedly until empty
+             while data_manager.get_positions(symbol):
+                  data_manager.close_position(symbol, 0, 0, 0, {"note": "Pruned during sync"}, time.time(), position_idx=0)
 
 def get_sellable_assets_sim(data_manager):
     positions = data_manager.get_open_positions()
