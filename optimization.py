@@ -67,7 +67,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     term_settings = config.get('expected_profit_terms', {}).get(term, {})
     if not term_settings:
         return None
-    timeframe = term_settings.get('timeframe', '5m')
+    timeframe = term_settings.get('timeframe', '1m')
 
     if df_in is None:
         try:
@@ -300,7 +300,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
     term_to_test = term_override if term_override else (args.term if args else 'short')
     terms_cfg = config.get('expected_profit_terms', {})
     term_cfg = terms_cfg.get(term_to_test, {})
-    timeframe = term_cfg.get('timeframe', '5m')
+    timeframe = term_cfg.get('timeframe', '1m')
 
     strategies = CORE_STRATEGIES
     aggrs = ['balanced']
@@ -368,8 +368,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             logging.error(f"Error preparing {sym}: {e}")
             return None
 
-    # Increased max_workers for faster parallel historical data fetching
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    # Increased max_workers for faster parallel historical data fetching - Doubled to 40
+    with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
         futures = {executor.submit(fetch_and_validate, sym): sym for sym in symbols}
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             res = future.result()
@@ -408,10 +408,10 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             mem_info = psutil.virtual_memory()
             mem_available = mem_info.available
 
-            # Conservative worker scaling: respect both CPU and Memory
-            # We aim to use at most 70% of AVAILABLE memory for benchmark workers
-            mem_safe_workers = max(1, int((mem_available * 0.7) / footprint))
-            max_workers = min(cpu_count, mem_safe_workers)
+            # Increased worker scaling for poor hardware - 10 hands
+            # We aim to use at most 90% of AVAILABLE memory for benchmark workers
+            mem_safe_workers = max(1, int((mem_available * 0.9) / footprint))
+            max_workers = min(cpu_count * 2, mem_safe_workers)
 
             cpu_usage = psutil.cpu_percent(interval=None)
             # If we have high CPU usage, further throttle workers
