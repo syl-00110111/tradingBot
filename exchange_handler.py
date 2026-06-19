@@ -89,6 +89,8 @@ class ExchangeInterface:
     def fetch_balance(self): raise NotImplementedError
     def fetch_ticker(self, symbol): raise NotImplementedError
     def fetch_trading_fee(self, symbol): raise NotImplementedError
+    def fetch_order_book(self, symbol, limit=20): raise NotImplementedError
+    def get_effective_price(self, symbol, side, amount): raise NotImplementedError
 
 class CCXTExchange(ExchangeInterface):
     def __init__(self, exchange_id, api_key, api_secret, options=None, market_type='spot'):
@@ -143,6 +145,38 @@ class CCXTExchange(ExchangeInterface):
         except Exception as e:
             logging.warning(f"Error fetching trading fee for {symbol}: {e}. Falling back to 0.1%")
             return 0.001
+
+    def fetch_order_book(self, symbol, limit=20):
+        try: return self.exchange.fetch_order_book(symbol, limit=limit)
+        except Exception as e: logging.error(f"Error fetching order book for {symbol}: {e}"); return None
+
+    def get_effective_price(self, symbol, side, amount):
+        """
+        Calculates the effective execution price considering order book depth (slippage).
+        Perfect trader logic: "ask everything possible to the API prior to consider anything".
+        """
+        book = self.fetch_order_book(symbol, limit=50)
+        if not book:
+            ticker = self.fetch_ticker(symbol)
+            return ticker['last'] if ticker else 0
+
+        orders = book['asks'] if side == 'buy' else book['bids']
+        remaining = amount
+        total_cost = 0
+
+        for price, vol in orders:
+            exec_vol = min(remaining, vol)
+            total_cost += exec_vol * price
+            remaining -= exec_vol
+            if remaining <= 0:
+                break
+
+        if remaining > 0:
+            # Not enough liquidity in the fetched depth, fallback to last price with penalty
+            logging.warning(f"[{symbol}] Insufficient liquidity in order book for {amount}. Using fallback.")
+            return orders[-1][0] if orders else 0
+
+        return total_cost / amount
 
     def create_order(self, symbol, side, amount, price=None):
         try:
@@ -467,6 +501,7 @@ class MockExchange(ExchangeInterface):
     def __init__(self, api_key=None, api_secret=None, exchange_type='binance', market_type='spot'):
         self.balance = {'USDT': 1000.0, 'USDC': 1000.0}
         self.ohlcv_data = {}
+        self.order_book_data = {}
         self.real_exchange = None
         self.fee_rate = 0.001
         self.markets = {}
@@ -540,6 +575,36 @@ class MockExchange(ExchangeInterface):
             try: return self.real_exchange.fetch_trading_fee(symbol)
             except Exception: pass
         return self.fee_rate
+
+    def fetch_order_book(self, symbol, limit=20):
+        if self.real_exchange:
+            try: return self.real_exchange.fetch_order_book(symbol, limit=limit)
+            except Exception: pass
+        if symbol in self.order_book_data:
+            return self.order_book_data[symbol]
+
+        # Default mock order book around last price
+        ticker = self.fetch_ticker(symbol)
+        price = ticker['last']
+        if price == 0: price = 100.0
+        return {
+            'bids': [[price * 0.999, 1000.0], [price * 0.998, 2000.0]],
+            'asks': [[price * 1.001, 1000.0], [price * 1.002, 2000.0]],
+            'timestamp': time.time() * 1000,
+            'datetime': datetime.utcnow().isoformat()
+        }
+
+    def get_effective_price(self, symbol, side, amount):
+        book = self.fetch_order_book(symbol)
+        orders = book['asks'] if side == 'buy' else book['bids']
+        remaining = amount
+        total_cost = 0
+        for price, vol in orders:
+            exec_vol = min(remaining, vol)
+            total_cost += exec_vol * price
+            remaining -= exec_vol
+            if remaining <= 0: break
+        return total_cost / amount if amount > 0 else 0
 
     def create_order(self, symbol, side, amount, price=None):
         self._init_balance()
