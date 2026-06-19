@@ -236,7 +236,7 @@ class DashboardUI:
                             f"{fmt_sig(data.get('rsi', 0), 4)}",
                             f"{fmt_sig(data.get('volatility', 0), 11)}/{float(data.get('adx', 0)):.1f}",
                             f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
-                            f"{data.get('score', 0)}"
+                            f"{fmt_sig(data.get('score', 0), 6)}"
                         ]
                     else:
                         row_vals = [
@@ -258,19 +258,24 @@ class DashboardUI:
             log_height = self.console.height - 9
             if log_height < 3: log_height = 3
 
-            # We estimate that each log takes about 2 visual lines on average due to wrapping
-            estimated_visual_lines_per_log = 2
+            # We estimate that each log takes about 6 visual lines on average due to wrapping in narrow panels
+            estimated_visual_lines_per_log = 6
             visible_count = log_height // estimated_visual_lines_per_log
             if visible_count < 1: visible_count = 1
 
             # Scrolling and following logic
+            if now_ts > self.logs_pause_until:
+                 # Auto-follow mode: keep the cursor on the latest
+                 if self.all_logs:
+                     self.selected_log_index = len(self.all_logs) - 1
+                 else:
+                     self.selected_log_index = 0
+
             if len(self.all_logs) <= visible_count:
                 self.logs_scroll_offset = 0
                 visible_logs_with_idx = [(i, log) for i, log in enumerate(self.all_logs)]
             else:
                 if now_ts > self.logs_pause_until:
-                     # Auto-follow mode: keep the cursor on the latest and ensure it's visible
-                     self.selected_log_index = len(self.all_logs) - 1
                      self.logs_scroll_offset = len(self.all_logs) - visible_count
                 else:
                      # Manual mode: ensure the selected index is visible
