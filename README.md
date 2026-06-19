@@ -119,7 +119,7 @@ To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` o
 - **Benchmark**: `python bot.py --mode benchmark --every-symbol`
 - **Backtest**: `python bot.py --mode backtest --symbol BTC/USDT --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
-- **Sell everything without any confirmation**: `python bot.py --mode sell`
+- **Interactive closings**: `python bot.py --mode sell`
 
 ---
 
