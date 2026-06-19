@@ -86,7 +86,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
          latest = df.iloc[-1]
          adx_v = latest.get('adx', 0)
          vol_v = latest.get('volatility', 0)
-         aggr_settings = engine.get_dynamic_settings(adx_v, vol_v)
+         aggr_settings_full = engine.get_dynamic_settings(adx_v, vol_v)
+         aggr_settings = {k: v for k, v in aggr_settings_full.items() if k != 'label'}
     else:
          aggr_settings = {"ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9}
 

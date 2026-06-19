@@ -259,16 +259,20 @@ class DashboardUI:
                 if now_ts > self.logs_pause_until:
                     self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs)
 
-            if len(self.all_logs) <= log_height:
+            # We estimate that each log takes about 3 visual lines on average due to wrapping
+            estimated_visual_lines_per_log = 3
+            visible_count = max(1, log_height // estimated_visual_lines_per_log)
+
+            if len(self.all_logs) <= visible_count:
                 visible_logs = self.all_logs
                 self.logs_scroll_offset = 0 # Follow tail if not overflowing
             else:
                 # If marquee is disabled, we follow the tail unless manual scroll was used recently
                 if not self.marquee_enabled and now_ts > self.logs_pause_until:
-                     self.logs_scroll_offset = len(self.all_logs) - log_height
+                     self.logs_scroll_offset = len(self.all_logs) - visible_count
 
                 visible_logs = []
-                for i in range(log_height):
+                for i in range(visible_count):
                     idx = (self.logs_scroll_offset + i) % len(self.all_logs)
                     visible_logs.append(self.all_logs[idx])
 
@@ -279,7 +283,7 @@ class DashboardUI:
                     log_text.append(Text.from_markup(log_entry['msg'], style=style))
                 except Exception:
                     log_text.append(log_entry['msg'], style=style)
-                log_text.append("\n")
+                log_text.append("\n\n") # Extra spacing to account for visual lines
 
             # Add 3 blank lines at the end for breathing room
             if not visible_logs:

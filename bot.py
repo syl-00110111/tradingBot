@@ -168,15 +168,24 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
             curr_adx = latest.get('adx', 0)
             curr_vol = latest.get('volatility', 0)
 
-            # Replicate get_dynamic_settings logic
+            # Replicate get_dynamic_settings logic with dynamic labeling
             settings = {
                 "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
                 "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
+                "label": "balanced"
             }
             if curr_adx > 25:
-                settings.update({"ema_fast": 10, "ema_slow": 30, "rsi_buy": 40, "rsi_sell": 60})
+                settings.update({
+                    "ema_fast": 10, "ema_slow": 30,
+                    "rsi_buy": 40, "rsi_sell": 60,
+                    "label": "aggressive"
+                })
             elif curr_vol > global_config_lite.get('min_profit', 0.01):
-                settings.update({"ema_fast": 30, "ema_slow": 100, "rsi_buy": 20, "rsi_sell": 80})
+                settings.update({
+                    "ema_fast": 30, "ema_slow": 100,
+                    "rsi_buy": 20, "rsi_sell": 80,
+                    "label": "conservative"
+                })
 
             settings.update({'strategy': active_pattern['strategy'], 'device': device})
             df = get_signals(df, settings, is_backtest=False)
@@ -209,7 +218,7 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
                 'buy_signal': latest.get('buy_signal', False),
                 'sell_signal': latest.get('sell_signal', False),
                 'strategy': active_pattern['strategy'],
-                'aggr': active_pattern['aggr'],
+                'aggr': settings.get('label', active_pattern['aggr']),
                 'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
                 'active_pattern_id': active_pattern_id,
                 'pattern_match_ts': pattern_match_ts,
