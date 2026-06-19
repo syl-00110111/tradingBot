@@ -255,7 +255,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             term = pair_config.get('term_override', active_term)
 
         term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
-        timeframe = term_cfg.get('timeframe', '5m')
+        timeframe = term_cfg.get('timeframe', '1m')
 
         # Request candle update from background downloader
         with bot_lock:
@@ -380,7 +380,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     with bot_lock:
         term = config.get('_active_term', 'short')
         term_cfg = config.get('expected_profit_terms', {}).get(term, {})
-        timeframe = term_cfg.get('timeframe', '5m')
+        timeframe = term_cfg.get('timeframe', '1m')
         for sym in all_symbols:
             if (sym, timeframe) not in pending_downloads:
                 candle_queue.put((2, sym, timeframe, 500, None))
@@ -696,7 +696,7 @@ def main():
     ws_started = False
     if args.mode in ['live', 'simulation', 'virtual'] and args.exchange != 'mock':
         from exchange_handler import AsyncExchangeManager
-        timeframes = [config.get('expected_profit_terms', {}).get(t, {}).get('timeframe', '5m') for t in ['short', 'medium', 'long']]
+        timeframes = [config.get('expected_profit_terms', {}).get(t, {}).get('timeframe', '1m') for t in ['short', 'medium', 'long']]
         market_type = api_creds.get('market', config.get('market', 'spot'))
         async_manager = AsyncExchangeManager(
             args.exchange, api_key, api_secret,
@@ -727,7 +727,8 @@ def main():
                 with bot_lock:
                     footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
 
-                if cpu_usage < 30 and mem_available > (footprint * 2):
+                # Increased threshold for poor hardware - 10 hands
+                if cpu_usage < 60 and mem_available > (footprint * 1.1):
                     with bot_lock:
                         if not benchmarking_pairs and config.get('pairs'):
                             all_syms = list(config['pairs'].keys())

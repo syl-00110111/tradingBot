@@ -52,9 +52,10 @@ class AnalysisService:
 
     def start(self):
         cpu_count = os.cpu_count() or 1
-        # Dynamic scaling based on memory
+        # Dynamic scaling based on memory - increased for "10 hands and 100 fingers"
         mem_available = psutil.virtual_memory().available
-        max_workers = min(cpu_count, max(1, int((mem_available * 0.7) / self.instrumented_footprint)))
+        # Use up to 90% of memory if needed, since hardware might be limited but we want max hands
+        max_workers = min(cpu_count * 2, max(2, int((mem_available * 0.9) / self.instrumented_footprint)))
         self.process_executor = concurrent.futures.ProcessPoolExecutor(
             max_workers=max_workers,
             initializer=silent_worker_init
@@ -171,7 +172,7 @@ class TradingCore:
         self.state_lock = threading.RLock()
         self.shutdown_event = asyncio.Event()
 
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 
         # Services (Hands)
         self.market_data = MarketDataService(self)
@@ -189,12 +190,13 @@ class TradingCore:
                 pair_cfg = self.config.get('pairs', {}).get(symbol, {})
                 term = pair_cfg.get('term_override', self.config.get('_active_term', 'short'))
                 term_cfg = self.config.get('expected_profit_terms', {}).get(term, {})
-                timeframe = term_cfg.get('timeframe', '5m')
+                # Use 1m as default as per instruction
+                timeframe = term_cfg.get('timeframe', '1m')
 
                 # 1. API-First: Fetch fresh candles
                 ohlcv = await self.market_data.get_fresh_data(symbol, timeframe)
                 if not ohlcv:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(5)
                     continue
 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -207,8 +209,8 @@ class TradingCore:
                     # 3. Execution: Verified trade
                     await self.execution.process_signal(symbol, res)
 
-                # Dynamic backoff or sleep
-                await asyncio.sleep(5)
+                # Double the frequency (2s instead of 5s)
+                await asyncio.sleep(2)
             except Exception as e:
                 logging.error(f"Error in pair_worker for {symbol}: {e}")
                 await asyncio.sleep(30)
