@@ -270,7 +270,10 @@ def get_signals(df, mode_config, is_backtest=False):
 
 
 def finalize_signals(df):
-    """Signals are used directly without any confirmation window."""
+    """
+    Finalizes signals. Documentation (BOT_WORKFLOW.md) mentions SPM and Monte Carlo hurdles.
+    Signals here are 'candidates' until verified by the SPM/MC engines in the trading loop.
+    """
     df['buy_signal'] = df['buy_candidate']
     df['sell_signal'] = df['sell_candidate']
     return df
@@ -348,7 +351,8 @@ def calculate_similarity_batch(buffer_df, patterns, device=torch.device('cpu')):
         dist_adx = torch.abs(curr_adx - adx_targets) / 100.0
         tech_sims = 1.0 - (dist_rsi + dist_adx) / 2.0
 
-        # Combined Scores
+        # Combined Scores (Strictly match BOT_WORKFLOW.md Weights)
+        # Price Shape: 0.5, Volume Shape: 0.2, Tech State: 0.3
         combined = (0.5 * torch.clamp(price_corrs, min=0)) + (0.2 * torch.clamp(vol_corrs, min=0)) + (0.3 * tech_sims)
 
         for i, p in enumerate(p_list):

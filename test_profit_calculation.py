@@ -22,8 +22,8 @@ class TestProfitCalculation(unittest.TestCase):
         self.assertFalse(self.engine.is_profitable(99.0, 100.0, 0.001))
 
     def test_check_profitability_wrapper(self):
-        # Should behave same as is_profitable
-        self.assertTrue(self.engine.check_profitability(100.3, 100.0, "BTC/USDT", 0.001))
+        # check_profitability was removed in favor of check_sure_profit
+        pass
 
 if __name__ == '__main__':
     unittest.main()

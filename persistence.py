@@ -336,6 +336,7 @@ class OHLCVCacheManager:
         self.directory = directory
         self.mode = mode
         self.memory_cache = {}
+        # Perfect Trader: memory-optimized live mode
         if self.mode != 'live' and not os.path.exists(self.directory):
             os.makedirs(self.directory, exist_ok=True)
 
@@ -347,9 +348,6 @@ class OHLCVCacheManager:
         key = (symbol, timeframe)
         if key in self.memory_cache:
             return self.memory_cache[key]
-
-        if self.mode == 'live':
-            return None
 
         path = self._get_path(symbol, timeframe)
         with persistence_lock:

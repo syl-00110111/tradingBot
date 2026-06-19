@@ -48,6 +48,8 @@ from monte_carlo import MonteCarloEngine
 import utils
 from utils import format_price, format_amount, get_base_currency, play_sound, silent_worker_init, load_config, load_config_from_path
 
+from core import TradingCore
+
 # Global objects
 ohlcv_cache_manager = None
 global_pattern_pool = []
@@ -65,6 +67,7 @@ suspended_pairs = set()
 signal_arrival_times = {}
 bot_lock = threading.RLock()
 shutdown_event = threading.Event()
+async_shutdown_event = None # Initialized in main
 pending_asset_update = False
 
 console = Console()
@@ -338,274 +341,8 @@ def wrapped_analysis_task(symbol, timeframe, tf_secs, df, search_pool, global_co
     """Picklable wrapper for the multiprocess analysis task."""
     return perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info)
 
-class AnalysisWorker(threading.Thread):
-    def __init__(self, exchange, data_manager, pattern_manager, engine, config):
-        super().__init__(daemon=True)
-        self.exchange = exchange
-        self.data_manager = data_manager
-        self.pattern_manager = pattern_manager
-        self.engine = engine
-        self.config = config
-        self.executor = None
-        self.max_workers = 0
-
-    def run(self):
-        global instrumented_mem_footprint
-        last_metric_check = 0
-        try:
-            while not shutdown_event.is_set():
-                cpu_count = os.cpu_count() or 1
-                now = time.time()
-
-                # Check metrics and adjust workers every 10 seconds to avoid flapping and overhead
-                if now - last_metric_check > 10 or self.executor is None:
-                    last_metric_check = now
-                    with bot_lock:
-                        footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
-
-                    try:
-                        mem_info = psutil.virtual_memory()
-                        mem_available = mem_info.available
-
-                        # Conservative worker scaling: respect both CPU and Memory
-                        # We aim to use at most 70% of AVAILABLE memory for analysis workers
-                        mem_safe_workers = max(1, int((mem_available * 0.7) / footprint))
-                        new_max_workers = min(cpu_count, mem_safe_workers)
-
-                        cpu_usage = psutil.cpu_percent(interval=None)
-                        # If we have high CPU usage, further throttle workers
-                        if cpu_usage > 80:
-                            new_max_workers = max(1, int(new_max_workers * 0.5))
-                    except:
-                        new_max_workers = max(1, int(cpu_count * 0.5))
-
-                    if self.executor is None or self.max_workers != new_max_workers:
-                        if self.executor:
-                            self.executor.shutdown(wait=False)
-                        self.max_workers = new_max_workers
-                        self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers, initializer=silent_worker_init)
-
-                batch = []
-                # Allow at least 1 even if cpu/mem are high
-                batch_limit = max(1, self.max_workers)
-                while len(batch) < batch_limit:
-                    try:
-                        batch.append(analysis_queue.get(timeout=0.5))
-                    except queue.Empty:
-                        break
-
-                if not batch: continue
-
-                try:
-                    mem_before = psutil.virtual_memory().used
-                    futures = {}
-                    for i, item in enumerate(batch):
-                        priority, group_id, symbol = item
-                        pairs_dict = self.config.get('pairs', {})
-                        pair_cfg = pairs_dict.get(symbol, {})
-
-                        # Data Prep (Thread-side)
-                        patterns = self.pattern_manager.get_patterns(symbol)
-                        open_positions = self.data_manager.get_positions(symbol)
-                        term_order = ['short', 'medium', 'long']
-                        active_term = self.config.get('_active_term', 'short')
-                        term = pair_cfg.get('term_override', active_term)
-                        if open_positions:
-                            max_term_idx = max([term_order.index(p.get('term', 'short')) for p in open_positions])
-                            term = term_order[max_term_idx]
-
-                        term_cfg = self.config.get('expected_profit_terms', {}).get(term, {})
-                        timeframe = term_cfg.get('timeframe', '5m')
-
-                        with bot_lock:
-                            download_key = (symbol, timeframe)
-                            now_ts = time.time()
-                            if download_key not in pending_downloads and (now_ts - last_download_time.get(download_key, 0) > 30):
-                                candle_queue.put((0 if open_positions else 1, symbol, timeframe, 500, None))
-                                pending_downloads.add(download_key)
-
-                        cached = ohlcv_cache_manager.get(symbol, timeframe)
-                        if not cached:
-                            with bot_lock: pending_analysis.discard(symbol)
-                            analysis_queue.task_done()
-                            continue
-
-                        ohlcv = cached[-500:]
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-                        with bot_lock:
-                            current_data = bot_state.get(symbol, {})
-                            # Eagerly update candle data for UI (candle charts) even before analysis
-                            current_data.update({
-                                'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()},
-                                'last_100_candles': {'prices': df['close'].tail(100).tolist(), 'volumes': df['volume'].tail(100).tolist()},
-                                'price': df.iloc[-1]['close']
-                            })
-                            last_processed_ts = current_data.get('last_processed_ts', 0)
-                            current_global_pool = list(global_pattern_pool)
-
-                        if df.iloc[-1]['timestamp'] == last_processed_ts and not benchmarking_pairs:
-                             execution_queue.put((symbol, current_data))
-                             with bot_lock: pending_analysis.discard(symbol)
-                             analysis_queue.task_done()
-                             continue
-
-                        search_pool = patterns + current_global_pool
-                        tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
-                        tf_secs = tf_map.get(timeframe, 300)
-
-                        glite = {
-                            'device': self.config.get('device'),
-                            'mc_hurdle': self.config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015),
-                            'min_profit': self.config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
-                        }
-                        pinfo = {
-                            'active_pattern_id': current_data.get('active_pattern_id'),
-                            'pattern_match_ts': current_data.get('pattern_match_ts', 0),
-                            'last_mc_ts': current_data.get('last_mc_ts', 0),
-                            'mc_score': current_data.get('mc_score', 1.1)
-                        }
-
-                        f = self.executor.submit(wrapped_analysis_task, symbol, timeframe, tf_secs, df, search_pool, glite, pinfo)
-                        futures[f] = item
-
-                        # Instrumentation on first launch
-                        if i == 0 and instrumented_mem_footprint.get('analysis_done') is not True:
-                            time.sleep(0.5) # Wait for process to init
-                            mem_after = psutil.virtual_memory().used
-                            diff = max(100 * 1024 * 1024, mem_after - mem_before) # At least 100MB
-                            with bot_lock:
-                                instrumented_mem_footprint['analysis'] = diff
-                                instrumented_mem_footprint['analysis_done'] = True
-                                # logging.info(f"Instrumented Analysis process footprint: {diff / (1024*1024):.2f} MB")
-
-                    for f in concurrent.futures.as_completed(futures):
-                        p, gid, sym = futures[f]
-                        try:
-                            res = f.result()
-                            if res and 'error' not in res:
-                                # Post-process results back in bot_lock context
-                                if res.get('trigger_rebenchmark'):
-                                     with bot_lock: benchmarking_pairs.add(sym)
-                                if res.get('no_patterns'):
-                                     with bot_lock:
-                                         if sym in bot_state:
-                                             bot_state[sym]['scan_attempts'] = bot_state[sym].get('scan_attempts', 0) + 1
-                                             bot_state[sym]['next_scan_allowed'] = time.time() + (bot_state[sym]['scan_attempts'] * 60)
-                                             if bot_state[sym]['scan_attempts'] >= 5:
-                                                 pair_cfg = self.config.get('pairs', {}).get(sym, {})
-                                                 # Escalation logic here...
-                                                 bot_state[sym]['scan_attempts'] = 0
-                                     with bot_lock: benchmarking_pairs.add(sym)
-                                else:
-                                     execution_queue.put((sym, res))
-                                     with bot_lock:
-                                         if sym in bot_state:
-                                             bot_state[sym]['scan_attempts'] = 0
-                                             bot_state[sym]['next_scan_allowed'] = 0
-                            elif res and 'error' in res:
-                                 logging.error(f"Task error for {sym}: {res['error']}")
-                                 analysis_queue.put((p + 5, gid, sym))
-                        except Exception as e:
-                            logging.error(f"Process future failed for {sym}: {e}")
-                            analysis_queue.put((p + 5, gid, sym))
-                        finally:
-                            with bot_lock: pending_analysis.discard(sym)
-                            analysis_queue.task_done()
-                except Exception as e:
-                    logging.error(f"AnalysisWorker batch error: {e}")
-        finally:
-            if self.executor:
-                self.executor.shutdown(wait=True)
-
-class ExecutionWorker(threading.Thread):
-    def __init__(self, exchange, data_manager, engine, config):
-        super().__init__(daemon=True)
-        self.exchange = exchange
-        self.data_manager = data_manager
-        self.engine = engine
-        self.config = config
-
-    def run(self):
-        while not shutdown_event.is_set():
-            try:
-                symbol, res = execution_queue.get(timeout=1)
-                try:
-                    with bot_lock:
-                        if symbol not in bot_state: continue
-                        bot_state[symbol].update(res)
-                        data = bot_state[symbol]
-
-                        if res.get('buy_signal', False):
-                            data['consecutive_buys'] += 1
-                            data['consecutive_sells'] = 0
-                            if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
-                        elif res.get('sell_signal', False):
-                            data['consecutive_sells'] += 1
-                            data['consecutive_buys'] = 0
-                            if symbol not in signal_arrival_times: signal_arrival_times[symbol] = time.time()
-                        else:
-                            data['consecutive_buys'] = 0
-                            data['consecutive_sells'] = 0
-                            signal_arrival_times.pop(symbol, None)
-
-                        if data['consecutive_buys'] >= 1 and not data['position'] and symbol not in suspended_pairs:
-                            active_term = self.config.get('_active_term', 'short')
-                            if self.engine.validate_trade_mc(symbol, data, self.config):
-                                if trading_engine.execute_buy(self.exchange, self.data_manager, self.engine, symbol, data, self.config, bot_lock, available_assets, suspended_pairs, term=active_term):
-                                    data['last_action'] = 'BUY'
-                                    data['position'] = self.data_manager.get_position(symbol)
-                                    data['positions'] = self.data_manager.get_positions(symbol)
-                                    play_sound("buy", self.config)
-                            else:
-                                # Re-queue for later and trigger rebenchmark
-                                with bot_lock:
-                                    benchmarking_pairs.add(symbol)
-                                    # Reasonable portion of the term (e.g. 25% of evaluation window)
-                                    term_cfg = self.config.get('expected_profit_terms', {}).get(active_term, {})
-                                    timeframe = term_cfg.get('timeframe', '5m')
-                                    tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
-                                    eval_candles = term_cfg.get('eval_candles', 60)
-                                    backoff_secs = (eval_candles * tf_map.get(timeframe, 300)) * 0.25
-                                    data['next_scan_allowed'] = time.time() + backoff_secs
-                                    logging.info(f"[{symbol}] MC validation rejected buy. Re-benchmarking and backing off for {int(backoff_secs/60)}m.")
-
-                        if data['consecutive_sells'] >= 1 and data['positions']:
-                             for idx, pos in enumerate(data['positions']):
-                                 # Use a conservative fee rate for the profitability check
-                                 if self.engine.is_profitable(data['price'], pos['entry_price'], fee_rate=0.002):
-                                     # Monte Carlo validation bypassed for ALL sells
-                                     if trading_engine.execute_sell(self.exchange, self.data_manager, self.engine, symbol, data, self.config, position_idx=idx):
-                                         data['last_action'] = 'SELL'
-                                         data['positions'] = self.data_manager.get_positions(symbol)
-                                         data['position'] = self.data_manager.get_position(symbol)
-                                         play_sound("sell", self.config)
-                                         break
-                                     break
-                                 elif data['consecutive_sells'] >= 3:
-                                     current_term = pos.get('term', 'short')
-                                     term_order = ['short', 'medium', 'long']
-                                     if current_term in term_order and term_order.index(current_term) < len(term_order) - 1:
-                                         new_term = term_order[term_order.index(current_term) + 1]
-                                         if self.data_manager.update_position_term(symbol, idx, new_term):
-                                             logging.info(f"[{symbol}] Shifting to {new_term} term.")
-                                             data['consecutive_sells'] = 0
-                                     else:
-                                         # Auto-sell on longest term: bypass Monte Carlo as it is a last-resort exit
-                                         if trading_engine.execute_sell(self.exchange, self.data_manager, self.engine, symbol, data, self.config, position_idx=idx):
-                                             data['last_action'] = 'SELL'
-                                             data['positions'] = self.data_manager.get_positions(symbol)
-                                             data['position'] = self.data_manager.get_position(symbol)
-                                             play_sound("sell", self.config)
-                                             logging.warning(f"[{symbol}] Auto-executing sell on longest term.")
-                                             break
-                                         break
-                except Exception as e:
-                    logging.error(f"ExecutionWorker error for {symbol}: {e}")
-                finally:
-                    execution_queue.task_done()
-            except queue.Empty:
-                continue
+# Async Core handles all workers now.
+# Legacy synchronous workers removed.
 
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, args):
     global available_assets, pending_asset_update
@@ -1006,7 +743,21 @@ def main():
             setup_bot_state(config, data_manager, bot_state)
             run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state)
 
-        threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
+        # Transition to Async Core
+        core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+        # Sync state
+        with bot_lock:
+            core.bot_state = bot_state
+            core.global_pattern_pool = global_pattern_pool
+            core.available_assets = available_assets
+            core.suspended_pairs = suspended_pairs
+            core.benchmarking_pairs = benchmarking_pairs
+
+        async def run_core():
+            await core.main_loop()
+
+        threading.Thread(target=lambda: asyncio.run(run_core()), daemon=True).start()
+
         while not shutdown_event.is_set():
             time.sleep(1)
     else:
@@ -1023,7 +774,20 @@ def main():
                     setup_bot_state(config, data_manager, bot_state)
                     run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=ui)
 
-                threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args), daemon=True).start()
+                # Transition to Async Core
+                core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+                # Sync state
+                with bot_lock:
+                    core.bot_state = bot_state
+                    core.global_pattern_pool = global_pattern_pool
+                    core.available_assets = available_assets
+                    core.suspended_pairs = suspended_pairs
+                    core.benchmarking_pairs = benchmarking_pairs
+
+                async def run_core():
+                    await core.main_loop()
+
+                threading.Thread(target=lambda: asyncio.run(run_core()), daemon=True).start()
 
             threading.Thread(target=startup_sequence, daemon=True).start()
             # Start input thread IMMEDIATELY so TUI is responsive to keys like 'Q' or 'H'

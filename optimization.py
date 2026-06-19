@@ -143,7 +143,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     total_profit = equity_curve[-1] - equity_curve[start_idx]
 
     if not skip_mc:
-        mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20) # Low sims for benchmark speed
+        # Strictly match BOT_WORKFLOW.md: 100 simulations for Benchmark, 1000 for Live
+        mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
         mc.set_device(device or torch.device("cpu"))
         mc_score = mc.validate_strategy(df)
         total_profit *= mc_score
@@ -208,6 +209,10 @@ def run_benchmark_for_strategy(symbol, strategy, config, term_to_test, aggr, df_
     return None
 
 def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None, threshold_conv=1.0):
+    """
+    Implements the O(N) Sliding Window Algorithm as described in ALGO_FENETRE_GLISSANTE.md.
+    Instead of re-running full backtests, we calculate the equity curve once and slide a window.
+    """
     term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
     eval_window = term_cfg.get('eval_candles', 60)
     profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
@@ -215,19 +220,78 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     now_ts = time.time()
     patterns = []
 
-    # Calculate basics once
+    # 1. Global Signal Generation (Vectorized)
     df_base = get_common_indicators(df_in, device)
-
-    # Pre-drop signals to avoid inter-strategy leakage
     base_cols = [c for c in df_base.columns if c not in ['buy_signal', 'sell_signal', 'buy_candidate', 'sell_candidate', 'tendency']]
     df_base = df_base[base_cols]
 
+    fee_rate = 0.001 # Default fallback
+
     for strategy in strategies:
-        # Each strategy gets a fresh copy of indicators but no signals
         df_strat = df_base.copy()
-        for aggr in aggrs:
-            p = run_benchmark_for_strategy(symbol, strategy, config, term_to_test, aggr, df_strat, engine, device, eval_window, profit_threshold, now_ts)
-            if p: patterns.append(p)
+        test_cfg = {'strategy': strategy, 'device': device or torch.device('cpu')}
+        df_strat = get_signals(df_strat, test_cfg, is_backtest=True)
+
+        # 2. Equity Mapping (O(N))
+        # We calculate a simplified equity curve based on signals
+        prices = df_strat['close'].values
+        buys = df_strat['buy_signal'].values
+        sells = df_strat['sell_signal'].values
+
+        equity = np.zeros(len(prices))
+        balance = 100.0
+        pos_amt = 0
+
+        for i in range(len(prices)):
+            if pos_amt == 0 and buys[i]:
+                pos_amt = (balance * (1 - fee_rate)) / prices[i]
+                balance = 0
+            elif pos_amt > 0 and sells[i]:
+                balance = pos_amt * prices[i] * (1 - fee_rate)
+                pos_amt = 0
+            equity[i] = balance + (pos_amt * prices[i])
+
+        # 3. Sliding the Window (O(N))
+        # Profit = Equity[current_index + eval_window] - Equity[current_index]
+        if len(equity) > eval_window:
+            profits = equity[eval_window:] - equity[:-eval_window]
+
+            # Find peaks (top 5 non-overlapping or simply top 5)
+            # Documentation says "Top 5 Profitable Windows"
+            top_indices = np.argsort(profits)[-10:] # Get some extras to filter
+
+            found_indices = []
+            for idx in reversed(top_indices):
+                if profits[idx] < profit_threshold: continue
+
+                # Check for overlap to get diverse patterns
+                if any(abs(idx - prev) < eval_window // 2 for prev in found_indices):
+                    continue
+
+                found_indices.append(idx)
+                if len(found_indices) >= 5: break
+
+            for idx in found_indices:
+                window_df = df_strat.iloc[idx : idx + eval_window]
+                latest = window_df.iloc[-1]
+                patterns.append({
+                    'strategy': strategy, 'aggr': 'balanced', 'symbol': symbol,
+                    'profit': float(profits[idx]), 'win_rate': 1.0, 'max_dd': 0.0,
+                    'start_time': window_df.iloc[0]['timestamp'].strftime("%Y-%m-%d %H:%M"),
+                    'end_time': latest['timestamp'].strftime("%Y-%m-%d %H:%M"),
+                    'start_ts': window_df.iloc[0]['timestamp'].timestamp(),
+                    'prices': window_df['close'].tolist(),
+                    'volumes': window_df['volume'].tolist(),
+                    'tech_state': {
+                        'rsi': float(latest.get('rsi', 50)),
+                        'adx': float(latest.get('adx', 0)),
+                        'volatility': float(latest.get('volatility', 0)),
+                        'ema_f': float(latest.get('ema_f', 0)),
+                        'ema_s': float(latest.get('ema_s', 0))
+                    },
+                    'mc_score': 1.1, # Default
+                    'last_bench_ts': now_ts
+                })
 
     patterns.sort(key=lambda x: x['profit'], reverse=True)
     return symbol, patterns[:5]

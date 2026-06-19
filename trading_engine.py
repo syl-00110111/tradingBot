@@ -50,16 +50,21 @@ class TradingEngine:
             })
         return settings
 
-    def is_profitable(self, current_price, entry_price, fee_rate=0.0015):
+    def is_profitable(self, exit_price, entry_price, fee_rate=0.0015):
         """
         Conservative profitability check accounting for fees on both sides.
         Default fee_rate 0.0015 (0.15%) to be safe.
         """
         min_exit_price = entry_price * (1 + fee_rate * 2)
-        return current_price > min_exit_price
+        return exit_price > min_exit_price
 
-    def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.0015):
-        return self.is_profitable(current_price, entry_price, fee_rate)
+    def check_sure_profit(self, exchange, symbol, amount, entry_price, fee_rate=0.0015):
+        """
+        Perfect trader logic: verifies that a sell RIGHT NOW would be profitable.
+        Used to ensure "profit is sure".
+        """
+        effective_sell_price = exchange.get_effective_price(symbol, 'sell', amount)
+        return self.is_profitable(effective_sell_price, entry_price, fee_rate)
 
     def validate_trade_mc(self, symbol, data, config):
         """Perform Monte Carlo sanity check before trade execution."""
@@ -128,138 +133,149 @@ class TradingEngine:
         return 0
 
 def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs, balance=None, term="short"):
-    if balance is None:
-        balance = exchange.fetch_balance()
+    # Perfect Trader: ALWAYS fetch fresh balance and order book before considering execution
+    balance = exchange.fetch_balance()
     if not balance:
-        logging.error(f"[{symbol}] Buy aborted: Failed to fetch balance.")
+        logging.error(f"[{symbol}] Buy aborted: Failed to fetch fresh balance.")
         return False
+
     win_streak = data_manager.get_win_streak(symbol)
 
-    # Refresh price for Spot market accuracy (prevent NOTIONAL filters)
-    fresh_ticker = exchange.fetch_ticker(symbol)
-    current_price = fresh_ticker['last'] if fresh_ticker else data['price']
-
+    # Calculate initial amount to check liquidity
     base_curr = symbol.split('/')[1]
-    amount = engine.calculate_position_size(balance, current_price, base_curr, win_streak=win_streak, exchange=exchange, symbol=symbol)
+    initial_price = exchange.fetch_ticker(symbol)['last']
+    amount = engine.calculate_position_size(balance, initial_price, base_curr, win_streak=win_streak, exchange=exchange, symbol=symbol)
+
+    if amount <= 0:
+        logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero.")
+        return False
+
+    # Get effective price considering slippage
+    effective_buy_price = exchange.get_effective_price(symbol, 'buy', amount)
+    if effective_buy_price <= 0:
+        return False
     base_currency = symbol.split('/')[1]
-    if amount > 0:
-        # Check if balance is sufficient before attempting order
-        cost = amount * current_price
-        base_asset = base_currency
-        free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
 
-        if free_balance < cost:
-            logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)}). Suspending pair.")
-            suspended_pairs.add(symbol)
-            return False
+    # Check if balance is sufficient before attempting order
+    cost = amount * effective_buy_price
+    base_asset = base_currency
+    free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
 
-        # Check NOTIONAL / Minimum Cost filter
-        try:
-            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
-            if symbol in markets:
-                min_cost = markets[symbol]['limits']['cost']['min'] or 0
-                if cost < min_cost:
-                    logging.warning(f"[{symbol}] Buy aborted: Order cost {format_price(cost)} is below minimum notional limit {format_price(min_cost)}. Suspending pair.")
-                    suspended_pairs.add(symbol)
-                    return False
-        except Exception as e:
-            logging.debug(f"[{symbol}] Could not verify notional limit: {e}")
+    if free_balance < cost:
+        logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)}). Suspending pair.")
+        suspended_pairs.add(symbol)
+        return False
 
-        order = exchange.create_order(symbol, 'buy', amount)
-        if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
-            logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
-            suspended_pairs.add(symbol)
-            return False
-        if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
-            logging.error(f"[{symbol}] Buy failed: Filter failure NOTIONAL. Suspending pair.")
-            suspended_pairs.add(symbol)
-            return False
-        if order:
-            # Use executed values if available
-            exec_price = order.get('average', order.get('price', current_price))
-            exec_amount = order.get('filled', order.get('amount', amount))
-            fee = order.get('calculated_fee', 0)
+    # Perfect Trader: Simulate immediate sell to ensure profit is theoretically possible even with slippage
+    fee_rate = exchange.fetch_trading_fee(symbol)
+    effective_sell_price = exchange.get_effective_price(symbol, 'sell', amount)
+    if not engine.is_profitable(effective_sell_price, effective_buy_price, fee_rate=fee_rate):
+        logging.warning(f"[{symbol}] Buy aborted: Sure profit not guaranteed after slippage and fees (Buy: {effective_buy_price}, Est. Sell: {effective_sell_price})")
+        return False
 
-            total_paid = (exec_amount * exec_price) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price paid: {format_price(total_paid)} {get_base_currency(symbol, config)}")
-            data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid, term=term)
+    # Check NOTIONAL / Minimum Cost filter
+    try:
+        markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+        if symbol in markets:
+            min_cost = markets[symbol]['limits']['cost']['min'] or 0
+            if cost < min_cost:
+                logging.warning(f"[{symbol}] Buy aborted: Order cost {format_price(cost)} is below minimum notional limit {format_price(min_cost)}. Suspending pair.")
+                suspended_pairs.add(symbol)
+                return False
+    except Exception as e:
+        logging.debug(f"[{symbol}] Could not verify notional limit: {e}")
 
-            # Immediately update Sellable list
-            asset = symbol.split('/')[0]
-            with bot_lock:
-                if asset not in available_assets:
-                    available_assets.append(asset)
-                    available_assets.sort()
+    order = exchange.create_order(symbol, 'buy', amount)
+    if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
+        logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
+        suspended_pairs.add(symbol)
+        return False
+    if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
+        logging.error(f"[{symbol}] Buy failed: Filter failure NOTIONAL. Suspending pair.")
+        suspended_pairs.add(symbol)
+        return False
+    if order:
+        # Use executed values if available
+        exec_price = order.get('average', order.get('price', effective_buy_price))
+        exec_amount = order.get('filled', order.get('amount', amount))
+        fee = order.get('calculated_fee', 0)
 
-            return True
-        else:
-            logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {format_amount(amount)}")
+        total_paid = (exec_amount * exec_price) + fee
+        logging.info(f"[{symbol}] Executing buy of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price paid: {format_price(total_paid)} {get_base_currency(symbol, config)}")
+        data_manager.add_position(symbol, exec_price, exec_amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid, term=term)
+
+        # Immediately update Sellable list
+        asset = symbol.split('/')[0]
+        with bot_lock:
+            if asset not in available_assets:
+                available_assets.append(asset)
+                available_assets.sort()
+
+        return True
     else:
-        logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
+        logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {format_amount(amount)}")
     return False
 
-def execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0):
+def execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0, force=False):
     positions = data_manager.get_positions(symbol)
     if not positions or position_idx >= len(positions):
         return False
 
     position = positions[position_idx]
-    should_execute = True
 
-    # Instruction 7: check for "guaranteed" sale price
-    ticker = exchange.fetch_ticker(symbol)
-    guaranteed_price = ticker['bid'] if ticker and 'bid' in ticker else data['price']
+    # Perfect Trader: ALWAYS fetch fresh balance and order book before considering execution
+    balance = exchange.fetch_balance()
+    if not balance:
+        logging.error(f"[{symbol}] Sell aborted: Failed to fetch fresh balance.")
+        return False
 
-    if should_execute:
-        base_asset = symbol.split('/')[0]
+    effective_sell_price = exchange.get_effective_price(symbol, 'sell', position['amount'])
+    fee_rate = exchange.fetch_trading_fee(symbol)
 
-        # Bypass balance check for simulation mode
-        # In simulation, we trust the internal DataManager state
-        is_simulation = isinstance(exchange, MockExchange)
+    # "Profit is sure" check
+    if not force and not engine.is_profitable(effective_sell_price, position['entry_price'], fee_rate=fee_rate):
+        logging.info(f"[{symbol}] Sell signal ignored: Profit not sure yet (Entry: {position['entry_price']}, Est. Exit: {effective_sell_price})")
+        return False
 
-        balance = exchange.fetch_balance()
-        if not balance:
-            logging.error(f"[{symbol}] Sell aborted: Failed to fetch balance.")
-            return False
-        free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
+    base_asset = symbol.split('/')[0]
+    # Bypass balance check for simulation mode
+    is_simulation = isinstance(exchange, MockExchange)
+    free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
 
-        # Tolerance for small balance discrepancies (e.g., due to fees or rounding)
-        sell_amount = position['amount']
-        if not is_simulation:
-            if free_balance < sell_amount:
-                if free_balance >= sell_amount * 0.95: # 5% tolerance
-                    sell_amount = free_balance
-                    logging.info(f"[{symbol}] Adjusting sell amount from {position['amount']} to {sell_amount} due to balance discrepancy (within 5% tolerance).")
-                else:
-                    logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} is significantly less than tracked {format_amount(sell_amount)}).")
-                    return False
-            # Ensure we don't sell more than tracked even if balance is higher (unless we want to clear the asset)
-            # For simplicity, we stick to tracked amount if balance is sufficient.
-
-        if is_simulation or free_balance >= sell_amount:
-            order = exchange.create_order(symbol, 'sell', sell_amount)
-            if isinstance(order, dict) and order.get('error') == 'dust_limit':
-                logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
-                data_manager.flag_ignore_sell(symbol)
-                return False
-            if order:
-                # Use executed values if available
-                exec_price = order.get('average', order.get('price', guaranteed_price))
-                exec_amount = order.get('filled', order.get('amount', sell_amount))
-                fee = order.get('calculated_fee', 0)
-
-                total_received = (exec_amount * exec_price) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price received: {format_price(total_received)} {get_base_currency(symbol, config)}")
-                profit = total_received - position.get('entry_total_base', 0)
-                data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, position_idx=position_idx)
-                return True
+    # Tolerance for small balance discrepancies (e.g., due to fees or rounding)
+    sell_amount = position['amount']
+    if not is_simulation:
+        if free_balance < sell_amount:
+            if free_balance >= sell_amount * 0.95: # 5% tolerance
+                sell_amount = free_balance
+                logging.info(f"[{symbol}] Adjusting sell amount from {position['amount']} to {sell_amount} due to balance discrepancy (within 5% tolerance).")
             else:
-                logging.error(f"[{symbol}] Sell failed: Exchange rejected order for amount {format_amount(sell_amount)}")
+                logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} is significantly less than tracked {format_amount(sell_amount)}).")
                 return False
-        else:
-            logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} < {format_amount(sell_amount)})")
+
+    if is_simulation or free_balance >= sell_amount:
+        order = exchange.create_order(symbol, 'sell', sell_amount)
+        if isinstance(order, dict) and order.get('error') == 'dust_limit':
+            logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
+            data_manager.flag_ignore_sell(symbol)
             return False
-    return False
+        if order:
+            # Use executed values if available
+            exec_price = order.get('average', order.get('price', effective_sell_price))
+            exec_amount = order.get('filled', order.get('amount', sell_amount))
+            fee = order.get('calculated_fee', 0)
+
+            total_received = (exec_amount * exec_price) - fee
+            logging.info(f"[{symbol}] Executing sell of amount {format_amount(exec_amount)} at {format_price(exec_price)}, final price received: {format_price(total_received)} {get_base_currency(symbol, config)}")
+            profit = total_received - position.get('entry_total_base', 0)
+            data_manager.close_position(symbol, exec_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, position_idx=position_idx)
+            return True
+        else:
+            logging.error(f"[{symbol}] Sell failed: Exchange rejected order for amount {format_amount(sell_amount)}")
+            return False
+    else:
+        logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} < {format_amount(sell_amount)})")
+        return False
 
 def initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state):
     """Syncs real wallet assets into the simulation engine's tracked positions."""
