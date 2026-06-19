@@ -532,6 +532,7 @@ def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, g
 
 def main():
     parser = argparse.ArgumentParser(description='Cryptocurrencies Multiplatform Trading Bot')
+    parser.add_argument('--headless', action='store_true', help='Disable TUI and use structured JSON logging (can be used for DEBUG)')
     parser.add_argument('--mode', choices=['live', 'simulation', 'backtest', 'benchmark', 'sell', 'balance', 'virtual'], default='simulation')
     parser.add_argument('--symbol', help='Symbol for backtest/benchmark')
     parser.add_argument('--strategy', choices=STRATEGIES, help='Strategy for backtest')
@@ -544,7 +545,6 @@ def main():
     parser.add_argument('--every-symbol', action='store_true', help='Benchmark all symbols in pairs.txt')
     parser.add_argument('--backtest-positions', action='store_true', help='Show positions during backtest')
     parser.add_argument('--wallet', help='Initial wallet for virtual mode (e.g. "100 USDC")')
-    parser.add_argument('--headless', action='store_true', help='Disable TUI and use structured JSON logging')
     args, unknown = parser.parse_known_args()
 
     # Initialize logging early
