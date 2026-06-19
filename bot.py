@@ -100,7 +100,7 @@ class CandleDownloader(threading.Thread):
 
 def update_available_assets_live(exchange, config):
     global pending_asset_update
-    time.sleep(random.uniform(3.0, 10.0))
+    time.sleep(random.uniform(1.0, 2.0))
     try:
         new_assets = trading_engine.get_sellable_assets(exchange, config)
         with bot_lock:
@@ -432,7 +432,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
         # Wait for next cycle
         elapsed = time.time() - start_time
-        if elapsed < 5.0: time.sleep(5.0 - elapsed)
+        if elapsed < 2.0: time.sleep(2.0 - elapsed)
 
 def setup_bot_state(config, data_manager, bot_state):
     """Initializes the bot state for all configured pairs, using cache if available."""
@@ -737,8 +737,8 @@ def main():
                                  # Re-benchmark 2 random pairs every cycle
                                  benchmarking_pairs.add(random.choice(all_syms))
                                  benchmarking_pairs.add(random.choice(all_syms))
-                time.sleep(10) # Run every 10 seconds instead of 60
-            except: time.sleep(10)
+                time.sleep(2) # Run every 10 seconds instead of 60
+            except: time.sleep(2)
 
     threading.Thread(target=dynamic_benchmark_worker, daemon=True).start()
 
@@ -800,7 +800,7 @@ def main():
             try:
                 while not shutdown_event.is_set():
                     live.update(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, bot_lock))
-                    time.sleep(0.5)
+                    time.sleep(1.0)
             finally:
                 # Restore console logging on exit
                 for h in all_other_handlers:

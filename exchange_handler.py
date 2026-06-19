@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 class ThrottledExchange:
     def __init__(self, exchange, delay_ms=2):
         self.exchange = exchange
-        self.base_delay_s = delay_ms / 1000.0
+        self.base_delay_s = delay_ms / 100.0
         self.delay_s = self.base_delay_s
         self.lock = threading.Lock()
         self.last_request_time = 0
@@ -35,7 +35,7 @@ class ThrottledExchange:
 
                 # Recovery mechanism: gradually return to base settings
                 if self.delay_s > self.base_delay_s:
-                    self.delay_s = max(self.base_delay_s, self.delay_s * 0.95)
+                    self.delay_s = max(self.base_delay_s, self.delay_s * 1.0)
                 if self.max_burst < self.base_max_burst:
                     self.max_burst = min(self.base_max_burst, self.max_burst + 1)
 
@@ -53,7 +53,7 @@ class ThrottledExchange:
         attr = getattr(self.exchange, name)
         if callable(attr):
             def throttled_wrapper(*args, **kwargs):
-                retries = 3
+                retries = 5
                 last_error = None
                 while retries > 0:
                     try:
@@ -62,11 +62,11 @@ class ThrottledExchange:
                     except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
                         retries -= 1
                         last_error = e
-                        wait_time = float(getattr(e, 'retry_after', 5)) or 5
+                        wait_time = float(getattr(e, 'retry_after', 1)) or 1
                         logging.warning(f"Rate limit exceeded. Waiting {wait_time}s... ({retries} retries left)")
                         time.sleep(wait_time)
                         with self.lock:
-                            self.delay_s *= 1.2 # Dynamically increase delay
+                            self.delay_s *= 1.0 # Dynamically increase delay
                             self.max_burst = max(1, self.max_burst - 1)
                     except Exception as e:
                         raise e
@@ -78,18 +78,18 @@ class ThrottledExchange:
 
 def create_ccxt_session():
     session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=200)
     session.mount('https://', adapter)
     session.mount('http://', adapter)
     return session
 
 class ExchangeInterface:
-    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
+    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=1000): raise NotImplementedError
     def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
     def fetch_balance(self): raise NotImplementedError
     def fetch_ticker(self, symbol): raise NotImplementedError
     def fetch_trading_fee(self, symbol): raise NotImplementedError
-    def fetch_order_book(self, symbol, limit=20): raise NotImplementedError
+    def fetch_order_book(self, symbol, limit=100): raise NotImplementedError
     def get_effective_price(self, symbol, side, amount): raise NotImplementedError
 
 class CCXTExchange(ExchangeInterface):
@@ -463,7 +463,7 @@ class AsyncExchangeManager:
             except Exception as e:
                 if not self.external_shutdown_event.is_set():
                     logging.debug(f"WS Ticker Error for {symbol}: {e}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
                 else: break
 
     async def watch_ohlcv_loop(self, symbol, timeframe):
@@ -494,7 +494,7 @@ class AsyncExchangeManager:
             except Exception as e:
                 if not self.external_shutdown_event.is_set():
                     logging.debug(f"WS OHLCV Error for {symbol} {timeframe}: {e}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
                 else: break
 
 class MockExchange(ExchangeInterface):

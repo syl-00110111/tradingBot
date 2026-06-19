@@ -489,7 +489,7 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
     if term_override:
         if status: status.update('[bold green]Optimization complete.')
         if best_per_symbol:
-            time.sleep(3)
+            time.sleep(1)
         with bot_lock:
             global_pattern_pool.clear()
             all_pairs = list(config.get('pairs', {}).keys())

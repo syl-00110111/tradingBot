@@ -218,7 +218,7 @@ class TradingCore:
                 await asyncio.sleep(1)
             except Exception as e:
                 logging.error(f"Error in pair_worker for {symbol}: {e}")
-                await asyncio.sleep(30)
+                await asyncio.sleep(1)
 
     async def main_loop(self):
         """Coordinates all services and workers."""
@@ -252,4 +252,4 @@ class TradingCore:
                     self.config.get('device'), to_bench, self.ohlcv_cache_manager,
                     None, self.bot_state
                 )
-            await asyncio.sleep(60)
+            await asyncio.sleep(1)
