@@ -284,6 +284,25 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
                 symbol = candidate
                 break
 
+        # If not in explicitly configured pairs, check if a valid market exists
+        if not symbol:
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            for bc in base_currencies:
+                candidate = f"{asset}/{bc}"
+                if candidate in markets:
+                    symbol = candidate
+                    # Dynamically add to config and bot_state if missing
+                    if symbol not in config['pairs']:
+                        config['pairs'][symbol] = {}
+                        if bot_state is not None and symbol not in bot_state:
+                             bot_state[symbol] = {
+                                'aggr': 'N/A', 'strategy': 'Discovering...',
+                                'last_action': 'Waiting', 'positions': [], 'position': None,
+                                'bench_profit': 0, 'consecutive_buys': 0, 'consecutive_sells': 0,
+                                'last_mc_ts': 0, 'mc_score': 1.1, 'last_processed_ts': 0
+                             }
+                    break
+
         if not symbol: continue
 
         # Check if it's dust
@@ -304,22 +323,37 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
         if is_dust: continue
         sellable_found = True
 
-        # Try to find purchase price
+        # Try to find purchase price with interpolation logic
+        ticker = exchange.fetch_ticker(symbol)
+        curr_price = ticker['last'] if ticker else 0
+
         entry_price = 0
-        trades = exchange.fetch_my_trades(symbol, limit=20)
+        trades = exchange.fetch_my_trades(symbol, limit=50)
         if trades:
             buy_trades = [t for t in trades if t['side'] == 'buy']
             if buy_trades:
-                entry_price = buy_trades[-1]['price']
+                # Calculate average historical buy price
+                total_hist_cost = sum(t['price'] * t['amount'] for t in buy_trades)
+                total_hist_qty = sum(t['amount'] for t in buy_trades)
+                avg_hist_price = total_hist_cost / total_hist_qty if total_hist_qty > 0 else buy_trades[-1]['price']
+
+                # Interpolation logic: (avg_hist + current) / 2
+                if curr_price > 0:
+                    entry_price = (avg_hist_price + curr_price) / 2
+                else:
+                    entry_price = avg_hist_price
+
+        if entry_price == 0 and curr_price > 0:
+            entry_price = curr_price
 
         if entry_price > 0:
             # Avoid duplicate sync if already tracked
             existing = data_manager.get_positions(symbol)
-            if not any(p['amount'] == amount and p['entry_price'] == entry_price for p in existing):
-                logging.info(f"[{symbol}] Found purchase price: {entry_price}. Adding to tracking.")
-                data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time(), term="short")
+            if not any(p['amount'] == amount for p in existing):
+                logging.info(f"[{symbol}] Synchronizing asset: qty={amount}, price (interpolated)={entry_price:.8f}")
+                data_manager.add_position(symbol, entry_price, amount, 0, {"note": "Imported from wallet"}, time.time(), term="short")
         else:
-            logging.warning(f"[{symbol}] Asset found in wallet but no purchase record found via API. Please connect to exchange and sell manually or manage this asset.")
+            logging.warning(f"[{symbol}] Asset found in wallet but could not determine entry price. Skipping auto-sync.")
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
         has_base_balance = any(free_balances.get(bc, 0) > 10 for bc in base_currencies)
@@ -376,6 +410,16 @@ def get_sellable_assets(exchange, config=None):
             if config and candidate in config.get('pairs', {}):
                 symbol = candidate
                 break
+
+        # Inclusive check: if not in pairs.txt, check if a valid market exists on the exchange
+        if not symbol:
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            for bc in base_currencies:
+                candidate = f"{asset}/{bc}"
+                if candidate in markets:
+                    symbol = candidate
+                    break
+
         if not symbol: continue
 
         try:
