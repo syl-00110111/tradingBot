@@ -73,6 +73,10 @@ class AnalysisService:
             initializer=silent_worker_init
         )
 
+    def shutdown(self):
+        if self.process_executor:
+            self.process_executor.shutdown(wait=False)
+
     async def analyze_pair(self, symbol, timeframe, df, patterns):
         """Runs the CPU/GPU intensive analysis in a sub-process."""
         loop = asyncio.get_event_loop()
@@ -160,7 +164,7 @@ class ExecutionService:
 
 class TradingCore:
     """The 'Perfect Trader' Core with 10 hands (Services)."""
-    def __init__(self, config, exchange, data_manager, pattern_manager, ohlcv_cache_manager):
+    def __init__(self, config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, external_shutdown_event=None):
         self.config = config
         self.exchange = exchange
         self.data_manager = data_manager
@@ -174,7 +178,7 @@ class TradingCore:
         self.suspended_pairs = set()
         self.benchmarking_pairs = set()
         self.state_lock = threading.RLock()
-        self.shutdown_event = asyncio.Event()
+        self.shutdown_event = external_shutdown_event or threading.Event()
 
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=80)
 
@@ -184,12 +188,25 @@ class TradingCore:
         self.execution = ExecutionService(self)
 
     async def run_in_thread(self, func, *args):
+        if self.shutdown_event.is_set(): return None
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self.executor, func, *args)
+        try:
+            return await loop.run_in_executor(self.executor, func, *args)
+        except RuntimeError: # Handle "executor is closed"
+            return None
+
+    async def shutdown(self):
+        """Signal all workers to stop."""
+        if isinstance(self.shutdown_event, threading.Event):
+            self.shutdown_event.set()
+        self.executor.shutdown(wait=False)
+        self.analysis.shutdown()
 
     async def pair_worker(self, symbol):
         """Independent worker for each pair (100 fingers)."""
-        while not self.shutdown_event.is_set():
+        while True:
+            if isinstance(self.shutdown_event, (threading.Event, asyncio.Event)):
+                if self.shutdown_event.is_set(): break
             try:
                 pair_cfg = self.config.get('pairs', {}).get(symbol, {})
 
@@ -224,9 +241,16 @@ class TradingCore:
 
                 # High frequency: 2s instead of 4s
                 await asyncio.sleep(2)
+            except RuntimeError as e:
+                if "schedule new futures" in str(e) or "executor is closed" in str(e):
+                    break
+                logging.error(f"RuntimeError in pair_worker for {symbol}: {e}")
+                break
             except Exception as e:
-                logging.error(f"Error in pair_worker for {symbol}: {e}")
-                await asyncio.sleep(5)
+                if self.shutdown_event and not self.shutdown_event.is_set():
+                    logging.error(f"Error in pair_worker for {symbol}: {e}")
+                    await asyncio.sleep(5)
+                else: break
 
     async def main_loop(self):
         """Coordinates all services and workers."""
@@ -245,7 +269,9 @@ class TradingCore:
     async def benchmark_coordinator(self):
         """Handles dynamic re-benchmarking without blocking the core."""
         import optimization
-        while not self.shutdown_event.is_set():
+        while True:
+            if isinstance(self.shutdown_event, (threading.Event, asyncio.Event)):
+                if self.shutdown_event.is_set(): break
             with self.state_lock:
                 to_bench = list(self.benchmarking_pairs)
 
