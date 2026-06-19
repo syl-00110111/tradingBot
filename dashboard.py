@@ -258,8 +258,8 @@ class DashboardUI:
             log_height = self.console.height - 9
             if log_height < 3: log_height = 3
 
-            # We estimate that each log takes about 6 visual lines on average due to wrapping in narrow panels
-            estimated_visual_lines_per_log = 6
+            # We estimate that each log takes about 2 visual lines on average due to wrapping in narrow panels
+            estimated_visual_lines_per_log = 2
             visible_count = log_height // estimated_visual_lines_per_log
             if visible_count < 1: visible_count = 1
 
@@ -289,6 +289,10 @@ class DashboardUI:
                     idx = (self.logs_scroll_offset + i) % len(self.all_logs)
                     visible_logs_with_idx.append((idx, self.all_logs[idx]))
 
+            if len(self.all_logs) > visible_count and should_step and self.marquee_enabled:
+                if now_ts > self.logs_pause_until:
+                    self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(visible_count)
+            
             log_table = Table(expand=True, box=None, padding=0, show_header=False)
             log_table.add_column("Message")
 
