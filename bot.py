@@ -717,7 +717,7 @@ def main():
         downloader = CandleDownloader(exchange, ohlcv_cache_manager)
         downloader.start()
 
-    # Dynamic benchmarking if capacity exists
+    # Dynamic benchmarking if capacity exists - increased frequency for "10 hands"
     def dynamic_benchmark_worker():
         while not shutdown_event.is_set():
             try:
@@ -727,15 +727,18 @@ def main():
                 with bot_lock:
                     footprint = instrumented_mem_footprint.get('analysis', 1.0 * 1024 * 1024 * 1024)
 
-                # Increased threshold for poor hardware - 10 hands
-                if cpu_usage < 60 and mem_available > (footprint * 1.1):
+                # Aggressive threshold for poor hardware - 10 hands
+                # Only check if we have some RAM left, ignore CPU as O(N) is fast
+                if mem_available > (footprint * 0.5):
                     with bot_lock:
                         if not benchmarking_pairs and config.get('pairs'):
                             all_syms = list(config['pairs'].keys())
                             if all_syms:
+                                 # Re-benchmark 2 random pairs every cycle
                                  benchmarking_pairs.add(random.choice(all_syms))
-                time.sleep(60)
-            except: time.sleep(60)
+                                 benchmarking_pairs.add(random.choice(all_syms))
+                time.sleep(10) # Run every 10 seconds instead of 60
+            except: time.sleep(10)
 
     threading.Thread(target=dynamic_benchmark_worker, daemon=True).start()
 

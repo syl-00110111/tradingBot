@@ -27,9 +27,13 @@ class MarketDataService:
         self.last_fetch = {}
 
     async def get_fresh_data(self, symbol, timeframe):
-        """Ensures we have the latest candles from the API."""
-        # In a real async environment, this would be an await exchange.fetch_ohlcv
-        # For now, we bridge with the existing synchronous fetcher in a thread
+        """Ensures we have the latest candles from the API. API-First."""
+        now = time.time()
+        # Perfect Trader: don't ask the API more than once per second per pair to avoid rate-limits
+        # but keep it high frequency.
+        if now - self.last_fetch.get((symbol, timeframe), 0) < 1.0:
+            return self.ohlcv_cache.get(symbol, timeframe)
+
         loop = asyncio.get_event_loop()
         from exchange_handler import fetch_ohlcv_incremental
         await loop.run_in_executor(
@@ -41,6 +45,7 @@ class MarketDataService:
             self.ohlcv_cache,
             500
         )
+        self.last_fetch[(symbol, timeframe)] = time.time()
         return self.ohlcv_cache.get(symbol, timeframe)
 
 class AnalysisService:
@@ -52,10 +57,10 @@ class AnalysisService:
 
     def start(self):
         cpu_count = os.cpu_count() or 1
-        # Dynamic scaling based on memory - increased for "10 hands and 100 fingers"
+        # Dynamic scaling based on memory - massive hands (4x CPU cores)
         mem_available = psutil.virtual_memory().available
-        # Use up to 90% of memory if needed, since hardware might be limited but we want max hands
-        max_workers = min(cpu_count * 2, max(2, int((mem_available * 0.9) / self.instrumented_footprint)))
+        # Use up to 95% of memory if needed, we want everything running
+        max_workers = min(cpu_count * 4, max(4, int((mem_available * 0.95) / self.instrumented_footprint)))
         self.process_executor = concurrent.futures.ProcessPoolExecutor(
             max_workers=max_workers,
             initializer=silent_worker_init
@@ -172,7 +177,7 @@ class TradingCore:
         self.state_lock = threading.RLock()
         self.shutdown_event = asyncio.Event()
 
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=80)
 
         # Services (Hands)
         self.market_data = MarketDataService(self)
@@ -196,7 +201,7 @@ class TradingCore:
                 # 1. API-First: Fetch fresh candles
                 ohlcv = await self.market_data.get_fresh_data(symbol, timeframe)
                 if not ohlcv:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
                     continue
 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -209,8 +214,8 @@ class TradingCore:
                     # 3. Execution: Verified trade
                     await self.execution.process_signal(symbol, res)
 
-                # Double the frequency (2s instead of 5s)
-                await asyncio.sleep(2)
+                # High frequency: 1s instead of 2s
+                await asyncio.sleep(1)
             except Exception as e:
                 logging.error(f"Error in pair_worker for {symbol}: {e}")
                 await asyncio.sleep(30)
