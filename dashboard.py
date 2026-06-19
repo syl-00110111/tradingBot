@@ -258,24 +258,26 @@ class DashboardUI:
             log_height = self.console.height - 9
             if log_height < 3: log_height = 3
 
-            if len(self.all_logs) > log_height and should_step and self.marquee_enabled:
-                if now_ts > self.logs_pause_until:
-                    self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs)
-
             # We estimate that each log takes about 2 visual lines on average due to wrapping
             estimated_visual_lines_per_log = 2
             visible_count = log_height // estimated_visual_lines_per_log
             if visible_count < 1: visible_count = 1
 
+            # Scrolling and following logic
             if len(self.all_logs) <= visible_count:
+                self.logs_scroll_offset = 0
                 visible_logs_with_idx = [(i, log) for i, log in enumerate(self.all_logs)]
-                if now_ts > self.logs_pause_until:
-                    self.logs_scroll_offset = 0
             else:
                 if now_ts > self.logs_pause_until:
-                     # Auto-follow the selected log (the latest one) by adjusting offset
-                     # so that the selected_log_index is at the bottom of the visible area
-                     self.logs_scroll_offset = max(0, self.selected_log_index - visible_count + 1)
+                     # Auto-follow mode: keep the cursor on the latest and ensure it's visible
+                     self.selected_log_index = len(self.all_logs) - 1
+                     self.logs_scroll_offset = len(self.all_logs) - visible_count
+                else:
+                     # Manual mode: ensure the selected index is visible
+                     if self.selected_log_index < self.logs_scroll_offset:
+                         self.logs_scroll_offset = self.selected_log_index
+                     elif self.selected_log_index >= self.logs_scroll_offset + visible_count:
+                         self.logs_scroll_offset = self.selected_log_index - visible_count + 1
 
                 visible_logs_with_idx = []
                 for i in range(visible_count):
@@ -337,18 +339,18 @@ class DashboardUI:
                         self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        self.selected_log_index = (self.selected_log_index - 1) % len(self.all_logs) if self.all_logs else 0
-                        self.logs_scroll_offset = self.selected_log_index
-                        self.logs_pause_until = time.time() + 5
+                        if self.all_logs:
+                            self.selected_log_index = max(0, self.selected_log_index - 1)
+                        self.logs_pause_until = time.time() + 10 # Increase pause for manual inspection
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = (self.selected_pair_index + 1) % len(sorted_symbols) if sorted_symbols else 0
                         self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        self.selected_log_index = (self.selected_log_index + 1) % len(self.all_logs) if self.all_logs else 0
-                        self.logs_scroll_offset = self.selected_log_index
-                        self.logs_pause_until = time.time() + 5
+                        if self.all_logs:
+                            self.selected_log_index = min(len(self.all_logs) - 1, self.selected_log_index + 1)
+                        self.logs_pause_until = time.time() + 10
                 elif key == readchar.key.ENTER:
                     if self.focused_panel == "pairs" and sorted_symbols:
                         self.show_candles_for_pair = sorted_symbols[self.selected_pair_index]
@@ -460,10 +462,6 @@ class DashboardHandler(logging.Handler):
             self.ui.all_logs.append(new_log)
             if matching_trigger:
                  self.trigger_cache[(matching_trigger, symbol_tag)] = new_log
-
-            # Keep cursor on latest entry if not manually paused by user
-            if time.time() > self.ui.logs_pause_until:
-                self.ui.selected_log_index = len(self.ui.all_logs) - 1
 
             if len(self.ui.all_logs) > 500:
                 popped = self.ui.all_logs.pop(0)

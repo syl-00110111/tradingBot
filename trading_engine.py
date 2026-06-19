@@ -82,6 +82,7 @@ class TradingEngine:
             df_mc = get_signals(df_mc, temp_cfg, is_backtest=False)
 
             mc_score = mc_engine.validate_strategy(df_mc)
+            data['score'] = mc_score # Persist fresh MC score to UI
             hurdle = config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)
 
             if mc_score > 1.0 + hurdle:
