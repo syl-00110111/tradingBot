@@ -204,10 +204,22 @@ class DashboardUI:
                     last_order_style = "bold green" if last_order == "BUY" else "bold red" if last_order == "SELL" else "white"
 
                     amt_str, entry_str, fee_str = "-", "-", "-"
+
+                    wallet_amt = data.get('amt', 0)
+                    if wallet_amt > 0:
+                        amt_str = format_amount(wallet_amt)
+
                     if has_position:
                         p = positions[-1]
-                        amt_str = f"{format_amount(p['amount'])}"
-                        if len(positions) > 1: amt_str = f"({len(positions)}) {amt_str}"
+                        pos_amt_str = f"{format_amount(p['amount'])}"
+                        if len(positions) > 1: pos_amt_str = f"({len(positions)}) {pos_amt_str}"
+
+                        # If wallet amount is different from tracked position amount, show both?
+                        # Or just prioritize wallet amount if available.
+                        # The request says "populate Amt with the wallet from API"
+                        if wallet_amt <= 0:
+                             amt_str = pos_amt_str
+
                         entry_str = format_price(p['entry_price'])
                         fee_str = f"{format_amount(p.get('entry_fee', 0))}"
 

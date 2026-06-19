@@ -53,6 +53,7 @@ from core import TradingCore
 
 # Global objects
 ohlcv_cache_manager = None
+global_core = None
 global_pattern_pool = []
 candle_queue = queue.PriorityQueue()
 analysis_queue = queue.PriorityQueue()
@@ -103,9 +104,19 @@ def update_available_assets_live(exchange, config):
     global pending_asset_update
     time.sleep(random.uniform(1.0, 2.0))
     try:
-        new_assets = trading_engine.get_sellable_assets(exchange, config)
+        new_assets_with_amounts = trading_engine.get_sellable_assets_with_amounts(exchange, config)
+        new_assets = sorted(list(new_assets_with_amounts.keys()))
         with bot_lock:
             available_assets[:] = new_assets
+
+            # Update Amt in bot_state
+            for symbol, state in bot_state.items():
+                asset = symbol.split('/')[0]
+                if asset in new_assets_with_amounts:
+                    state['amt'] = new_assets_with_amounts[asset]
+                else:
+                    state['amt'] = 0
+
             pending_asset_update = False
     except Exception as e:
         logging.error(f"Failed to update assets from API: {e}")
@@ -467,7 +478,8 @@ def setup_bot_state(config, data_manager, bot_state):
             'consecutive_sells': 0,
             'last_mc_ts': 0,
             'mc_score': 1.1,
-            'last_processed_ts': 0
+            'last_processed_ts': 0,
+            'amt': 0
         }
 
 def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=None):
@@ -476,8 +488,13 @@ def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, g
     import optimization
     sellable = []
     try:
-        sellable = trading_engine.get_sellable_assets(exchange, config)
-        with bot_lock: available_assets[:] = sellable
+        sellable_with_amounts = trading_engine.get_sellable_assets_with_amounts(exchange, config)
+        sellable = sorted(list(sellable_with_amounts.keys()))
+        with bot_lock:
+            available_assets[:] = sellable
+            for symbol, state in bot_state.items():
+                asset = symbol.split('/')[0]
+                state['amt'] = sellable_with_amounts.get(asset, 0)
     except: pass
 
     # Set default priority
@@ -701,10 +718,22 @@ def main():
         timeframe = config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '1m')
         symbols = list(config.get('pairs', {}).keys())
         if symbols:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(symbols), 20)) as executor:
-                futures = [executor.submit(fetch_ohlcv_incremental, exchange, sym, timeframe, ohlcv_cache_manager, limit=500) for sym in symbols]
+            # Throttled download: 5 workers and 0.2s delay to avoid 429 errors
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(symbols), 5)) as executor:
+                futures = []
+                for sym in symbols:
+                    if shutdown_event.is_set(): break
+                    futures.append(executor.submit(fetch_ohlcv_incremental, exchange, sym, timeframe, ohlcv_cache_manager, limit=500))
+                    time.sleep(0.2)
                 concurrent.futures.wait(futures)
         logging.info("Initial REST API download complete.")
+
+    def signal_handler(sig, frame):
+        logging.info("Interrupt received, shutting down gracefully...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     # Start Websocket manager if not in backtest/sell/balance mode
     ws_started = False
@@ -713,7 +742,9 @@ def main():
         timeframes = [config.get('expected_profit_terms', {}).get(t, {}).get('timeframe', '1m') for t in ['short', 'medium', 'long']]
         market_type = api_creds.get('market', config.get('market', 'spot'))
         # Transition to Async Core
-        core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+        core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, shutdown_event)
+        global global_core
+        global_core = core
 
         async_manager = AsyncExchangeManager(
             args.exchange, api_key, api_secret,
@@ -767,7 +798,8 @@ def main():
 
         # Ensure core exists if WS didn't start it
         if 'core' not in locals():
-            core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+            core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, shutdown_event)
+            global_core = core
         # Sync state
         with bot_lock:
             core.bot_state = bot_state
@@ -779,10 +811,16 @@ def main():
         async def run_core():
             await core.main_loop()
 
-        threading.Thread(target=lambda: asyncio.run(run_core()), daemon=True).start()
+        core_thread = threading.Thread(target=lambda: asyncio.run(run_core()), daemon=True)
+        core_thread.start()
 
-        while not shutdown_event.is_set():
-            time.sleep(1)
+        try:
+            while not shutdown_event.is_set():
+                time.sleep(1)
+        except KeyboardInterrupt:
+            shutdown_event.set()
+
+        core_thread.join(timeout=5)
     else:
         # Silence ALL other handlers during Dashboard execution, keeping ONLY DashboardHandler
         all_other_handlers = [h for h in logging.root.handlers if not isinstance(h, dashboard.DashboardHandler)]
@@ -799,7 +837,9 @@ def main():
 
                 # Ensure core exists
                 if 'core' not in globals() and 'core' not in locals():
-                    core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+                    core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, shutdown_event)
+                    global global_core
+                    global_core = core
                 # Sync state
                 with bot_lock:
                     core.bot_state = bot_state
@@ -825,6 +865,11 @@ def main():
                 # Restore console logging on exit
                 for h in all_other_handlers:
                     logging.root.addHandler(h)
+
+    if global_core:
+        try:
+            asyncio.run(global_core.shutdown())
+        except: pass
 
     if ohlcv_cache_manager:
         ohlcv_cache_manager.flush_all()

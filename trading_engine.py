@@ -400,11 +400,13 @@ def get_sellable_assets_sim(data_manager):
     positions = data_manager.get_open_positions()
     return sorted([s.split('/')[0] for s in positions.keys()])
 
-def get_sellable_assets(exchange, config=None):
+def get_sellable_assets_with_amounts(exchange, config=None):
+    """Returns a dict of {asset: amount} for assets that are not dust."""
     balance = exchange.fetch_balance()
     if not balance:
-        return []
-    assets = []
+        return {}
+
+    result = {}
     base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR']) if config else ['USDT', 'USDC', 'EUR']
     free_balances = balance.get('free', balance)
 
@@ -440,10 +442,15 @@ def get_sellable_assets(exchange, config=None):
                 ticker = exchange.fetch_ticker(symbol)
                 if ticker and (amount < min_amount or (amount * ticker['last']) < min_cost): continue
             elif amount <= 0.000001: continue
-            assets.append(asset)
+            result[asset] = amount
         except Exception:
-            if amount > 0.000001: assets.append(asset)
-    return sorted(assets)
+            if amount > 0.000001:
+                result[asset] = amount
+    return result
+
+def get_sellable_assets(exchange, config=None):
+    amounts = get_sellable_assets_with_amounts(exchange, config)
+    return sorted(list(amounts.keys()))
 
 def interactive_sell(exchange, data_manager, engine, config, console):
     console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
