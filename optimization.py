@@ -164,6 +164,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         'trades_count': len(trades), 'start_time': start_time_dt.strftime("%Y-%m-%d %H:%M"),
         'end_time': end_time_dt.strftime("%Y-%m-%d %H:%M"), 'start_ts': start_time_dt.timestamp(),
         'prices': eval_part['close'].tolist(), 'volumes': eval_part['volume'].tolist(),
+        'mc_score': mc_score,
         'tech_state': {
             'rsi': float(latest.get('rsi', 50)), 'adx': float(latest.get('adx', 0)),
             'volatility': float(latest.get('volatility', 0)), 'ema_f': float(latest.get('ema_f', 0)),
@@ -200,6 +201,7 @@ def run_benchmark_for_strategy(symbol, strategy, config, term_to_test, aggr, df_
             'profit': res['profit'], 'win_rate': res['win_rate'], 'max_dd': res['max_dd'],
             'start_time': res['start_time'], 'end_time': res['end_time'], 'start_ts': res['start_ts'],
             'prices': res['prices'], 'volumes': res['volumes'], 'tech_state': res['tech_state'],
+            'mc_score': res.get('mc_score', 1.0),
             'last_bench_ts': now_ts,
             'sim': 0
         }
