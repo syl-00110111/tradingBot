@@ -368,8 +368,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             logging.error(f"Error preparing {sym}: {e}")
             return None
 
-    # Increased max_workers for faster parallel historical data fetching - Doubled to 40
-    with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
+    # Increased max_workers for faster parallel historical data fetching - Quadrupled to 80
+    with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
         futures = {executor.submit(fetch_and_validate, sym): sym for sym in symbols}
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             res = future.result()
@@ -409,9 +409,9 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             mem_available = mem_info.available
 
             # Increased worker scaling for poor hardware - 10 hands
-            # We aim to use at most 90% of AVAILABLE memory for benchmark workers
-            mem_safe_workers = max(1, int((mem_available * 0.9) / footprint))
-            max_workers = min(cpu_count * 2, mem_safe_workers)
+            # We aim to use at most 95% of AVAILABLE memory for benchmark workers
+            mem_safe_workers = max(4, int((mem_available * 0.95) / footprint))
+            max_workers = min(cpu_count * 4, mem_safe_workers)
 
             cpu_usage = psutil.cpu_percent(interval=None)
             # If we have high CPU usage, further throttle workers
