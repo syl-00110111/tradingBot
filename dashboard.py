@@ -115,8 +115,6 @@ class DashboardUI:
                 table.add_column("Vol/ADX", style="dim white", no_wrap=True)
                 table.add_column("Flags", style="bold white", no_wrap=True)
                 table.add_column("Scr", style="bold white", no_wrap=True)
-                table.add_column("Agressivity", style="white", no_wrap=True)
-                table.add_column("Strategy", style="bold cyan", no_wrap=True, width=8)
             else:
                 table.add_column("Pair", style="cyan", no_wrap=True)
                 table.add_column("Price", style="magenta", no_wrap=True)
@@ -127,8 +125,8 @@ class DashboardUI:
                 table.add_column("Tendency", style="bold white", no_wrap=True)
                 table.add_column("Last Order", style="bold", no_wrap=True)
                 table.add_column("Signal", style="bold", no_wrap=True)
-                table.add_column("Agressivity", style="white", no_wrap=True)
-                table.add_column("Strategy", style="bold cyan", no_wrap=True, width=8)
+                table.add_column("Aggr", style="white", no_wrap=True)
+                table.add_column("Strategy", style="bold cyan", no_wrap=True, width=10)
 
             sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
 
@@ -225,16 +223,20 @@ class DashboardUI:
                         else: flags.append("TRD")
                         flags_str = ",".join(flags)
 
+                        def fmt_sig(v, sig):
+                            try:
+                                return f"{float(v):.{sig}g}"
+                            except:
+                                return str(v)
+
                         row_vals = [
                             symbol,
-                            f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
-                            f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0)}",
-                            f"{data.get('rsi', 0)}",
-                            f"{data.get('volatility', 0)}/{float(data.get('adx', 0)):.1f}",
+                            f"{fmt_sig(data.get('ema_f', 0), 7)}/{format_price(data.get('ema_s', 0))}",
+                            f"{fmt_sig(data.get('macd_hist', 0), 8)}",
+                            f"{fmt_sig(data.get('rsi', 0), 4)}",
+                            f"{fmt_sig(data.get('volatility', 0), 11)}/{float(data.get('adx', 0)):.1f}",
                             f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
-                            f"{data.get('score', 0)}",
-                            data.get('aggr', 'N/A'),
-                            (lambda d: d['all_matching_strategies'][int(now_ts % len(d['all_matching_strategies']))] if 'all_matching_strategies' in d and d['all_matching_strategies'] else d.get('strategy', 'N/A'))(data)
+                            f"{data.get('score', 0)}"
                         ]
                     else:
                         row_vals = [
@@ -243,7 +245,7 @@ class DashboardUI:
                             Text(tendency, style=tend_style),
                             Text(last_order, style=last_order_style),
                             Text(current_signal, style=signal_style),
-                            data.get('aggr', 'N/A'),
+                            str(data.get('aggr', 'N/A'))[:6],
                             data.get('strategy', 'N/A')
                         ]
                     table.add_row(*row_vals, style=row_style)
