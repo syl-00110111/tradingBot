@@ -25,12 +25,19 @@ class MarketDataService:
         self.core = core
         self.ohlcv_cache = core.ohlcv_cache_manager
         self.last_fetch = {}
+        self.ws_updates = {} # (symbol, timeframe) -> last_ws_ts
 
     async def get_fresh_data(self, symbol, timeframe):
         """Ensures we have the latest candles from the API. API-First."""
         now = time.time()
-        # Perfect Trader: don't ask the API more than once per second per pair to avoid rate-limits
-        # but keep it high frequency.
+
+        # Perfect Trader: If WebSockets are active and recently updated, trust the live cache
+        # This saves API weight for heavy history downloads
+        if now - self.ws_updates.get((symbol, timeframe), 0) < 30.0:
+            cached = self.ohlcv_cache.get(symbol, timeframe)
+            if cached: return cached
+
+        # Otherwise, throttle REST calls to 1s per pair
         if now - self.last_fetch.get((symbol, timeframe), 0) < 1.0:
             return self.ohlcv_cache.get(symbol, timeframe)
 
