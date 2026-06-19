@@ -687,11 +687,24 @@ def main():
             import optimization
             optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager); return
 
+        logging.info(f"REST API enabled for {args.exchange} ({market_type}).")
 
         # Initial synchronous asset update to ensure immediate availability
         try:
             available_assets[:] = trading_engine.get_sellable_assets(exchange, config)
         except: pass
+
+    # Prior to websockets, perform initial download with REST API
+    if args.mode in ['live', 'simulation', 'virtual']:
+        logging.info("Performing initial REST API data download for all pairs...")
+        term = config.get('_active_term', 'short')
+        timeframe = config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '1m')
+        symbols = list(config.get('pairs', {}).keys())
+        if symbols:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(symbols), 20)) as executor:
+                futures = [executor.submit(fetch_ohlcv_incremental, exchange, sym, timeframe, ohlcv_cache_manager, limit=500) for sym in symbols]
+                concurrent.futures.wait(futures)
+        logging.info("Initial REST API download complete.")
 
     # Start Websocket manager if not in backtest/sell/balance mode
     ws_started = False
