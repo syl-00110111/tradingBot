@@ -83,6 +83,7 @@ The bot is designed with the following empirical principles in mind:
 - **Selectivity**: The bot only enters trades when technical similarity and Monte Carlo validation hurdles are met.
 - **Automatic Execution**: Removes emotional bias by automating buy and sell actions based on proven historical patterns.
 - **Timeframe Scaling**: Shifting from short-term to longer-term timeframes when local volatility is low, as recommended in *Cryptocurrency - A Trader's Handbook*.
+- **Expert Monitoring**: Use the Expert View (**[X]**) to monitor real-time technical indicators like EMA, MACD, RSI, ADX, and system scores. See [EXPERT_VIEW_DOCUMENTATION.md](EXPERT_VIEW_DOCUMENTATION.md) for details.
 
 ---
 
