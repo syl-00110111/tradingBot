@@ -125,7 +125,9 @@ class ExecutionService:
 
         if analysis_res.get('buy_signal'):
             # Double check with Monte Carlo and Order Book
-            if not data.get('position') and symbol not in self.core.suspended_pairs:
+            # Limit to 3 concurrent positions (buyings in-a-row) per pair
+            positions = data.get('positions', [])
+            if len(positions) < 3 and symbol not in self.core.suspended_pairs:
                 if self.core.engine.validate_trade_mc(symbol, data, self.core.config):
                     # execute_buy now includes API-first balance and order book checks
                     await self.core.run_in_thread(

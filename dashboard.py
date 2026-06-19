@@ -270,41 +270,18 @@ class DashboardUI:
             log_height = self.console.height - 9
             if log_height < 3: log_height = 3
 
-            # We estimate that each log takes about 2 visual lines on average due to wrapping in narrow panels
-            estimated_visual_lines_per_log = 2
-            visible_count = log_height // estimated_visual_lines_per_log
-            if visible_count < 1: visible_count = 1
+            if len(self.all_logs) > log_height and should_step and self.marquee_enabled:
+                 if now_ts > self.logs_pause_until:
+                      self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs)
 
-            # Scrolling and following logic
-            if now_ts > self.logs_pause_until:
-                 # Auto-follow mode: keep the cursor on the latest
-                 if self.all_logs:
-                     self.selected_log_index = len(self.all_logs) - 1
-                 else:
-                     self.selected_log_index = 0
-
-            if len(self.all_logs) <= visible_count:
-                self.logs_scroll_offset = 0
+            if len(self.all_logs) <= log_height:
                 visible_logs_with_idx = [(i, log) for i, log in enumerate(self.all_logs)]
             else:
-                if now_ts > self.logs_pause_until:
-                     self.logs_scroll_offset = len(self.all_logs) - visible_count
-                else:
-                     # Manual mode: ensure the selected index is visible
-                     if self.selected_log_index < self.logs_scroll_offset:
-                         self.logs_scroll_offset = self.selected_log_index
-                     elif self.selected_log_index >= self.logs_scroll_offset + visible_count:
-                         self.logs_scroll_offset = self.selected_log_index - visible_count + 1
-
                 visible_logs_with_idx = []
-                for i in range(visible_count):
+                for i in range(log_height):
                     idx = (self.logs_scroll_offset + i) % len(self.all_logs)
                     visible_logs_with_idx.append((idx, self.all_logs[idx]))
 
-            if len(self.all_logs) > visible_count and should_step and self.marquee_enabled:
-                if now_ts > self.logs_pause_until:
-                    self.logs_scroll_offset = (self.logs_scroll_offset + 1) % visible_count
-            
             log_table = Table(expand=True, box=None, padding=0, show_header=False)
             log_table.add_column("Message")
 
@@ -319,8 +296,6 @@ class DashboardUI:
                     msg_text = Text(log_entry['msg'], style=expiry_style)
 
                 log_table.add_row(msg_text, style=row_style)
-                # Reduced spacing: instead of \n\n (which is 2 newlines), we use 1 newline to make it 2 lines total
-                log_table.add_row("", style=row_style)
 
             layout["logs"].update(Panel(log_table, title="[bold cyan]System Logs[/]", border_style="bright_blue" if self.focused_panel == "logs" else "dim white"))
 
@@ -360,18 +335,18 @@ class DashboardUI:
                         self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        if self.all_logs:
-                            self.selected_log_index = max(0, self.selected_log_index - 1)
-                        self.logs_pause_until = time.time() + 10 # Increase pause for manual inspection
+                        self.selected_log_index = (self.selected_log_index - 1) % len(self.all_logs) if self.all_logs else 0
+                        self.logs_scroll_offset = self.selected_log_index
+                        self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = (self.selected_pair_index + 1) % len(sorted_symbols) if sorted_symbols else 0
                         self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        if self.all_logs:
-                            self.selected_log_index = min(len(self.all_logs) - 1, self.selected_log_index + 1)
-                        self.logs_pause_until = time.time() + 10
+                        self.selected_log_index = (self.selected_log_index + 1) % len(self.all_logs) if self.all_logs else 0
+                        self.logs_scroll_offset = self.selected_log_index
+                        self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.ENTER:
                     if self.focused_panel == "pairs" and sorted_symbols:
                         self.show_candles_for_pair = sorted_symbols[self.selected_pair_index]
