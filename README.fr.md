@@ -83,6 +83,7 @@ Le bot est conçu avec les principes empiriques suivants à l'esprit :
 - **Sélectivité** : Le bot n'entre en transaction que lorsque les seuils de similitude technique et de validation Monte Carlo sont atteints.
 - **Exécution automatique** : Supprime les biais émotionnels en automatisant les actions d'achat et de vente basées sur des modèles historiques éprouvés.
 - **Adaptation de l'unité de temps** : Passage d'unités de temps courtes à des unités plus longues lorsque la volatilité locale est faible, comme recommandé dans *Cryptocurrency - A Trader's Handbook*.
+- **Surveillance Experte** : Utilisez la Vue Experte (**[X]**) pour surveiller les indicateurs techniques en temps réel comme l'EMA, le MACD, le RSI, l'ADX et les scores système. Voir [DOCUMENTATION_VUE_EXPERTE.md](DOCUMENTATION_VUE_EXPERTE.md) pour plus de détails.
 
 ---
 

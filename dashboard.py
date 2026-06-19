@@ -269,11 +269,13 @@ class DashboardUI:
 
             if len(self.all_logs) <= visible_count:
                 visible_logs_with_idx = [(i, log) for i, log in enumerate(self.all_logs)]
-                if not self.marquee_enabled and now_ts > self.logs_pause_until:
+                if now_ts > self.logs_pause_until:
                     self.logs_scroll_offset = 0
             else:
-                if not self.marquee_enabled and now_ts > self.logs_pause_until:
-                     self.logs_scroll_offset = len(self.all_logs) - visible_count
+                if now_ts > self.logs_pause_until:
+                     # Auto-follow the selected log (the latest one) by adjusting offset
+                     # so that the selected_log_index is at the bottom of the visible area
+                     self.logs_scroll_offset = max(0, self.selected_log_index - visible_count + 1)
 
                 visible_logs_with_idx = []
                 for i in range(visible_count):
@@ -459,6 +461,12 @@ class DashboardHandler(logging.Handler):
             if matching_trigger:
                  self.trigger_cache[(matching_trigger, symbol_tag)] = new_log
 
+            # Keep cursor on latest entry if not manually paused by user
+            if time.time() > self.ui.logs_pause_until:
+                self.ui.selected_log_index = len(self.ui.all_logs) - 1
+
             if len(self.ui.all_logs) > 500:
                 popped = self.ui.all_logs.pop(0)
                 self.trigger_cache = {k: v for k, v in self.trigger_cache.items() if v is not popped}
+                if self.ui.selected_log_index > 0:
+                    self.ui.selected_log_index -= 1

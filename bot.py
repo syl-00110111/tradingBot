@@ -220,6 +220,7 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
                 'strategy': active_pattern['strategy'],
                 'aggr': settings.get('label', active_pattern['aggr']),
                 'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
+                'score': latest.get('score', active_pattern.get('mc_score', 0)),
                 'active_pattern_id': active_pattern_id,
                 'pattern_match_ts': pattern_match_ts,
                 'last_mc_ts': last_mc_ts,
