@@ -321,7 +321,7 @@ class DashboardUI:
 
                 if key == readchar.key.TAB:
                     self.focused_panel = "logs" if self.focused_panel == "pairs" else "pairs"
-                elif key in [readchar.key.UP, 'w', 'k']:
+                elif key == readchar.key.UP:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = (self.selected_pair_index - 1) % len(sorted_symbols) if sorted_symbols else 0
                         self.pairs_scroll_offset = self.selected_pair_index
@@ -329,7 +329,7 @@ class DashboardUI:
                     else:
                         self.logs_scroll_offset = (self.logs_scroll_offset - 1) % len(self.all_logs) if self.all_logs else 0
                         self.logs_pause_until = time.time() + 5
-                elif key in [readchar.key.DOWN, 's', 'j']:
+                elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = (self.selected_pair_index + 1) % len(sorted_symbols) if sorted_symbols else 0
                         self.pairs_scroll_offset = self.selected_pair_index
