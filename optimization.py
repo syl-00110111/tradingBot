@@ -357,9 +357,11 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 else:
                     return sym, None, cached_patterns, best_cached
 
-            # Reduced limit for faster discovery (still plenty for technical indicators)
-            limit = 1000
-            ohlcv, _ = fetch_ohlcv_incremental(exchange, sym, timeframe, ohlcv_cache_manager, limit=limit)
+            # Deep History Fetching: Iteratively downloads up to 40,000 candles (requested depth)
+            # starting from 2024-06-01 as per BOT_WORKFLOW.md
+            limit = 40000
+            since_ts = int(datetime(2024, 6, 1).timestamp() * 1000)
+            ohlcv, _ = fetch_ohlcv_incremental(exchange, sym, timeframe, ohlcv_cache_manager, limit=limit, since=since_ts)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')

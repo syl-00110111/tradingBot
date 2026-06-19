@@ -698,6 +698,9 @@ def main():
         from exchange_handler import AsyncExchangeManager
         timeframes = [config.get('expected_profit_terms', {}).get(t, {}).get('timeframe', '1m') for t in ['short', 'medium', 'long']]
         market_type = api_creds.get('market', config.get('market', 'spot'))
+        # Transition to Async Core
+        core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+
         async_manager = AsyncExchangeManager(
             args.exchange, api_key, api_secret,
             list(config['pairs'].keys()),
@@ -705,6 +708,7 @@ def main():
             bot_state, bot_lock, ohlcv_cache_manager, shutdown_event,
             market_type=market_type
         )
+        async_manager.core_market_data = core.market_data
         if async_manager.is_supported:
             async_manager.start()
             ws_started = True
@@ -747,8 +751,9 @@ def main():
             setup_bot_state(config, data_manager, bot_state)
             run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state)
 
-        # Transition to Async Core
-        core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+        # Ensure core exists if WS didn't start it
+        if 'core' not in locals():
+            core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
         # Sync state
         with bot_lock:
             core.bot_state = bot_state
@@ -778,8 +783,9 @@ def main():
                     setup_bot_state(config, data_manager, bot_state)
                     run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=ui)
 
-                # Transition to Async Core
-                core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
+                # Ensure core exists
+                if 'core' not in globals() and 'core' not in locals():
+                    core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager)
                 # Sync state
                 with bot_lock:
                     core.bot_state = bot_state

@@ -45,8 +45,14 @@ class ThrottledExchange:
                 return
 
             elapsed = now - self.last_request_time
+            wait_time = 0
             if elapsed < self.delay_s:
-                time.sleep(self.delay_s - elapsed)
+                wait_time = self.delay_s - elapsed
+
+        if wait_time > 0:
+            time.sleep(wait_time)
+
+        with self.lock:
             self.last_request_time = time.time()
 
     def __getattr__(self, name):
@@ -372,8 +378,18 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, li
     # Final maintenance
     if updated:
          df_tmp = pd.DataFrame(cached_data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+
+         # Fix Volume/Candle Integrity: handle 0.0 volumes
+         # In illiquid markets, 0.0 volume candles might have same price as previous.
+         # We keep them but ensure they don't break indicators by forward-filling prices if needed.
+         # Actually, OHLCV from API should be fine, but we drop duplicates to be safe.
          df_tmp.drop_duplicates(subset='ts', keep='first', inplace=True)
          df_tmp.sort_values('ts', inplace=True)
+
+         # Sanity check: if volume is 0 but price moved, it's suspicious but we trust API.
+         # If volume is 0 and price is 0, that's corruption.
+         df_tmp = df_tmp[df_tmp['c'] > 0]
+
          cached_data = df_tmp.values.tolist()
 
          if len(cached_data) > 150000:
@@ -486,10 +502,14 @@ class AsyncExchangeManager:
 
                         if new_candles:
                             new_cached = cached + new_candles
-                            # Keep it sane
+                            # Perfect Trader: Keep it sane but large for deep analysis
                             if len(new_cached) > 150000:
                                 new_cached = new_cached[-150000:]
                             self.ohlcv_cache_manager.set(symbol, timeframe, new_cached)
+
+                            # Inform core of WS update
+                            if hasattr(self, 'core_market_data') and self.core_market_data:
+                                self.core_market_data.ws_updates[(symbol, timeframe)] = time.time()
                         # logging.debug(f"WS OHLCV Update for {symbol} {timeframe}: {len(new_candles)} new candles")
             except Exception as e:
                 if not self.external_shutdown_event.is_set():

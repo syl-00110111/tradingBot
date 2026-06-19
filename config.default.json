@@ -25,14 +25,14 @@
         "medium": {
             "label": "Medium Term (1d)",
             "duration_hours": 24,
-            "timeframe": "15m",
-            "eval_candles": 96
+            "timeframe": "1m",
+            "eval_candles": 1440
         },
         "long": {
             "label": "Long Term (1w)",
             "duration_hours": 168,
-            "timeframe": "1h",
-            "eval_candles": 168
+            "timeframe": "1m",
+            "eval_candles": 10080
         }
     }
 }
