@@ -32,6 +32,7 @@ import gc
 import psutil
 import importlib.util
 from datetime import datetime
+import asyncio
 
 from rich.live import Live
 from rich.logging import RichHandler

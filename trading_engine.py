@@ -55,7 +55,7 @@ class TradingEngine:
         Conservative profitability check accounting for fees on both sides.
         Default fee_rate 0.0015 (0.15%) to be safe.
         """
-        min_exit_price = entry_price * (1 + fee_rate * 2)
+        min_exit_price = entry_price + (fee_rate * 2)
         return exit_price > min_exit_price
 
     def check_sure_profit(self, exchange, symbol, amount, entry_price, fee_rate=0.0015):

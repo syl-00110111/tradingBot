@@ -60,7 +60,7 @@ class ThrottledExchange:
         attr = getattr(self.exchange, name)
         if callable(attr):
             def throttled_wrapper(*args, **kwargs):
-                retries = 5
+                retries = 3
                 last_error = None
                 while retries > 0:
                     try:
@@ -73,7 +73,7 @@ class ThrottledExchange:
                         logging.warning(f"Rate limit exceeded. Waiting {wait_time}s... ({retries} retries left)")
                         time.sleep(wait_time)
                         with self.lock:
-                            self.delay_s *= 1.0 # Dynamically increase delay
+                            self.delay_s *= 1.2 # Dynamically increase delay
                             self.max_burst = max(1, self.max_burst - 1)
                     except Exception as e:
                         raise e
@@ -480,7 +480,7 @@ class AsyncExchangeManager:
             except Exception as e:
                 if not self.external_shutdown_event.is_set():
                     logging.debug(f"WS Ticker Error for {symbol}: {e}")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
                 else: break
 
     async def watch_ohlcv_loop(self, symbol, timeframe):
@@ -515,7 +515,7 @@ class AsyncExchangeManager:
             except Exception as e:
                 if not self.external_shutdown_event.is_set():
                     logging.debug(f"WS OHLCV Error for {symbol} {timeframe}: {e}")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
                 else: break
 
 class MockExchange(ExchangeInterface):

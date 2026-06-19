@@ -208,7 +208,7 @@ class TradingCore:
                 # 1. API-First: Fetch fresh candles
                 ohlcv = await self.market_data.get_fresh_data(symbol, timeframe)
                 if not ohlcv:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
                     continue
 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -221,11 +221,11 @@ class TradingCore:
                     # 3. Execution: Verified trade
                     await self.execution.process_signal(symbol, res)
 
-                # High frequency: 1s instead of 2s
-                await asyncio.sleep(1)
+                # High frequency: 2s instead of 4s
+                await asyncio.sleep(2)
             except Exception as e:
                 logging.error(f"Error in pair_worker for {symbol}: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
 
     async def main_loop(self):
         """Coordinates all services and workers."""
