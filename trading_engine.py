@@ -141,7 +141,8 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
         free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
 
         if free_balance < cost:
-            logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)})")
+            logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)}). Suspending pair.")
+            suspended_pairs.add(symbol)
             return False
 
         # Check NOTIONAL / Minimum Cost filter
@@ -150,7 +151,8 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
             if symbol in markets:
                 min_cost = markets[symbol]['limits']['cost']['min'] or 0
                 if cost < min_cost:
-                    logging.warning(f"[{symbol}] Buy aborted: Order cost {format_price(cost)} is below minimum notional limit {format_price(min_cost)}.")
+                    logging.warning(f"[{symbol}] Buy aborted: Order cost {format_price(cost)} is below minimum notional limit {format_price(min_cost)}. Suspending pair.")
+                    suspended_pairs.add(symbol)
                     return False
         except Exception as e:
             logging.debug(f"[{symbol}] Could not verify notional limit: {e}")
@@ -427,24 +429,31 @@ def interactive_sell(exchange, data_manager, engine, config, console):
         quote = get_base_currency(symbol, config)
         console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {format_amount(amount)} | [bold cyan]Value:[/] {format_price(cost)} {quote}")
 
-        # Automatic execution (interactive mode replaced with auto-mode)
-        quote = get_base_currency(symbol, config)
-        console.print(f"[yellow]Selling {format_amount(amount)} {asset} at ~{format_price(price)} {quote}...[/]")
-        order = exchange.create_order(symbol, 'sell', amount)
-        if order:
-            fee = order.get('calculated_fee', 0)
-            total_received = (amount * price) - fee
+        # Interactive execution
+        import readchar
+        console.print(f"[yellow]Sell {asset}? (y/n): [/]", end="", flush=True)
+        choice = readchar.readchar().lower()
+        console.print(choice)
+        if choice == 'y':
             quote = get_base_currency(symbol, config)
-            logging.info(f"[{symbol}] Executing sell of amount {format_amount(amount)} at {format_price(price)}, final price received: {format_price(total_received)} {quote}")
-            console.print(f"[bold green]Successfully sold {asset}! Final received: {format_price(total_received)} {quote}[/]")
-            play_sound("sell", None)
-            pos_list = data_manager.get_positions(symbol)
-            if pos_list:
-                pos = pos_list[0]
-                profit = total_received - pos.get('entry_total_base', 0)
-                data_manager.close_position(symbol, price, fee, profit, {}, time.time(), total_base=total_received, position_idx=0)
+            console.print(f"[yellow]Selling {format_amount(amount)} {asset} at ~{format_price(price)} {quote}...[/]")
+            order = exchange.create_order(symbol, 'sell', amount)
+            if order:
+                fee = order.get('calculated_fee', 0)
+                total_received = (amount * price) - fee
+                quote = get_base_currency(symbol, config)
+                logging.info(f"[{symbol}] Executing sell of amount {format_amount(amount)} at {format_price(price)}, final price received: {format_price(total_received)} {quote}")
+                console.print(f"[bold green]Successfully sold {asset}! Final received: {format_price(total_received)} {quote}[/]")
+                play_sound("sell", None)
+                pos_list = data_manager.get_positions(symbol)
+                if pos_list:
+                    pos = pos_list[0]
+                    profit = total_received - pos.get('entry_total_base', 0)
+                    data_manager.close_position(symbol, price, fee, profit, {}, time.time(), total_base=total_received, position_idx=0)
+            else:
+                console.print(f"[bold red]Failed to sell {asset}.[/]")
         else:
-            console.print(f"[bold red]Failed to sell {asset}.[/]")
+            console.print("[blue]Skipping sell.[/]")
 
     if not sellable_found:
         msg = "No sellable assets (above dust threshold) found in your real wallet."

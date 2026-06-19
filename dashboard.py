@@ -24,6 +24,7 @@ class DashboardUI:
     def __init__(self, console):
         self.console = console
         self.pairs_scroll_offset = 0
+        self.logs_scroll_offset = 0
         self.focused_panel = "pairs"
         self.all_logs = []
         self.status_scroll_index = 0
@@ -87,12 +88,13 @@ class DashboardUI:
             # Footer: Quick actions and Status Bar
             footer_left = Text("[B] Buy  [S] Sell  [X] Expert  [TAB] Switch Panel  [M] Marquee  [Q] Quit")
 
-            status_items = [
-                 f"Accel: {config.get('gpu_accel', 'CPU')}",
-                 f"Risk: {config.get('global_risk_multiplier', 1.2)}x",
-                 f"Hurdle: {config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)}"
-            ]
-            footer_right = Text(" | ".join(status_items))
+            instr = config.get('opt_level', 'Unknown')
+            footer_right = Text()
+            footer_right.append("Instr: ")
+            footer_right.append(instr, style="bold blue")
+            footer_right.append(f", Accel: {config.get('gpu_accel', 'CPU')}")
+            footer_right.append(f" | Risk: {config.get('global_risk_multiplier', 1.2)}x")
+            footer_right.append(f" | Hurdle: {config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)}")
 
             footer_table = Table.grid(expand=True, padding=0)
             footer_table.add_column(justify="left")
@@ -166,28 +168,22 @@ class DashboardUI:
             else:
                 pairs_height = self.console.height - 9
                 if pairs_height < 3: pairs_height = 3
-                max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
 
-                if max_pairs_offset > 0 and should_step:
+                if len(sorted_symbols) > pairs_height and should_step and self.marquee_enabled:
                      if now_ts > self.pairs_pause_until:
-                          if self.pairs_marquee_dir == 1:
-                               if self.pairs_scroll_offset < max_pairs_offset:
-                                   self.pairs_scroll_offset += 1
-                               if self.pairs_scroll_offset >= max_pairs_offset:
-                                   self.pairs_marquee_dir = -1
-                                   self.pairs_pause_until = now_ts + 2
-                          else:
-                               if self.pairs_scroll_offset > 0:
-                                   self.pairs_scroll_offset -= 1
-                               else:
-                                   self.pairs_marquee_dir = 1
-                                   self.pairs_pause_until = now_ts + 2
+                          self.pairs_scroll_offset = (self.pairs_scroll_offset + 1) % len(sorted_symbols)
 
-                self.pairs_scroll_offset = max(0, min(self.pairs_scroll_offset, max_pairs_offset))
-                visible_symbols = sorted_symbols[self.pairs_scroll_offset : self.pairs_scroll_offset + pairs_height]
-                for i, symbol in enumerate(visible_symbols):
+                if len(sorted_symbols) <= pairs_height:
+                    visible_symbols_with_idx = [(i, s) for i, s in enumerate(sorted_symbols)]
+                else:
+                    visible_symbols_with_idx = []
+                    for i in range(pairs_height):
+                        idx = (self.pairs_scroll_offset + i) % len(sorted_symbols)
+                        visible_symbols_with_idx.append((idx, sorted_symbols[idx]))
+
+                for idx, symbol in visible_symbols_with_idx:
                     data = bot_state[symbol]
-                    is_selected = (self.pairs_scroll_offset + i) == self.selected_pair_index
+                    is_selected = idx == self.selected_pair_index
                     positions = data.get('positions', [])
                     has_position = len(positions) > 0
                     current_signal = "Waiting"
@@ -258,10 +254,20 @@ class DashboardUI:
             log_height = self.console.height - 9
             if log_height < 3: log_height = 3
 
+            if len(self.all_logs) > log_height and should_step and self.marquee_enabled:
+                if now_ts > self.logs_pause_until:
+                    self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs)
+
+            if len(self.all_logs) <= log_height:
+                visible_logs = self.all_logs
+            else:
+                visible_logs = []
+                for i in range(log_height):
+                    idx = (self.logs_scroll_offset + i) % len(self.all_logs)
+                    visible_logs.append(self.all_logs[idx])
+
             log_text = Text()
-            # No scrolling, always show latest
-            start = max(0, len(self.all_logs) - log_height)
-            for log_entry in self.all_logs[start:]:
+            for log_entry in visible_logs:
                 style = "dim" if log_entry.get('expiry') and now > log_entry['expiry'] else ""
                 try:
                     log_text.append(Text.from_markup(log_entry['msg'], style=style))
@@ -270,7 +276,8 @@ class DashboardUI:
                 log_text.append("\n")
 
             # Add 3 blank lines at the end for breathing room
-            log_text.append("\n\n\n")
+            if not visible_logs:
+                log_text.append("\n\n\n")
 
             layout["logs"].update(Panel(log_text, title="[bold cyan]System Logs[/]", border_style="bright_blue" if self.focused_panel == "logs" else "dim white"))
 
@@ -306,20 +313,19 @@ class DashboardUI:
                     self.focused_panel = "logs" if self.focused_panel == "pairs" else "pairs"
                 elif key == readchar.key.UP:
                     if self.focused_panel == "pairs":
-                        self.selected_pair_index = max(0, self.selected_pair_index - 1)
-                        if self.selected_pair_index < self.pairs_scroll_offset:
-                            self.pairs_scroll_offset = self.selected_pair_index
+                        self.selected_pair_index = (self.selected_pair_index - 1) % len(sorted_symbols) if sorted_symbols else 0
+                        self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
+                        self.logs_scroll_offset = (self.logs_scroll_offset - 1) % len(self.all_logs) if self.all_logs else 0
                         self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
-                        self.selected_pair_index = min(len(sorted_symbols) - 1, self.selected_pair_index + 1)
-                        pairs_height = self.console.height - 9
-                        if self.selected_pair_index >= self.pairs_scroll_offset + pairs_height:
-                            self.pairs_scroll_offset = self.selected_pair_index - pairs_height + 1
+                        self.selected_pair_index = (self.selected_pair_index + 1) % len(sorted_symbols) if sorted_symbols else 0
+                        self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
+                        self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs) if self.all_logs else 0
                         self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.ENTER:
                     if self.focused_panel == "pairs" and sorted_symbols:

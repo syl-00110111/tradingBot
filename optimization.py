@@ -399,7 +399,6 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                                         'strategy': best_for_symbol['strategy'],
                                         'expected_profit': avg_profit
                                     })
-                            logging.info(f"[{sym}] Benchmarking complete: {best_for_symbol['strategy']} ({avg_profit:.2f}%)")
 
                         period_str = f" [dim](From {best_for_symbol.get('start_time')} to {best_for_symbol.get('end_time')})[/]"
                         cache_mgr.set(sym, term_to_test, patterns, save=False)

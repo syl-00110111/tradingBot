@@ -533,7 +533,7 @@ class ExecutionWorker(threading.Thread):
                             data['consecutive_sells'] = 0
                             signal_arrival_times.pop(symbol, None)
 
-                        if data['consecutive_buys'] >= 1 and not data['position']:
+                        if data['consecutive_buys'] >= 1 and not data['position'] and symbol not in suspended_pairs:
                             active_term = self.config.get('_active_term', 'short')
                             if self.engine.validate_trade_mc(symbol, data, self.config):
                                 if trading_engine.execute_buy(self.exchange, self.data_manager, self.engine, symbol, data, self.config, bot_lock, available_assets, suspended_pairs, term=active_term):
@@ -658,7 +658,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=config.get('_active_term', 'short'), data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=config.get('device'), symbols_to_process=rebench_syms, ohlcv_cache_manager=ohlcv_cache_manager, bot_state=bot_state)
 
         for symbol in all_symbols:
-            if symbol in suspended_pairs: continue
+            # Allow analysis if we have a position, even if suspended (so we can sell)
+            has_pos = False
+            with bot_lock:
+                if symbol in bot_state and bot_state[symbol].get('positions'):
+                    has_pos = True
+
+            if symbol in suspended_pairs and not has_pos: continue
+
             with bot_lock:
                 if symbol not in pending_analysis and time.time() >= bot_state[symbol].get('next_scan_allowed', 0):
                     # Organise by quote currency group
@@ -879,8 +886,7 @@ def main():
             elif 'sse' in flags: opt_level = "SSE"
             elif 'mmx' in flags: opt_level = "MMX"
 
-            hw_msg = f"Hardware optimization level: [bold blue]{opt_level}[/] ({info.get('brand_raw', 'Unknown CPU')})"
-            logging.info(hw_msg)
+            config['opt_level'] = opt_level
         except: pass
 
         data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation', 'sell', 'virtual'] else None
