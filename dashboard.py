@@ -32,6 +32,7 @@ class DashboardUI:
         self.show_help = False
         self.marquee_enabled = True
         self.selected_pair_index = 0
+        self.selected_log_index = 0
         self.show_candles_for_pair = None
 
         # Marquee Timing Control
@@ -259,37 +260,42 @@ class DashboardUI:
                 if now_ts > self.logs_pause_until:
                     self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs)
 
-            # We estimate that each log takes about 3 visual lines on average due to wrapping
-            estimated_visual_lines_per_log = 3
-            visible_count = max(1, log_height // estimated_visual_lines_per_log)
+            # We estimate that each log takes about 2 visual lines on average due to wrapping
+            estimated_visual_lines_per_log = 2
+            visible_count = log_height // estimated_visual_lines_per_log
+            if visible_count < 1: visible_count = 1
 
             if len(self.all_logs) <= visible_count:
-                visible_logs = self.all_logs
-                self.logs_scroll_offset = 0 # Follow tail if not overflowing
+                visible_logs_with_idx = [(i, log) for i, log in enumerate(self.all_logs)]
+                if not self.marquee_enabled and now_ts > self.logs_pause_until:
+                    self.logs_scroll_offset = 0
             else:
-                # If marquee is disabled, we follow the tail unless manual scroll was used recently
                 if not self.marquee_enabled and now_ts > self.logs_pause_until:
                      self.logs_scroll_offset = len(self.all_logs) - visible_count
 
-                visible_logs = []
+                visible_logs_with_idx = []
                 for i in range(visible_count):
                     idx = (self.logs_scroll_offset + i) % len(self.all_logs)
-                    visible_logs.append(self.all_logs[idx])
+                    visible_logs_with_idx.append((idx, self.all_logs[idx]))
 
-            log_text = Text()
-            for log_entry in visible_logs:
-                style = "dim" if log_entry.get('expiry') and now > log_entry['expiry'] else ""
+            log_table = Table(expand=True, box=None, padding=0, show_header=False)
+            log_table.add_column("Message")
+
+            for idx, log_entry in visible_logs_with_idx:
+                is_selected = idx == self.selected_log_index
+                row_style = "bold black on yellow" if is_selected else ""
+                expiry_style = "dim" if log_entry.get('expiry') and now > log_entry['expiry'] else ""
+
                 try:
-                    log_text.append(Text.from_markup(log_entry['msg'], style=style))
+                    msg_text = Text.from_markup(log_entry['msg'], style=expiry_style)
                 except Exception:
-                    log_text.append(log_entry['msg'], style=style)
-                log_text.append("\n\n") # Extra spacing to account for visual lines
+                    msg_text = Text(log_entry['msg'], style=expiry_style)
 
-            # Add 3 blank lines at the end for breathing room
-            if not visible_logs:
-                log_text.append("\n\n\n")
+                log_table.add_row(msg_text, style=row_style)
+                # Reduced spacing: instead of \n\n (which is 2 newlines), we use 1 newline to make it 2 lines total
+                log_table.add_row("", style=row_style)
 
-            layout["logs"].update(Panel(log_text, title="[bold cyan]System Logs[/]", border_style="bright_blue" if self.focused_panel == "logs" else "dim white"))
+            layout["logs"].update(Panel(log_table, title="[bold cyan]System Logs[/]", border_style="bright_blue" if self.focused_panel == "logs" else "dim white"))
 
             # Overlay Help
             if self.show_help:
@@ -327,7 +333,8 @@ class DashboardUI:
                         self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        self.logs_scroll_offset = (self.logs_scroll_offset - 1) % len(self.all_logs) if self.all_logs else 0
+                        self.selected_log_index = (self.selected_log_index - 1) % len(self.all_logs) if self.all_logs else 0
+                        self.logs_scroll_offset = self.selected_log_index
                         self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.DOWN:
                     if self.focused_panel == "pairs":
@@ -335,7 +342,8 @@ class DashboardUI:
                         self.pairs_scroll_offset = self.selected_pair_index
                         self.pairs_pause_until = time.time() + 5
                     else:
-                        self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs) if self.all_logs else 0
+                        self.selected_log_index = (self.selected_log_index + 1) % len(self.all_logs) if self.all_logs else 0
+                        self.logs_scroll_offset = self.selected_log_index
                         self.logs_pause_until = time.time() + 5
                 elif key == readchar.key.ENTER:
                     if self.focused_panel == "pairs" and sorted_symbols:
