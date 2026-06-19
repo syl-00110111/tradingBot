@@ -92,7 +92,8 @@ class DashboardUI:
             footer_right = Text()
             footer_right.append("Instr: ")
             footer_right.append(instr, style="bold blue")
-            footer_right.append(f", Accel: {config.get('gpu_accel', 'CPU')}")
+            footer_right.append(", Accel: ")
+            footer_right.append(f"{config.get('gpu_accel', 'CPU')}", style="bold green")
             footer_right.append(f" | Risk: {config.get('global_risk_multiplier', 1.2)}x")
             footer_right.append(f" | Hurdle: {config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015)}")
 
@@ -114,19 +115,19 @@ class DashboardUI:
                 table.add_column("Flags", style="bold white", no_wrap=True)
                 table.add_column("Scr", style="bold white", no_wrap=True)
                 table.add_column("Agressivity", style="white", no_wrap=True)
-                table.add_column("Strategy", style="bold cyan", no_wrap=True)
+                table.add_column("Strategy", style="bold cyan", no_wrap=True, width=8)
             else:
                 table.add_column("Pair", style="cyan", no_wrap=True)
                 table.add_column("Price", style="magenta", no_wrap=True)
                 table.add_column("Amt", style="cyan", no_wrap=True)
                 table.add_column("Entry", style="magenta", no_wrap=True)
-                table.add_column("Fee", style="red", no_wrap=True)
+                table.add_column("Fee", style="red", no_wrap=True, width=6)
                 table.add_column("Bench", style="bold green", no_wrap=True)
                 table.add_column("Tendency", style="bold white", no_wrap=True)
                 table.add_column("Last Order", style="bold", no_wrap=True)
                 table.add_column("Signal", style="bold", no_wrap=True)
                 table.add_column("Agressivity", style="white", no_wrap=True)
-                table.add_column("Strategy", style="bold cyan", no_wrap=True)
+                table.add_column("Strategy", style="bold cyan", no_wrap=True, width=8)
 
             sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
 
@@ -258,11 +259,20 @@ class DashboardUI:
                 if now_ts > self.logs_pause_until:
                     self.logs_scroll_offset = (self.logs_scroll_offset + 1) % len(self.all_logs)
 
-            if len(self.all_logs) <= log_height:
+            # We estimate that each log takes about 3 visual lines on average due to wrapping
+            estimated_visual_lines_per_log = 3
+            visible_count = max(1, log_height // estimated_visual_lines_per_log)
+
+            if len(self.all_logs) <= visible_count:
                 visible_logs = self.all_logs
+                self.logs_scroll_offset = 0 # Follow tail if not overflowing
             else:
+                # If marquee is disabled, we follow the tail unless manual scroll was used recently
+                if not self.marquee_enabled and now_ts > self.logs_pause_until:
+                     self.logs_scroll_offset = len(self.all_logs) - visible_count
+
                 visible_logs = []
-                for i in range(log_height):
+                for i in range(visible_count):
                     idx = (self.logs_scroll_offset + i) % len(self.all_logs)
                     visible_logs.append(self.all_logs[idx])
 
@@ -273,7 +283,7 @@ class DashboardUI:
                     log_text.append(Text.from_markup(log_entry['msg'], style=style))
                 except Exception:
                     log_text.append(log_entry['msg'], style=style)
-                log_text.append("\n")
+                log_text.append("\n\n") # Extra spacing to account for visual lines
 
             # Add 3 blank lines at the end for breathing room
             if not visible_logs:
@@ -311,7 +321,7 @@ class DashboardUI:
 
                 if key == readchar.key.TAB:
                     self.focused_panel = "logs" if self.focused_panel == "pairs" else "pairs"
-                elif key == readchar.key.UP:
+                elif key in [readchar.key.UP, 'w', 'k']:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = (self.selected_pair_index - 1) % len(sorted_symbols) if sorted_symbols else 0
                         self.pairs_scroll_offset = self.selected_pair_index
@@ -319,7 +329,7 @@ class DashboardUI:
                     else:
                         self.logs_scroll_offset = (self.logs_scroll_offset - 1) % len(self.all_logs) if self.all_logs else 0
                         self.logs_pause_until = time.time() + 5
-                elif key == readchar.key.DOWN:
+                elif key in [readchar.key.DOWN, 's', 'j']:
                     if self.focused_panel == "pairs":
                         self.selected_pair_index = (self.selected_pair_index + 1) % len(sorted_symbols) if sorted_symbols else 0
                         self.pairs_scroll_offset = self.selected_pair_index

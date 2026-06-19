@@ -34,16 +34,19 @@ class TradingEngine:
             "ema_fast": 9, "ema_slow": 21,
             "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
+            "label": "balanced"
         }
         if adx > 25:
             settings.update({
                 "ema_fast": 10, "ema_slow": 30,
                 "rsi_buy": 40, "rsi_sell": 60,
+                "label": "aggressive"
             })
         elif volatility > self.config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01):
             settings.update({
                 "ema_fast": 30, "ema_slow": 100,
                 "rsi_buy": 20, "rsi_sell": 80,
+                "label": "conservative"
             })
         return settings
 
