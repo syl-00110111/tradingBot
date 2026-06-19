@@ -431,7 +431,7 @@ def interactive_sell(exchange, data_manager, engine, config, console):
 
         # Interactive execution
         import readchar
-        console.print(f"[yellow]Sell {asset}? (y/n): [/]", end="", flush=True)
+        console.print(f"[yellow]Sell {asset}? (y/n): [/]", end="")
         choice = readchar.readchar().lower()
         console.print(choice)
         if choice == 'y':
