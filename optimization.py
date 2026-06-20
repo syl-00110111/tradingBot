@@ -56,7 +56,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results, engine, config)
     console.print(f"[bold green]Backtest plot saved as {filename}[/]")
     plt.close()
 
-def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=True, return_full_df=False, copy_df=True, ohlcv_cache_manager=None):
+def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=None, engine=None, device=None, skip_mc=True, return_full_df=False, copy_df=True, ohlcv_cache_manager=None):
     """Core backtesting simulation logic optimized for speed."""
     fee_rate = 0.001
     if exchange:
@@ -72,7 +72,10 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
 
     if df_in is None:
         try:
-            ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=limit)
+            fetch_limit = limit or term_settings.get('eval_candles', 500)
+            # Add padding for indicators
+            fetch_limit += 200
+            ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=fetch_limit)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
