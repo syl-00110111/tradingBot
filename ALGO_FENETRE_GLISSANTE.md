@@ -26,23 +26,18 @@ Une **fenêtre rentable** est une tranche spécifique de données historiques o�
 En informatique, **O(N)** (notation Grand O) décrit un algorithme dont le temps d'exécution croît linéairement avec la taille des données d'entrée ($N$).
 
 - **Approche traditionnelle (O(N*W))** : Si vous avez 40 000 bougies ($N$) et que vous voulez tester une stratégie sur une fenêtre de 60 bougies ($W$), une approche naïve consisterait à exécuter 40 000 backtests distincts. C'est extrêmement lent.
-- **Notre approche (O(N))** : Notre bot calcule les signaux cumulés et la courbe d'équité résultante pour les 40 000 bougies en **une seule passe**. Une fois la courbe d'équité générée, trouver le profit de n'importe quelle fenêtre est une simple soustraction : `Equité[Fin] - Equité[Début]`.
+- **Notre approche (O(N))** : Le bot est optimisé pour calculer les indicateurs et les résultats de backtest en une seule passe vectorisée. En mode live/benchmark, il se concentre sur les données les plus récentes (60 bougies) pour identifier les modèles immédiatement pertinents, garantissant une prise de décision quasi instantanée.
 
-Parce que nous ne parcourons la liste des bougies qu'une seule fois pour générer la courbe et une fois de plus pour trouver les meilleures fenêtres, la complexité est $O(N)$, ce qui la rend des milliers de fois plus rapide que les méthodes traditionnelles.
+En utilisant les opérations PyTorch vectorisées, le bot peut traiter de grands ensembles de données beaucoup plus rapidement que les backtesters traditionnels basés sur des boucles.
 
 ---
 
 ## 3. Comment fonctionne l'algorithme
 
-1. **Génération globale de signaux** : Le bot prend un grand ensemble de données (jusqu'à 40 000 bougies) et calcule les indicateurs techniques (EMA, RSI, etc.) en utilisant des noyaux (kernels) GPU/CPU vectorisés.
-2. **Cartographie de l'équité** : Il simule une exécution de transaction continue sur l'ensemble du jeu de données. Si un signal d' "Achat" se produit à la bougie 100 et une "Vente" à la bougie 120, le profit est enregistré dans la courbe d'équité à ces points.
-3. **Glissement de la fenêtre** :
-   - Le bot définit une taille de fenêtre (ex : 60 bougies).
-   - Il fait "glisser" cette fenêtre sur la courbe d'équité du début à la fin.
-   - À chaque étape, il calcule le profit : `Profit = Equité[index_actuel + 60] - Equité[index_actuel]`.
-4. **Identification des pics** :
-   - Le bot maintient une liste des meilleurs scores de performance.
-   - Il identifie les **5 meilleures fenêtres rentables** où la stratégie a généré les gains les plus élevés.
-5. **Extraction des modèles** : Les prix et les états techniques (RSI, ADX) associés à ces 5 fenêtres sont enregistrés. Ceux-ci deviennent nos "Modèles de Succès" (Success Patterns).
+1. **Acquisition de données récentes** : En mode benchmark, le bot récupère les 60 dernières bougies ($N=60$) pour chaque symbole.
+2. **Génération de signaux vectorisés** : Les indicateurs pour les plus de 35 stratégies sont calculés simultanément à l'aide de noyaux PyTorch.
+3. **Backtesting rapide** : Le bot simule l'exécution des transactions sur la fenêtre de 60 bougies.
+4. **Success Pattern Matching (SPM)** : L'état technique et l'action des prix de la stratégie la plus performante sont extraits pour former un "Modèle de Succès".
+5. **Corrélation en temps réel** : En mode live, le bot compare continuellement les données entrantes du marché à ces modèles en utilisant la corrélation de Pearson accélérée par GPU.
 
-En utilisant cette approche O(N), le bot peut optimiser des centaines de combinaisons stratégie/paire en quelques secondes, même sur du matériel CPU standard.
+En se concentrant sur une fenêtre de 60 bougies avec des opérations vectorisées, le bot garantit que ses "Modèles de Succès" sont toujours pertinents par rapport au régime actuel du marché.

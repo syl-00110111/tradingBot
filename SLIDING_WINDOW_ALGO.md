@@ -26,23 +26,18 @@ A **profitable window** is a specific slice of historical data where a strategy 
 In Computer Science, **O(N)** (Big O notation) describes an algorithm whose execution time grows linearly with the size of the input data ($N$).
 
 - **Traditional Approach (O(N*W))**: If you have 40,000 candles ($N$) and you want to test a strategy over a 60-candle window ($W$), a naive approach would be to run 40,000 separate backtests. This is extremely slow.
-- **Our Approach (O(N))**: Our bot calculates the cumulative signals and the resulting equity curve for all 40,000 candles in a **single pass**. Once the equity curve is generated, finding the profit of any window is a simple subtraction: `Equity[End] - Equity[Start]`.
+- **Our Approach (O(N))**: The bot is optimized to calculate indicators and backtest results in a single vectorized pass. In live/benchmark mode, it focuses on the most recent data (60 candles) to identify immediately relevant patterns, ensuring near-instantaneous decision-making.
 
-Because we only traverse the list of candles once to generate the curve and once more to find the best windows, the complexity is $O(N)$, making it thousands of times faster than traditional methods.
+By using vectorized PyTorch operations, the bot can process large datasets much faster than traditional loop-based backtesters.
 
 ---
 
 ## 3. How the Algorithm Works
 
-1. **Global Signal Generation**: The bot takes a large dataset (up to 40,000 candles) and calculates technical indicators (EMA, RSI, etc.) using vectorized GPU/CPU kernels.
-2. **Equity Mapping**: It simulates a continuous trade execution across the entire dataset. If a "Buy" signal occurs at candle 100 and a "Sell" at candle 120, the profit is recorded into the equity curve at those points.
-3. **Sliding the Window**:
-   - The bot defines a window size (e.g., 60 candles).
-   - It "slides" this window across the equity curve from the beginning to the end.
-   - At each step, it calculates the profit: `Profit = Equity[current_index + 60] - Equity[current_index]`.
-4. **Peak Identification**:
-   - The bot maintains a list of the top performance scores.
-   - It identifies the **Top 5 Profitable Windows** where the strategy yielded the highest gains.
-5. **Pattern Extraction**: The prices and technical states (RSI, ADX) associated with these 5 windows are saved. These become our "Success Patterns."
+1. **Recent Data Acquisition**: In benchmark mode, the bot fetches the latest 60 candles ($N=60$) for each symbol.
+2. **Vectorized Signal Generation**: Indicators for all 35+ strategies are calculated simultaneously using PyTorch kernels.
+3. **Fast Backtesting**: The bot simulates trade execution over the 60-candle window.
+4. **Success Pattern Matching (SPM)**: The best-performing strategy's technical state and price action are extracted to form a "Success Pattern".
+5. **Real-Time Correlation**: In live mode, the bot continuously compares the incoming market data to these patterns using GPU-accelerated Pearson correlation.
 
-By using this O(N) approach, the bot can optimize hundreds of strategy/pair combinations in seconds, even on standard CPU hardware.
+By focusing on a 60-candle window with vectorized operations, the bot ensures that its "Success Patterns" are always relevant to the current market regime.

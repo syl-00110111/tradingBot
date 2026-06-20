@@ -38,6 +38,5 @@ Indicateurs d'état spéciaux pour la paire :
 
 ### 7. **Scr (Score)**
 - Une note composite de la configuration technique actuelle de la paire.
-- Il combine les signaux de plusieurs indicateurs (RSI, MACD, Bandes de Bollinger) ou les résultats des **simulations de Monte Carlo**.
-- **Des valeurs positives plus élevées** suggèrent une forte opportunité d'achat.
-- **Des valeurs négatives plus basses** suggèrent une forte opportunité de vente.
+- Il affiche les résultats des **simulations de Monte Carlo** ou la similitude de corrélation de Pearson avec le modèle de succès (Success Pattern) actif.
+- Des **valeurs supérieures à 0,7** suggèrent généralement un fort alignement technique ou une forte probabilité de succès selon le moteur MC.

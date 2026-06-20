@@ -26,20 +26,15 @@ Conçu pour l'évaluation d'une stratégie sur une seule paire à partir de donn
 
 ## 2. Mode Benchmark (`--mode benchmark`)
 
-Une phase d'optimisation haute performance qui identifie les "Modèles de Succès" historiques pour guider le trading en temps réel.
+Une phase d'optimisation rapide qui identifie les "Modèles de Succès" récents pour guider le trading en temps réel.
 
 ### Chemin d'exécution
-`main()` → `run_benchmark_mode()` → `Exécution séquentielle` → `run_benchmark_for_symbol()`
+`main()` → `run_benchmark_mode()` → `run_benchmark_for_symbol()`
 
 ### Flux du processus
-1. **Récupération historique profonde** : Télécharge de manière itérative jusqu'à 40 000 bougies (à partir du 2024-06-01) pour les symboles cibles.
-2. **Passe globale des indicateurs** : Calcule les signaux pour toutes les stratégies sur l' *ensemble* de l'ensemble de données historiques en une seule passe.
-3. **Algorithme de fenêtre glissante O(N)** :
-   - Au lieu de relancer des backtests complets, le bot calcule une courbe d'équité continue.
-   - Une fenêtre glissante (dimensionnée par `eval_candles`) se déplace sur la courbe d'équité pour identifier les périodes de rentabilité maximale.
-4. **Pondération de récence** : Applique des poids aux profits des fenêtres en fonction de l'ancienneté :
-   - **Court terme** : < 24h (1.0), < 7j (0.8), < 30j (0.5), plus ancien (0.2).
-5. **Extraction du Success Pattern Matching (SPM)** : Enregistre les 5 fenêtres les plus rentables (chevauchement autorisé) comme "Modèles de Succès" dans `success_patterns.json`.
+1. **Récupération historique récente** : Télécharge les 60 dernières bougies pour les symboles cibles.
+2. **Évaluation des stratégies** : Exécute des backtests pour toutes les stratégies sur cette courte fenêtre historique.
+3. **Extraction des modèles** : Identifie la stratégie la plus rentable et enregistre son état de performance comme un "Modèle de Succès".
 ---
 
 ## 3. Mode Live (`--mode live`)
@@ -47,14 +42,14 @@ Une phase d'optimisation haute performance qui identifie les "Modèles de Succè
 Trading en temps réel sur les bourses prises en charge (Binance, Kraken, Bitvavo, etc.).
 
 ### Chemin d'exécution
-`main()` → **Auto-Optimisation** (Benchmark complet) → `trading_thread_func` (Initialisation des workers)
+`main()` → **Auto-Optimisation** (Benchmark) → `main_loop` (Cœur de trading)
 
-### Architecture de file d'attente parallèle
-Le bot utilise un système hybride de file d'attente multithread et multiprocessus pour un débit et une fiabilité maximaux :
-1. **Téléchargeur de bougies** : File d'attente séquentielle prioritaire ou flux WebSocket pour les données OHLCV.
-2. **Analyse séquentielle** : Pool multithread qui délègue les calculs techniques lourds et les simulations Monte Carlo à un `Exécution séquentielle` dynamique (dimensionné selon le CPU/RAM).
-3. **Exécuteur (Execution Worker)** : Consommateur monothread qui gère l'exécution des transactions pour garantir la cohérence des ordres et la sécurité du solde.
-4. **Benchmarkeur (Benchmark Worker)** : Tâche d'arrière-plan dynamique qui actualise les modèles de succès en utilisant les ressources système disponibles sans bloquer la boucle de trading en direct.
+### Architecture Cœur Multithread
+Le bot utilise une architecture multithread pour garantir une réactivité en temps réel :
+1. **Observateurs OHLCV** : Threads dédiés pour chaque symbole afin de surveiller les nouvelles bougies via WebSockets ou sondage haute fréquence.
+2. **Observateur de Solde** : Un thread dédié pour surveiller les soldes des comptes et les actifs disponibles.
+3. **Analyse Séquentielle** : La boucle principale effectue une analyse séquentielle de chaque symbole à mesure que les données arrivent, déchargeant les calculs lourds sur le GPU.
+4. **Thread Dashboard** : Un thread dédié pour l'interface TUI interactive basée sur Rich.
 
 ### Flux du processus
 1. **Initialisation** : Synchronise les positions existantes et démarre les threads des workers en arrière-plan.
@@ -101,15 +96,14 @@ Le bot utilise un système hybride de file d'attente multithread et multiprocess
 - **Horizon temporel** : 20 bougies
 - **Seuil de probabilité de profit** : 1.0015 (plancher de profit de 0,15%)
 
-### Balayage adaptatif et Backoff
-- **Gestion des échecs** : Incrémente `scan_attempts` lors des recherches de modèles infructueuses.
-- **Backoff linéaire** : Retarde le prochain balayage de `attempts * 60` secondes.
-- **Escalade de l'unité de temps** : Après 5 tentatives infructueuses, passe à l'unité de temps suivante (Court -> Moyen -> Long).
+### Gestion des données multithread
+- **Isolation** : Chaque thread observateur maintient sa propre instance d'échange pour garantir la sécurité des threads (thread safety).
+- **Synchronisation** : Utilise des verrous (locks) de thread pour mettre à jour en toute sécurité les données partagées OHLCV et de solde utilisées par la boucle d'analyse.
 
 ### Moteur de risque dynamique
-- **Tendance forte** : ADX > 25
-- **Détection de plage de tendance (Range)** : Différence EMA < 0,1% du prix
-- **Détection de baleine (Whale)** : Volume > 3,0 écarts-types par rapport à la moyenne
+- **Tendance forte** : ADX > 25. Passe aux paramètres **agressifs** (EMAs plus courtes, seuils RSI plus larges).
+- **Haute volatilité** : Volatilité > 0.01. Passe aux paramètres **conservateurs** (EMAs plus longues, seuils RSI plus serrés).
+- **Détection de baleine (Whale)** : Volume > 3,0 écarts-types par rapport à la moyenne.
 
 ### Dimensionnement des positions
 - **Montant de base** : `base_trade_amount` (ou l'ancien `base_bet`) est un pourcentage du solde de l'actif de cotation disponible (par défaut : 10%).

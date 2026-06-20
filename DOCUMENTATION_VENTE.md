@@ -41,9 +41,8 @@ Si le prix actuel est supérieur au `min_exit_price` calculé (incluant les frai
 
 ### Cas B : Sans Profit Réalisable
 Si un signal de vente est reçu mais que le profit n'est pas suffisant pour couvrir les frais ou atteindre les objectifs :
-1.  **Incrémentation des signaux** : Le bot suit le nombre de `consecutive_sells`.
-2.  **Escalade de Terme** : Après 3 signaux de vente consécutifs sans profit, le bot tente d'augmenter l'horizon de temps (le "term") de la position (passage de `short` à `medium`, puis `long`). Cela permet de donner plus de temps à la stratégie pour devenir rentable.
-3.  **Vente Forcée (Auto-sell)** : Si la position est déjà sur le terme le plus long (`long`) et que les signaux de vente persistent (3 consécutifs), le bot déclenche une vente automatique pour limiter les pertes latentes.
+- Le bot enregistre que le signal de vente a été ignoré car le profit n'est pas encore assuré.
+- Il continue de maintenir la position jusqu'à ce qu'une sortie rentable soit possible ou que l'utilisateur intervienne manuellement.
 
 ## 4. L'Historique des Transactions
 

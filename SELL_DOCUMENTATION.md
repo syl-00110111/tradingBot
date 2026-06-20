@@ -41,9 +41,8 @@ If the current price is higher than the calculated `min_exit_price` (including f
 
 ### Case B: Without Achievable Profit
 If a sell signal is received but the profit is not sufficient to cover fees or reach objectives:
-1.  **Signal Increment**: The bot tracks the number of `consecutive_sells`.
-2.  **Term Escalation**: After 3 consecutive sell signals without profit, the bot attempts to increase the time horizon (the "term") of the position (moving from `short` to `medium`, then `long`). This allows giving more time for the strategy to become profitable.
-3.  **Forced Sale (Auto-sell)**: If the position is already on the longest term (`long`) and sell signals persist (3 consecutive), the bot triggers an automatic sale to limit latent losses.
+- The bot logs that the sell signal was ignored because profit is not yet assured.
+- It continues to hold the position until a profitable exit is possible or until the user manually intervenes.
 
 ## 4. Transaction History
 

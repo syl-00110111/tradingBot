@@ -26,20 +26,15 @@ Designed for single-pair strategy evaluation on historical data.
 
 ## 2. Benchmark Mode (`--mode benchmark`)
 
-A high-performance optimization phase that identifies historical "Success Patterns" to guide real-time trading.
+A rapid optimization phase that identifies recent "Success Patterns" to guide real-time trading.
 
 ### Execution Path
-`main()` → `run_benchmark_mode()` → `Sequential Execution` → `run_benchmark_for_symbol()`
+`main()` → `run_benchmark_mode()` → `run_benchmark_for_symbol()`
 
 ### Process Workflow
-1. **Deep History Fetching**: Iteratively downloads up to 40,000 candles (starting from 2024-06-01) for the target symbols.
-2. **Global Indicator Pass**: Calculates signals for all strategies across the *entire* historical dataset in one pass.
-3. **O(N) Sliding Window Algorithm**:
-   - Instead of re-running full backtests, the bot calculates a continuous equity curve.
-   - A sliding window (sized by `eval_candles`) moves across the equity curve to identify periods of peak profitability.
-4. **Recency Pondering**: Applies weights to window profits based on age:
-   - **Short Term**: < 24h (1.0), < 7d (0.8), < 30d (0.5), older (0.2).
-5. **Success Pattern Matching (SPM) Extraction**: Saves the top 5 profitable windows (overlapping allowed) as "Success Patterns" into `success_patterns.json`.
+1. **Recent History Fetching**: Downloads the latest 60 candles for the target symbols.
+2. **Strategy Evaluation**: Runs backtests for all strategies on this short historical window.
+3. **Pattern Extraction**: Identifies the most profitable strategy and saves its performance state as a "Success Pattern".
 ---
 
 ## 3. Live Mode (`--mode live`)
@@ -47,14 +42,14 @@ A high-performance optimization phase that identifies historical "Success Patter
 Real-time trading on supported exchanges (Binance, Kraken, Bitvavo, etc.).
 
 ### Execution Path
-`main()` → **Auto-Optimization** (Full Benchmark) → `trading_thread_func` (Worker Initialization)
+`main()` → **Auto-Optimization** (Benchmark) → `main_loop` (Trading Core)
 
-### Parallel Queued Architecture
-The bot uses a hybrid multi-threaded and multi-processed queued system for maximum throughput and reliability:
-1. **Candle Downloader**: High-priority sequential queue or WebSocket streams for OHLCV data.
-2. **Sequential Analysis**: Multi-threaded pool that offloads heavy technical calculations and Monte Carlo simulations to a dynamic `Sequential Execution` (scaled by CPU/RAM).
-3. **Execution Worker**: Single-threaded consumer that handles trade execution to ensure order consistency and balance safety.
-4. **Benchmark Worker**: Dynamic background task that refreshes success patterns using available system resources without blocking the live trading loop.
+### Multi-Threaded Core Architecture
+The bot uses a multi-threaded architecture to ensure real-time responsiveness:
+1. **OHLCV Watchers**: Dedicated threads for each symbol to watch for new candles using WebSockets or high-frequency polling.
+2. **Balance Watcher**: A dedicated thread to monitor account balances and available assets.
+3. **Sequential Analysis**: The main loop performs sequential analysis of each symbol as data arrives, offloading heavy calculations to the GPU.
+4. **Dashboard Thread**: A dedicated thread for the interactive Rich-based TUI.
 
 ### Process Workflow
 1. **Initialization**: Syncs existing positions and starts the background worker threads.
@@ -101,15 +96,14 @@ Functional equivalent of Live mode but with virtual execution.
 - **Time Horizon**: 20 candles
 - **Profit Probability Hurdle**: 1.0015 (0.15% profit floor)
 
-### Adaptive Scanning & Backoff
-- **Failure Handling**: Increment `scan_attempts` on unsuccessful pattern searches.
-- **Linear Backoff**: Delay next scan by `attempts * 60` seconds.
-- **Timeframe Escalation**: After 5 failed attempts, switch to the next timeframe (Short -> Medium -> Long).
+### Multi-Threaded Data Handling
+- **Isolation**: Each watcher thread maintains its own exchange instance to ensure thread safety.
+- **Synchronization**: Uses thread locks to safely update the shared OHLCV and Balance data used by the analysis loop.
 
 ### Dynamic Risk Engine
-- **Strong Trend**: ADX > 25
-- **Trend Range Detection**: EMA difference < 0.1% of price
-- **Whale Detection**: Volume > 3.0 standard deviations from mean
+- **Strong Trend**: ADX > 25. Switches to **aggressive** settings (shorter EMAs, wider RSI thresholds).
+- **High Volatility**: Volatility > 0.01. Switches to **conservative** settings (longer EMAs, tighter RSI thresholds).
+- **Whale Detection**: Volume > 3.0 standard deviations from mean.
 
 ### Position Sizing
 - **Base Amount**: `base_trade_amount` (or legacy `base_bet`) is a percentage of the available quote asset balance (default: 10%).
