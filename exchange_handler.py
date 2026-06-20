@@ -57,10 +57,8 @@ class CCXTExchange(ExchangeInterface):
         except Exception as e: logging.error(f"Failed to load markets: {e}"); return {}
 
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
-        # Strictly WebSocket as per Instruction 2. For bootstrap, we still use fetch but it should be discouraged.
-        # However, the task says "Wipe out completely: ... rest api calls".
-        # We'll use watch_ohlcv but with a fallback to None to force WS only.
-        return await self.watch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        try: return await self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        except Exception as e: logging.error(f"Error fetching OHLCV for {symbol}: {e}"); return []
 
     async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100):
         try: return await self.exchange.watch_ohlcv(symbol, timeframe, since=since, limit=limit)

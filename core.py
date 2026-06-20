@@ -82,12 +82,13 @@ class TradingCore:
 
                     try:
                         # fetch candles for 1m
-                        self.log(f"Step: watchOHLCV for {symbol}")
+                        self.log(f"Step: fetchOHLCV for {symbol}")
                         ohlcv = None
                         try:
-                            ohlcv = await asyncio.wait_for(self.exchange.watch_ohlcv(symbol, '1m', limit=100), timeout=2.0)
+                            # Prefer fetch_ohlcv (REST) to avoid blocking for minutes if no trade occurs
+                            ohlcv = await asyncio.wait_for(self.exchange.fetch_ohlcv(symbol, '1m', limit=100), timeout=5.0)
                         except asyncio.TimeoutError:
-                            self.log(f"watchOHLCV timeout for {symbol}")
+                            self.log(f"fetchOHLCV timeout for {symbol}")
 
                         if not ohlcv:
                             self.log(f"No OHLCV for {symbol}, skipping.")
