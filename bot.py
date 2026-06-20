@@ -740,10 +740,17 @@ def main():
 
     # Prior to websockets, perform initial download with REST API
     if args.mode in ['live', 'simulation', 'virtual']:
-        logging.info("Performing initial REST API data download for all pairs...")
+        logging.info("Performing initial REST API data download for all pairs (wallet assets prioritized)...")
         term = config.get('_active_term', 'short')
         timeframe = config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '1m')
-        symbols = list(config.get('pairs', {}).keys())
+
+        # Prioritize wallet assets for absolute priority
+        all_configured_symbols = list(config.get('pairs', {}).keys())
+        wallet_assets = set(available_assets)
+        prioritized_symbols = [s for s in all_configured_symbols if s.split('/')[0] in wallet_assets]
+        other_symbols = [s for s in all_configured_symbols if s.split('/')[0] not in wallet_assets]
+        symbols = prioritized_symbols + other_symbols
+
         if symbols:
             # Throttled download: 5 workers and 0.2s delay to avoid 429 errors
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(symbols), 5)) as executor:

@@ -206,6 +206,15 @@ class TradingCore:
 
     async def pair_worker(self, symbol):
         """Independent worker for each pair (100 fingers)."""
+        # Perfect Trader: prioritize analysis of assets already in wallet
+        # Start other pairs with a delay to ensure wallet assets get immediate process priority
+        is_wallet_asset = False
+        with self.state_lock:
+             is_wallet_asset = symbol.split('/')[0] in set(self.available_assets)
+
+        if not is_wallet_asset:
+             await asyncio.sleep(5)
+
         while True:
             if isinstance(self.shutdown_event, (threading.Event, asyncio.Event)):
                 if self.shutdown_event.is_set(): break
@@ -258,9 +267,18 @@ class TradingCore:
         """Coordinates all services and workers."""
         self.analysis.start()
 
+        # Absolute priority: Launch workers for wallet assets FIRST
+        all_configured_symbols = list(self.config.get('pairs', {}).keys())
+        wallet_assets = set(self.available_assets)
+        prioritized_symbols = [s for s in all_configured_symbols if s.split('/')[0] in wallet_assets]
+        other_symbols = [s for s in all_configured_symbols if s.split('/')[0] not in wallet_assets]
+
+        # Merge lists keeping priority
+        symbols_order = prioritized_symbols + other_symbols
+
         # Launch workers for each pair (the fingers)
         tasks = []
-        for symbol in self.config.get('pairs', {}):
+        for symbol in symbols_order:
             tasks.append(asyncio.create_task(self.pair_worker(symbol)))
 
         # Background benchmark coordinator
