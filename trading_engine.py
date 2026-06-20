@@ -448,8 +448,10 @@ async def get_sellable_assets_with_amounts(exchange, config=None):
             if amount > 0.000001: result[asset] = amount
     return result
 
-async def get_sellable_assets(exchange, config=None):
-    amounts = get_sellable_assets_with_amounts(exchange, config)
+async def get_sellable_assets(exchange, console, config=None):
+    console.print("TEST 1\n")
+    amounts = await get_sellable_assets_with_amounts(exchange, config)
+    console.print("TEST 2\n")
     return sorted(list(amounts.keys()))
 
 async def interactive_sell(exchange, data_manager, engine, config, console):
