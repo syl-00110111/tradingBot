@@ -564,6 +564,13 @@ def main():
     parser.add_argument('--wallet', help='Initial wallet for virtual mode (e.g. "100 USDC")')
     args, unknown = parser.parse_known_args()
 
+    # Handle positional symbol (e.g., bot.py --mode benchmark PEPE/USDC)
+    if not args.symbol and unknown:
+        # Check if the first unknown arg looks like a symbol (contains / or is uppercase)
+        if '/' in unknown[0] or unknown[0].isupper():
+            args.symbol = unknown[0]
+            unknown.pop(0)
+
     # Initialize logging early
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
