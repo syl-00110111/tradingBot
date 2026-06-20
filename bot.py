@@ -487,7 +487,7 @@ async def main():
         for h in all_other_handlers:
             logging.root.removeHandler(h)
 
-        with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times, None), refresh_per_second=2, screen=True) as live:
+        with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times), refresh_per_second=2, screen=True) as live:
             core.live = live
             await core.main_loop()
 

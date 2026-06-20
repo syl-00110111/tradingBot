@@ -299,7 +299,7 @@ async def execute_sell(exchange, data_manager, engine, symbol, data, config, pos
 
 async def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine, config, bot_state):
     """Syncs real wallet assets into the bot's tracked positions by fetching balance and trade history."""
-    logging.info("Initializing positions from real wallet inventory and API history...")
+    logging.info("Initializing positions from real wallet inventory and API history (please wait)...")
     balance = await exchange.fetch_balance()
     if not balance:
         logging.error("Failed to fetch balance for initialization.")
