@@ -38,6 +38,5 @@ Special state indicators for the pair:
 
 ### 7. **Scr (Score)**
 - A composite rating of the pair's current technical setup.
-- It combines signals from multiple indicators (RSI, MACD, Bollinger Bands) or results from **Monte Carlo simulations**.
-- **Higher positive values** suggest a strong buying opportunity.
-- **Lower negative values** suggest a strong selling opportunity.
+- It displays the results from **Monte Carlo simulations** or the Pearson correlation similarity with the active Success Pattern.
+- **Values > 0.7** generally suggest a strong technical alignment or a high probability of success according to the MC engine.

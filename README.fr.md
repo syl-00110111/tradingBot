@@ -67,9 +67,16 @@ Stockez vos identifiants et l'échange préféré :
     "max_open_positions": 10,
     "// Note": "base_bet: % de l'actif de cotation disponible (USDT/USDC/etc) par transaction. '10%' utilise 10% du solde.",
     "base_bet": "10%",
+    "max_symbol_bet": "10%",
     "global_risk_multiplier": 1.2,
     "profit_thresholds": {
-        "bench_avg_threshold": 0.05
+        "bench_avg_threshold": 0.05,
+        "mc_validation_hurdle": 0.0015
+    },
+    "win_streak_bonus": {
+        "enabled": true,
+        "threshold": 2,
+        "multiplier": 1.3
     }
 }
 ```

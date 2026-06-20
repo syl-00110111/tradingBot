@@ -67,9 +67,16 @@ Store your credentials and preferred exchange:
     "max_open_positions": 10,
     "// Note": "base_bet: % of available quote asset (USDT/USDC/etc) per trade. '10%' uses 10% of balance.",
     "base_bet": "10%",
+    "max_symbol_bet": "10%",
     "global_risk_multiplier": 1.2,
     "profit_thresholds": {
-        "bench_avg_threshold": 0.05
+        "bench_avg_threshold": 0.05,
+        "mc_validation_hurdle": 0.0015
+    },
+    "win_streak_bonus": {
+        "enabled": true,
+        "threshold": 2,
+        "multiplier": 1.3
     }
 }
 ```

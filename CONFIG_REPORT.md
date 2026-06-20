@@ -14,6 +14,10 @@ This report explains the configuration parameters found in `config.default.json`
     *   **Description**: The base amount to risk per trade, expressed as a percentage of the available quote asset balance (e.g., USDT, USDC).
     *   **Influence**: Determines the initial size of a position. A value of `"10%"` means the bot will use 10% of your available balance for each new trade.
 
+*   **`max_symbol_bet`** (Default: `"10%"`)
+    *   **Description**: The maximum total exposure allowed for a single symbol, expressed as a percentage of the total balance.
+    *   **Influence**: Prevents over-concentration in a single asset. If the current position(s) for a symbol already reach this percentage of the total account value, no new buy orders will be placed for that symbol.
+
 *   **`global_risk_multiplier`** (Default: `1.2`)
     *   **Description**: A scaling factor applied to the base trade amount.
     *   **Influence**: Linearly increases or decreases the calculated position size. If `base_bet` is 100 USDT and `global_risk_multiplier` is 1.2, the actual target trade amount becomes 120 USDT.
@@ -49,11 +53,6 @@ This report explains the configuration parameters found in `config.default.json`
     *   **Description**: The factor by which the position size is multiplied when the threshold is met.
     *   **Influence**: Rewards successful performance by increasing exposure on "hot" pairs.
 
-
-*   Defines three profiles: **Short**, **Medium**, and **Long**.
-*   **`duration_hours`**: The historical window looked at for benchmarking.
-*   **`timeframe`**: The candle interval used (e.g., `"1m"`, `"15m"`, `"1h"`).
-*   **`eval_candles`**: The number of candles used to define the length of a "success pattern".
 
 ---
 

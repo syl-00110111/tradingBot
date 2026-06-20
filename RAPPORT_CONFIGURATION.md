@@ -14,6 +14,10 @@ Ce rapport explique les paramètres de configuration trouvés dans `config.defau
     *   **Description** : Le montant de base à risquer par transaction, exprimé en pourcentage du solde de l'actif de cotation disponible (ex : USDT, USDC).
     *   **Influence** : Détermine la taille initiale d'une position. Une valeur de `"10%"` signifie que le bot utilisera 10 % de votre solde disponible pour chaque nouvelle transaction.
 
+*   **`max_symbol_bet`** (Défaut : `"10%"`)
+    *   **Description** : L'exposition totale maximale autorisée pour un seul symbole, exprimée en pourcentage du solde total.
+    *   **Influence** : Empêche une surconcentration sur un seul actif. Si la ou les positions actuelles pour un symbole atteignent déjà ce pourcentage de la valeur totale du compte, aucun nouvel ordre d'achat ne sera passé pour ce symbole.
+
 *   **`global_risk_multiplier`** (Défaut : `1.2`)
     *   **Description** : Un facteur d'échelle appliqué au montant de base de la transaction.
     *   **Influence** : Augmente ou diminue linéairement la taille calculée de la position. Si `base_bet` est de 100 USDT et `global_risk_multiplier` est de 1,2, le montant cible réel de la transaction devient 120 USDT.
@@ -49,11 +53,6 @@ Ce rapport explique les paramètres de configuration trouvés dans `config.defau
     *   **Description** : Le facteur par lequel la taille de la position est multipliée lorsque le seuil est atteint.
     *   **Influence** : Récompense les bonnes performances en augmentant l'exposition sur les paires "chaudes".
 
-
-*   Définit trois profils : **Court** (Short), **Moyen** (Medium) et **Long**.
-*   **`duration_hours`** : La fenêtre historique examinée pour le benchmarking.
-*   **`timeframe`** : L'intervalle des bougies utilisé (ex : `"1m"`, `"15m"`, `"1h"`).
-*   **`eval_candles`** : Le nombre de bougies utilisées pour définir la longueur d'un "modèle de succès".
 
 ---
 
