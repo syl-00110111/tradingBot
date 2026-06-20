@@ -37,7 +37,6 @@ class TradingCore:
 
         self.ohlcv_data = {} # symbol -> DataFrame
         self.ohlcv_lock = threading.Lock()
-        self.strategy_indices = {s: 0 for s in config.get('pairs', {})}
         self.balance_data = {}
         self.balance_lock = threading.Lock()
         self.threads = []
@@ -78,14 +77,12 @@ class TradingCore:
 
         async def _run():
             # First acquisition: Fetch
-            self.log(f"[{symbol}] Initial OHLCV fetch...")
-            ohlcv = await thread_exchange.fetch_ohlcv(symbol, timeframe, limit=400)
+            ohlcv = await thread_exchange.fetch_ohlcv(symbol, timeframe, limit=60)
             if ohlcv:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 with self.ohlcv_lock:
                     self.ohlcv_data[symbol] = df
 
-            self.log(f"[{symbol}] Starting watch loop...")
             while not self._stop_event.is_set():
                 try:
                     # Use timeout to allow periodic check of _stop_event
@@ -147,7 +144,6 @@ class TradingCore:
                 with self.balance_lock:
                     self.balance_data = balance
 
-            self.log("Starting balance watch loop...")
             while not self._stop_event.is_set():
                 try:
                     # Not all exchanges support watch_balance, but we try
@@ -278,19 +274,7 @@ class TradingCore:
                             'mc_score': current_data.get('mc_score', 1.1)
                         }
 
-                        # Rolling strategy logic
-                        from indicators import STRATEGIES
-                        idx = self.strategy_indices.get(symbol, 0)
-                        next_strat = STRATEGIES[idx % len(STRATEGIES)]
-                        self.strategy_indices[symbol] = idx + 1
-
-                        current_pattern = current_data.get('active_pattern')
-
-                        res = await perform_analysis_calculation(
-                            symbol, '1m', 60, df, current_pattern, device, pinfo,
-                            next_strategy=next_strat, config=self.config,
-                            global_pattern_pool=self.global_pattern_pool
-                        )
+                        res = await perform_analysis_calculation(symbol, '1m', 60, df, self.global_pattern_pool, device, pinfo)
 
                         if res and 'error' not in res:
                             self.bot_state[symbol].update(res)
