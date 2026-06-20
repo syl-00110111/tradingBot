@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 import dashboard
-from exchange_handler import EXCHANGE_MAPPING, MockExchange, fetch_ohlcv_incremental
+from exchange_handler import EXCHANGE_MAPPING, MockExchange
 from indicators import get_signals, get_common_indicators, calculate_similarity, calculate_similarity_batch, STRATEGIES
 from persistence import DataManager, CacheManager, PatternManager, OHLCVCacheManager, archiver, migrate_fresh_files_to_archive, load_from_archive
 import trading_engine
@@ -268,7 +268,7 @@ async def run_initial_benchmarking(exchange, config, args, shutdown_event, globa
 async def main():
     parser = argparse.ArgumentParser(description='Cryptocurrencies Multiplatform Trading Bot')
     parser.add_argument('--headless', action='store_true', help='Disable TUI and use structured JSON logging (can be used for DEBUG)')
-    parser.add_argument('--mode', choices=['live', 'simulation', 'backtest', 'benchmark', 'sell', 'balance', 'virtual'], default='simulation')
+    parser.add_argument('--mode', choices=['live', 'simulation', 'backtest', 'benchmark', 'virtual'], default='simulation')
     parser.add_argument('--symbol', help='Symbol for backtest/benchmark')
     parser.add_argument('--strategy', choices=STRATEGIES, help='Strategy for backtest')
     parser.add_argument('--term', choices=['short', 'medium', 'long'], default='short', help='Term for optimization/backtest/benchmark')
@@ -432,13 +432,6 @@ async def main():
                     logging.info(f"Virtual mode initialized with wallet: {amount} {asset}")
                 except:
                     logging.warning("Failed to parse wallet argument. Using default virtual balance.")
-        elif args.mode == 'sell':
-            exchange = ex_class(api_key, api_secret) if api_key not in [None, "YOUR_API_KEY"] else MockExchange(exchange_type=args.exchange)
-            status.stop(); await trading_engine.interactive_sell(exchange, data_manager, engine, config, console); return
-        elif args.mode == 'balance':
-            status.stop()
-            exchange = ex_class(api_key, api_secret) if api_key not in [None, "YOUR_API_KEY"] else MockExchange(exchange_type=args.exchange)
-            await trading_engine.show_balance(exchange, config, console, Table); return
         elif args.mode == 'backtest':
             status.stop()
             exchange = ex_class(api_key, api_secret) if api_key not in [None, "YOUR_API_KEY"] else MockExchange(exchange_type=args.exchange)
