@@ -62,17 +62,18 @@ class TradingCore:
 
                 if self.live: self.live.refresh()
 
-                # 2. Watch Orders For Symbols
-                self.log("Step: watchOrdersForSymbols")
-                for symbol in symbols:
-                    try:
-                        orders = await asyncio.wait_for(self.exchange.watch_orders(symbol), timeout=1.0)
-                        self.log(f"Fetched {len(orders)} orders for {symbol}")
-                    except asyncio.TimeoutError:
-                        pass
-                    except Exception as e:
-                        self.log(f"watchOrders failed for {symbol}: {e}")
-                    if self.live: self.live.refresh()
+                # 2. Watch Orders (All Symbols)
+                self.log("Step: watchOrders")
+                try:
+                    # Watch all orders at once for efficiency
+                    orders = await asyncio.wait_for(self.exchange.watch_orders(None), timeout=2.0)
+                    self.log(f"Fetched {len(orders)} order updates")
+                except asyncio.TimeoutError:
+                    self.log("watchOrders timeout, moving on")
+                except Exception as e:
+                    self.log(f"watchOrders failed: {e}")
+
+                if self.live: self.live.refresh()
 
                 # 3. Benchmark Sequentially on Symbols
                 self.log("Step: benchmark sequentially on symbols")
