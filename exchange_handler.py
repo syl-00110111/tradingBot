@@ -298,10 +298,14 @@ def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, li
     If candles exist in cache, it bridges gaps both forwards and backwards.
     Returns (data, new_candles_count)
     """
-    cached_data = ohlcv_cache_manager.get(symbol, timeframe)
-    if isinstance(cached_data, pd.DataFrame):
-         cached_data = cached_data.values.tolist()
-    if not cached_data: cached_data = []
+    # Fix: Always work on a copy to avoid race conditions with other threads/processes
+    cached_data_raw = ohlcv_cache_manager.get(symbol, timeframe)
+    if isinstance(cached_data_raw, pd.DataFrame):
+         cached_data = cached_data_raw.values.tolist()
+    elif cached_data_raw:
+         cached_data = list(cached_data_raw) # Shallow copy of the list
+    else:
+         cached_data = []
 
     new_count = 0
     updated = False
