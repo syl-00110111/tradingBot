@@ -69,12 +69,12 @@ class ThrottledExchange:
                     except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
                         retries -= 1
                         last_error = e
-                        wait_time = float(getattr(e, 'retry_after', 1)) or 1
+                        wait_time = float(getattr(e, 'retry_after', 2)) or 2
                         logging.warning(f"Rate limit exceeded. Waiting {wait_time}s... ({retries} retries left)")
                         time.sleep(wait_time)
                         with self.lock:
-                            self.delay_s *= 1.2 # Dynamically increase delay
-                            self.max_burst = max(1, self.max_burst - 1)
+                            self.delay_s *= 1.5 # More aggressively increase delay
+                            self.max_burst = 1 # Force single request mode
                     except Exception as e:
                         raise e
                 if last_error:

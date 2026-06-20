@@ -376,9 +376,14 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             logging.error(f"Error preparing {sym}: {e}")
             return None
 
-    # Increased max_workers for faster parallel historical data fetching - Quadrupled to 80
-    with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
-        futures = {executor.submit(fetch_and_validate, sym): sym for sym in symbols}
+    # Throttled historical data fetching to avoid 429 errors
+    # Reduced max_workers from 80 to 10 and added a small delay
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {}
+        for sym in symbols:
+             futures[executor.submit(fetch_and_validate, sym)] = sym
+             time.sleep(0.1)
+
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             res = future.result()
             if not res: continue
@@ -389,6 +394,13 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                 optimization_map[sym] = best
                 if data_manager:
                     pattern_manager.set_patterns(sym, cached_patterns)
+
+                # Ensure cached results are reflected in recommendations
+                if not term_override:
+                    if best_overall.get(term_to_test) and best['profit'] > best_overall[term_to_test]['profit']:
+                        best_overall[term_to_test] = {'profit': best['profit'], 'params': (best['strategy'], best['aggr'], sym)}
+                    if best['profit'] > best_overall['total']['profit']:
+                        best_overall['total'] = {'profit': best['profit'], 'params': (best['strategy'], best['aggr'], sym)}
             else:
                 symbols_to_bench.append(sym)
                 symbol_data_map[sym] = df
@@ -541,10 +553,12 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             total_balance = 0
 
         threshold_pct = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold_pct', 0.005)
+        min_pattern_profit = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
+
         if total_balance > 0:
-            msg_threshold_val = total_balance * threshold_pct
+            msg_threshold_val = min(min_pattern_profit, total_balance * threshold_pct)
         else:
-            msg_threshold_val = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.01)
+            msg_threshold_val = min(min_pattern_profit, config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.01))
 
         msg_threshold = f"{msg_threshold_val:.4g} {base_bet_curr}"
         if symbols:

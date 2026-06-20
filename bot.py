@@ -564,12 +564,24 @@ def main():
     parser.add_argument('--wallet', help='Initial wallet for virtual mode (e.g. "100 USDC")')
     args, unknown = parser.parse_known_args()
 
-    # Handle positional symbol (e.g., bot.py --mode benchmark PEPE/USDC)
-    if not args.symbol and unknown:
-        # Check if the first unknown arg looks like a symbol (contains / or is uppercase)
-        if '/' in unknown[0] or unknown[0].isupper():
-            args.symbol = unknown[0]
-            unknown.pop(0)
+    # Handle positional arguments and misplaced flags (e.g., bot.py --mode benchmark PEPE/USDC -- term short)
+    i = 0
+    while i < len(unknown):
+        arg = unknown[i]
+        if arg in ['--', '-']:
+            i += 1; continue
+
+        if not args.symbol and ('/' in arg or arg.isupper()):
+            args.symbol = arg
+            unknown.pop(i)
+            continue
+
+        if arg == 'term' and i + 1 < len(unknown):
+            args.term = unknown[i+1]
+            unknown.pop(i); unknown.pop(i)
+            continue
+
+        i += 1
 
     # Initialize logging early
     for handler in logging.root.handlers[:]:
@@ -643,7 +655,12 @@ def main():
             pairs = [line.strip() for line in f if line.strip()]
     else: pairs = []
     config['pairs'] = {p: {} for p in pairs}
-    config['base_currencies'] = sorted(list(set([p.split('/')[1] for p in pairs if '/' in p])))
+
+    # Ensure requested symbol is in pairs
+    if args.symbol and args.symbol not in config['pairs']:
+        config['pairs'][args.symbol] = {}
+
+    config['base_currencies'] = sorted(list(set([p.split('/')[1] for p in config['pairs'] if '/' in p])))
 
     api_creds = {}
     if os.path.exists('api.json'):
