@@ -529,10 +529,6 @@ def main():
     global ohlcv_cache_manager
     ohlcv_cache_manager = OHLCVCacheManager(mode=args.mode)
 
-    # Hardcode max_symbol_bet default if not in config
-    if 'max_symbol_bet' not in config:
-        config['max_symbol_bet'] = '10%'
-
     num_cores = os.cpu_count() or 1
     torch.set_num_threads(num_cores)
     os.environ['OMP_NUM_THREADS'] = str(num_cores)
@@ -575,6 +571,11 @@ def main():
 
     if args.config: config = load_config_from_path(args.config)
     else: config = load_config()
+
+    # Hardcode max_symbol_bet default if not in config
+    if 'max_symbol_bet' not in config:
+        config['max_symbol_bet'] = '10%'
+
     config['device'] = device
     config['gpu_accel'] = gpu_accel
 
