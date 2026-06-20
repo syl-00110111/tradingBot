@@ -19,7 +19,7 @@ import torch
 import gc
 
 class MonteCarloEngine:
-    def __init__(self, num_simulations=5000, timeframe_candles=100):
+    def __init__(self, num_simulations=100, timeframe_candles=20):
         self.num_simulations = num_simulations
         self.timeframe_candles = timeframe_candles
         # Device will be updated by the bot at runtime, but we default to CPU
@@ -66,19 +66,6 @@ class MonteCarloEngine:
              price_paths = curr_p * torch.exp(torch.cumsum(returns, dim=1))
              ones = torch.ones((self.num_simulations, 1), device=self.device) * curr_p
              price_paths = torch.cat((ones, price_paths), dim=1)
-
-        # Aggressive memory purging after simulation
-        gc.collect()
-        if self.device.type == 'cuda' and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif self.device.type == 'xpu':
-            try:
-                import intel_extension_for_pytorch as ipex
-                torch.xpu.empty_cache()
-            except: pass
-        elif self.device.type == 'mps':
-            try: torch.mps.empty_cache()
-            except: pass
 
         return price_paths
 

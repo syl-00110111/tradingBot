@@ -1,6 +1,13 @@
 # Cryptocurrencies multiplatform trading bot
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
+import os
+# Limit CPU usage from PyTorch early
+import torch
+torch.set_num_threads(1)
+os.environ['OMP_NUM_THREADS'] = "1"
+os.environ['MKL_NUM_THREADS'] = "1"
+
 import json
 import time
 import logging
@@ -30,6 +37,7 @@ from persistence import DataManager, CacheManager, PatternManager, OHLCVCacheMan
 import trading_engine
 from trading_engine import TradingEngine
 from monte_carlo import MonteCarloEngine
+import optimization
 import utils
 from utils import format_price, format_amount, get_base_currency, play_sound, silent_worker_init, load_config, load_config_from_path
 
@@ -49,7 +57,7 @@ shutdown_event = asyncio.Event()
 console = Console()
 ui = dashboard.DashboardUI(console)
 
-async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, current_pattern, device, pattern_info, next_strategy=None, config=None, global_pattern_pool=None):
+async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, patterns, device, pattern_info, next_strategy=None, config=None, global_pattern_pool=None):
     """
     Bare-bone analysis:
     1. Backtest the next rolling strategy.
@@ -58,18 +66,24 @@ async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, current_p
     """
     try:
         from optimization import run_backtest_logic
-        from indicators import STRATEGIES, get_common_indicators, get_signals
+        from indicators import STRATEGIES, get_common_indicators, get_signals, calculate_similarity_batch
+
+        # Ensure we have a list of patterns
+        if isinstance(patterns, dict):
+            patterns = [patterns]
 
         # 1. Backtest rolling strategy
         if next_strategy:
             df_bench = df.tail(60).copy()
             res_bench = await run_backtest_logic(None, symbol, next_strategy, 'balanced', config or {}, df_in=df_bench, device=device, skip_mc=True)
 
+            # Find current pattern for this symbol in the pool
+            current_pattern = next((p for p in patterns if p.get('symbol') == symbol), None)
             current_profit = current_pattern.get('profit', -999) if current_pattern else -999
 
             if res_bench and res_bench['profit'] > current_profit:
                 logging.info(f"[{symbol}] Rolling: {next_strategy} ({res_bench['profit']:.4f}) is better than current ({current_profit:.4f}). Updating.")
-                current_pattern = {
+                new_pattern = {
                     'strategy': next_strategy,
                     'profit': res_bench['profit'],
                     'prices': res_bench['prices'],
@@ -81,13 +95,19 @@ async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, current_p
                 if global_pattern_pool is not None:
                     # Keep pool fresh with the best patterns
                     global_pattern_pool[:] = [p for p in global_pattern_pool if p.get('symbol') != symbol]
-                    global_pattern_pool.append(current_pattern)
+                    global_pattern_pool.append(new_pattern)
+                patterns = [new_pattern]
+            else:
+                patterns = [current_pattern] if current_pattern else []
 
-        if not current_pattern:
+        if not patterns:
             return {'symbol': symbol, 'trigger_rebenchmark': True, 'buy_signal': False, 'sell_signal': False}
 
-        # 2. SPM Matching
-        sim = calculate_similarity(df, current_pattern, device=device)
+        # 2. SPM Matching (Batch)
+        sim_results = calculate_similarity_batch(df, patterns, device=device)
+        best_match = sim_results[0] if sim_results else None
+        sim = best_match['sim'] if best_match else 0.0
+        current_pattern = best_match['pattern'] if best_match else patterns[0]
 
         # 3. Strategy Execution (if similarity is good)
         latest = df.iloc[-1]
@@ -247,11 +267,6 @@ async def main():
 
     global ohlcv_cache_manager
     ohlcv_cache_manager = OHLCVCacheManager(mode=args.mode)
-
-    num_cores = os.cpu_count() or 1
-    torch.set_num_threads(num_cores)
-    os.environ['OMP_NUM_THREADS'] = str(num_cores)
-    os.environ['MKL_NUM_THREADS'] = str(num_cores)
 
     global device, gpu_enabled, gpu_accel
     gpu_enabled = False

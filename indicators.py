@@ -106,10 +106,6 @@ def get_common_indicators(df, device=torch.device('cpu')):
     """
     if df.empty: return df
 
-    # Standardize hardware acceleration: enable MKLDNN if on CPU and supported
-    if device.type == 'cpu' and torch.backends.mkldnn.is_available():
-        torch.backends.mkldnn.enabled = True
-
     # mkldnn is good for some operations but torch JIT loops for EMA are slow on CPU
     use_acceleration = (device.type not in ['cpu'])
 
@@ -286,7 +282,8 @@ def calculate_similarity_batch(buffer_df, patterns, device=torch.device('cpu')):
     if not patterns: return []
 
     # 1. Prepare Buffer Tensors
-    c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
+    with torch.no_grad():
+        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
     c_vol = torch.tensor(buffer_df['volume'].values, device=device, dtype=torch.float64) if 'volume' in buffer_df.columns else None
 
     curr_rsi = buffer_df['rsi'].iloc[-1]
@@ -310,13 +307,14 @@ def calculate_similarity_batch(buffer_df, patterns, device=torch.device('cpu')):
     for p_len, p_list in by_len.items():
         if len(buffer_df) < p_len: continue
 
-        # Sliced buffer for this length
-        c_slice = c_vals[-p_len:]
-        c_slice_norm = c_slice - c_slice.mean()
-        c_slice_std = torch.norm(c_slice_norm)
+        with torch.no_grad():
+            # Sliced buffer for this length
+            c_slice = c_vals[-p_len:]
+            c_slice_norm = c_slice - c_slice.mean()
+            c_slice_std = torch.norm(c_slice_norm)
 
-        # Batch Pattern Tensor
-        p_vals = torch.tensor([p['prices'] for p in p_list], device=device, dtype=torch.float64)
+            # Batch Pattern Tensor
+            p_vals = torch.tensor([p['prices'] for p in p_list], device=device, dtype=torch.float64)
         p_vals_norm = p_vals - p_vals.mean(dim=1, keepdim=True)
         p_vals_std = torch.norm(p_vals_norm, dim=1)
 
@@ -326,11 +324,12 @@ def calculate_similarity_batch(buffer_df, patterns, device=torch.device('cpu')):
         # Volume Correlation
         vol_corrs = torch.zeros(len(p_list), device=device, dtype=torch.float64)
         if c_vol is not None:
-            cv_slice = c_vol[-p_len:]
-            cv_slice_norm = cv_slice - cv_slice.mean()
-            cv_slice_std = torch.norm(cv_slice_norm)
+            with torch.no_grad():
+                cv_slice = c_vol[-p_len:]
+                cv_slice_norm = cv_slice - cv_slice.mean()
+                cv_slice_std = torch.norm(cv_slice_norm)
 
-            pv_vals = torch.tensor([p.get('volumes', [0]*p_len) for p in p_list], device=device, dtype=torch.float64)
+                pv_vals = torch.tensor([p.get('volumes', [0]*p_len) for p in p_list], device=device, dtype=torch.float64)
             pv_vals_norm = pv_vals - pv_vals.mean(dim=1, keepdim=True)
             pv_vals_std = torch.norm(pv_vals_norm, dim=1)
 

@@ -143,8 +143,9 @@ class TradingEngine:
 
             device = config.get('device', torch.device('cpu'))
             from indicators import STRATEGIES
-            mc_engine = MonteCarloEngine(num_simulations=500)
-            score = mc_engine.run_simulation(symbol, df_mc, strategy)
+            mc_engine = MonteCarloEngine(num_simulations=100)
+            mc_engine.set_device(device)
+            score = mc_engine.validate_strategy(df_mc)
             data['mc_score'] = score
             return score >= 0.7 # Conservative threshold
         except Exception as e:

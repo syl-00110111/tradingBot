@@ -129,8 +129,19 @@ class MockExchange(ExchangeInterface):
 
     async def load_markets(self): return {}
     async def fetch_balance(self): return {'total': self.balance, 'free': self.balance}
-    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): return []
-    async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100): return []
+    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
+        # Return some dummy candles to allow the bot to start
+        import time
+        now = int(time.time() * 1000)
+        return [[now - i * 60000, 100, 105, 95, 100, 1000] for i in range(limit)]
+
+    async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100):
+        # Prevent tight loops in simulation/virtual mode
+        await asyncio.sleep(10)
+        import time
+        now = int(time.time() * 1000)
+        return [[now, 100, 105, 95, 100, 1000]]
+
     async def fetch_order_book(self, symbol, limit=20): return {'bids': [[99, 1]], 'asks': [[101, 1]]}
     async def create_order(self, symbol, side, amount, price=None):
         return {'id': 'mock', 'status': 'closed', 'price': 100.0, 'amount': amount}

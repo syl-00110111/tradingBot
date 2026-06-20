@@ -13,6 +13,7 @@ from rich.live import Live
 from persistence import DataManager, PatternManager, OHLCVCacheManager
 from trading_engine import TradingEngine, execute_buy, execute_sell
 from indicators import get_common_indicators, get_signals, calculate_similarity_batch
+from bot import perform_analysis_calculation
 
 class TradingCore:
     def __init__(self, config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, headless=False, ui=None, shutdown_event=None):
@@ -46,12 +47,11 @@ class TradingCore:
     def log(self, message):
         logging.info(message)
 
-    def watch_ohlcv_thread(self, symbol, timeframe):
-        """Thread dedicated to watching OHLCV for a specific symbol."""
+    def data_watcher_thread(self, symbols, timeframe):
+        """Thread dedicated to watching OHLCV for all symbols and account balance."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        # We need a fresh exchange instance for each thread to be thread-safe
         from exchange_handler import EXCHANGE_MAPPING, MockExchange
         import os
         import json
@@ -75,9 +75,9 @@ class TradingCore:
 
         self.thread_exchanges.append(thread_exchange)
 
-        async def _run():
-            # First acquisition: Fetch
-            ohlcv = await thread_exchange.fetch_ohlcv(symbol, timeframe, limit=60)
+        async def watch_ohlcv_task(symbol):
+            # Initial fetch
+            ohlcv = await thread_exchange.fetch_ohlcv(symbol, timeframe, limit=80)
             if ohlcv:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 with self.ohlcv_lock:
@@ -85,92 +85,48 @@ class TradingCore:
 
             while not self._stop_event.is_set():
                 try:
-                    # Use timeout to allow periodic check of _stop_event
-                    new_candles = await asyncio.wait_for(thread_exchange.watch_ohlcv(symbol, timeframe), timeout=2.0)
+                    new_candles = await asyncio.wait_for(thread_exchange.watch_ohlcv(symbol, timeframe), timeout=5.0)
                     if new_candles:
                         with self.ohlcv_lock:
-                            # Accumulation logic
                             if symbol in self.ohlcv_data:
                                 df_new = pd.DataFrame(new_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                                 combined = pd.concat([self.ohlcv_data[symbol], df_new]).drop_duplicates('timestamp').sort_values('timestamp')
-                                self.ohlcv_data[symbol] = combined.tail(80) # Keep a reasonable history
+                                self.ohlcv_data[symbol] = combined.tail(80)
                             else:
                                 self.ohlcv_data[symbol] = pd.DataFrame(new_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                except asyncio.TimeoutError:
-                    continue
+                except asyncio.TimeoutError: pass
                 except Exception as e:
                     self.log(f"[{symbol}] Watch error: {e}")
                     await asyncio.sleep(5)
 
-            try:
-                await thread_exchange.close()
-            except: pass
-
-        loop.run_until_complete(_run())
-
-    def watch_balance_thread(self):
-        """Thread dedicated to watching balance."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        from exchange_handler import EXCHANGE_MAPPING, MockExchange
-        import os
-        import json
-
-        api_creds = {}
-        if os.path.exists('api.json'):
-            try:
-                with open('api.json', 'r') as f: api_creds = json.load(f)
-            except: pass
-
-        api_key = os.environ.get('api_key') or api_creds.get('api_key') or self.config.get('api_key')
-        api_secret = os.environ.get('api_secret') or api_creds.get('api_secret') or self.config.get('api_secret')
-        market_type = api_creds.get('market', self.config.get('market', 'spot'))
-
-        ex_class = EXCHANGE_MAPPING.get(self.config.get('exchange', 'binance'), MockExchange)
-
-        if self.mode == 'live':
-            thread_exchange = ex_class(api_key, api_secret, market_type=market_type)
-        else:
-            thread_exchange = MockExchange(api_key, api_secret, exchange_type=self.config.get('exchange', 'binance'), market_type=market_type)
-
-        self.thread_exchanges.append(thread_exchange)
-
-        async def _run():
-            # First acquisition: Fetch
+        async def watch_balance_task():
             self.log("Initial balance fetch...")
             balance = await thread_exchange.fetch_balance()
             if balance:
-                with self.balance_lock:
-                    self.balance_data = balance
+                with self.balance_lock: self.balance_data = balance
 
             while not self._stop_event.is_set():
                 try:
-                    # Not all exchanges support watch_balance, but we try
                     ccxt_ex = getattr(thread_exchange, 'exchange', None)
                     if ccxt_ex and hasattr(ccxt_ex, 'watchBalance'):
-                        balance = await asyncio.wait_for(ccxt_ex.watchBalance(), timeout=2.0)
+                        balance = await asyncio.wait_for(ccxt_ex.watchBalance(), timeout=5.0)
                         if balance:
-                            with self.balance_lock:
-                                self.balance_data = balance
+                            with self.balance_lock: self.balance_data = balance
                     else:
-                        # Fallback for exchanges without watchBalance (not recommended as per requirement but good for safety)
-                        for _ in range(60):
-                            if self._stop_event.is_set(): break
-                            await asyncio.sleep(1)
-                        if self._stop_event.is_set(): break
+                        await asyncio.sleep(30)
                         balance = await thread_exchange.fetch_balance()
                         if balance:
-                            with self.balance_lock:
-                                self.balance_data = balance
-                except asyncio.TimeoutError:
-                    continue
+                            with self.balance_lock: self.balance_data = balance
+                except asyncio.TimeoutError: pass
                 except Exception as e:
                     self.log(f"Balance watch error: {e}")
                     await asyncio.sleep(10)
 
-            try:
-                await thread_exchange.close()
+        async def _run():
+            tasks = [watch_ohlcv_task(s) for s in symbols]
+            tasks.append(watch_balance_task())
+            await asyncio.gather(*tasks)
+            try: await thread_exchange.close()
             except: pass
 
         loop.run_until_complete(_run())
@@ -184,7 +140,7 @@ class TradingCore:
         asyncio.set_event_loop(loop)
 
         async def _run():
-            with Live(self.ui.make_dashboard(self.mode, self.config, self.bot_state, self.signal_arrival_times), refresh_per_second=2, screen=True) as live:
+            with Live(self.ui.make_dashboard(self.mode, self.config, self.bot_state, self.signal_arrival_times), refresh_per_second=1, screen=True) as live:
                 self.live = live
                 while not self._stop_event.is_set():
                     try:
@@ -203,15 +159,10 @@ class TradingCore:
 
         symbols = list(self.config.get('pairs', {}).keys())
 
-        # Start Watcher Threads
-        t_bal = threading.Thread(target=self.watch_balance_thread, daemon=True)
-        t_bal.start()
-        self.threads.append(t_bal)
-
-        for symbol in symbols:
-            t = threading.Thread(target=self.watch_ohlcv_thread, args=(symbol, '1m'), daemon=True)
-            t.start()
-            self.threads.append(t)
+        # Start Watcher Thread
+        t_data = threading.Thread(target=self.data_watcher_thread, args=(symbols, '1m'), daemon=True)
+        t_data.start()
+        self.threads.append(t_data)
 
         # Start Dashboard Thread
         if not self.headless:
@@ -224,9 +175,10 @@ class TradingCore:
             with self.ohlcv_lock:
                 if all(s in self.ohlcv_data for s in symbols):
                     break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
 
         self.log("All systems launched. Entering analysis loop.")
+        last_analysis_ts = {s: 0 for s in symbols}
 
         while not self.shutdown_event.is_set():
             try:
@@ -263,9 +215,14 @@ class TradingCore:
                     with self.ohlcv_lock:
                         df = self.ohlcv_data[symbol].copy()
 
+                    # Skip analysis if no new candles
+                    curr_last_ts = df['timestamp'].iloc[-1] if not df.empty else 0
+                    if curr_last_ts <= last_analysis_ts.get(symbol, 0):
+                        continue
+                    last_analysis_ts[symbol] = curr_last_ts
+
                     try:
                         # Sequential Analysis
-                        from bot import perform_analysis_calculation
                         device = self.config.get('device', torch.device('cpu'))
 
                         current_data = self.bot_state.get(symbol, {})
