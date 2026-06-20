@@ -20,7 +20,6 @@ Ce rapport explique les paramètres de configuration trouvés dans `config.defau
 
 ### Seuils de profit (`profit_thresholds`)
 
-*   **`min_pattern_profit`** (Défaut : `0.01` / 1,0 %)
     *   **Description** : Le profit minimum qu'un modèle doit générer pendant la phase de benchmarking pour être considéré comme un "Modèle de Succès" (SPM).
     *   **Influence** : Filtre les signaux peu performants pendant l'analyse historique. Seules les stratégies qui rapportent au moins ce montant de profit dans la fenêtre de test sont enregistrées.
 
@@ -50,7 +49,6 @@ Ce rapport explique les paramètres de configuration trouvés dans `config.defau
     *   **Description** : Le facteur par lequel la taille de la position est multipliée lorsque le seuil est atteint.
     *   **Influence** : Récompense les bonnes performances en augmentant l'exposition sur les paires "chaudes".
 
-### Termes de profit attendus (`expected_profit_terms`)
 
 *   Définit trois profils : **Court** (Short), **Moyen** (Medium) et **Long**.
 *   **`duration_hours`** : La fenêtre historique examinée pour le benchmarking.
@@ -91,5 +89,4 @@ Ce rapport explique les paramètres de configuration trouvés dans `config.defau
     Le bot tentera d'ACHETER **0,00312 BTC**.
     Le coût sera de **156 USDT** (+ frais).
 
-6.  **Vérification de la rentabilité (`min_pattern_profit`)** :
     Si un modèle est détecté, le bot attend un profit minimum de **1,5 %** (1,5 % de 156 USDT = 2,34 USDT) basé sur les performances historiques avant de considérer l'entrée comme de haute qualité.

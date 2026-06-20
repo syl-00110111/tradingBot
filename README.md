@@ -1,6 +1,6 @@
 # 🛸 Cryptocurrencies multiplatform trading bot
 
-A trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, **Bitvavo**, **Coinbase**, **Gemini**, **Mercado Bitcoin**, **Bitso**, **Bitstamp**, **WhiteBIT**, **Indodax**, **Upbit**, **Luno**, **Independent Reserve**, and **Btc Markets**.
+A trading bot implemented in Python, leveraging GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, **Bitvavo**, **Coinbase**, **Gemini**, **Mercado Bitcoin**, **Bitso**, **Bitstamp**, **WhiteBIT**, **Indodax**, **Upbit**, **Luno**, **Independent Reserve**, and **Btc Markets**.
 
 ---
 
@@ -69,7 +69,6 @@ Store your credentials and preferred exchange:
     "base_bet": "10%",
     "global_risk_multiplier": 1.2,
     "profit_thresholds": {
-        "min_pattern_profit": 0.01,
         "bench_avg_threshold": 0.05
     }
 }

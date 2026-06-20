@@ -29,7 +29,7 @@ Designed for single-pair strategy evaluation on historical data.
 A high-performance optimization phase that identifies historical "Success Patterns" to guide real-time trading.
 
 ### Execution Path
-`main()` → `run_benchmark_mode()` → `ProcessPoolExecutor` → `run_benchmark_for_symbol()`
+`main()` → `run_benchmark_mode()` → `Sequential Execution` → `run_benchmark_for_symbol()`
 
 ### Process Workflow
 1. **Deep History Fetching**: Iteratively downloads up to 40,000 candles (starting from 2024-06-01) for the target symbols.
@@ -52,7 +52,7 @@ Real-time trading on supported exchanges (Binance, Kraken, Bitvavo, etc.).
 ### Parallel Queued Architecture
 The bot uses a hybrid multi-threaded and multi-processed queued system for maximum throughput and reliability:
 1. **Candle Downloader**: High-priority sequential queue or WebSocket streams for OHLCV data.
-2. **Analysis Workers**: Multi-threaded pool that offloads heavy technical calculations and Monte Carlo simulations to a dynamic `ProcessPoolExecutor` (scaled by CPU/RAM).
+2. **Sequential Analysis**: Multi-threaded pool that offloads heavy technical calculations and Monte Carlo simulations to a dynamic `Sequential Execution` (scaled by CPU/RAM).
 3. **Execution Worker**: Single-threaded consumer that handles trade execution to ensure order consistency and balance safety.
 4. **Benchmark Worker**: Dynamic background task that refreshes success patterns using available system resources without blocking the live trading loop.
 
@@ -67,7 +67,7 @@ The bot uses a hybrid multi-threaded and multi-processed queued system for maxim
    - **Threshold**: Similarity must exceed 70% to trigger strategy injection.
 5. **Dynamic Risk Engine**:
 - **Strong Trend (ADX > 25)**: Switches to **aggressive** settings (shorter EMAs: 10/30, wider RSI: 40/60).
-- **High Volatility (> min_pattern_profit)**: Switches to **conservative** settings (longer EMAs: 30/100, tight RSI: 20/80).
+- **High Volatility (> 0.01)**: Switches to **conservative** settings (longer EMAs: 30/100, tight RSI: 20/80).
 - **Normal Market**: Uses **balanced** settings (default EMAs and RSI).
 5. **Strategy Injection**: If a pattern matches, its specific `strategy` and dynamic `aggr` label are applied to the current pair.
 6. **Monte Carlo Hurdle (BUY Only)**: Before any BUY order, 1000 simulations are run. The probability of profit must exceed a **0.15% hurdle**. SELL orders bypass this check to ensure timely exits.
@@ -120,5 +120,5 @@ Functional equivalent of Live mode but with virtual execution.
 The bot is architected to maximize hardware utilization:
 - **GPU Acceleration**: Uses PyTorch with **CUDA** (NVIDIA), **MPS** (Apple Silicon), or **Vulkan** for technical indicators, Pearson correlation (SPM), and Monte Carlo simulations.
 - **CPU Optimization**: Leveraging **Intel oneDNN (MKLDNN)** and **AVX/AVX-512** instructions when running on CPU.
-- **Multi-Processing**: Benchmark mode uses `ProcessPoolExecutor` to parallelize strategy evaluation across all CPU cores.
+- **Sequential Processing**: Benchmark mode uses `Sequential Execution` to parallelize strategy evaluation across all CPU cores.
 - **Vectorized Operations**: Indicators, Similarity scoring, and the Monte Carlo Engine are implemented as vectorized PyTorch kernels. Batch processing is used to validate entire price columns simultaneously, eliminating per-candle loops and maximizing AVX/SSE throughput.

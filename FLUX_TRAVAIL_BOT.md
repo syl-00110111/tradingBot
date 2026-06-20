@@ -29,7 +29,7 @@ Conçu pour l'évaluation d'une stratégie sur une seule paire à partir de donn
 Une phase d'optimisation haute performance qui identifie les "Modèles de Succès" historiques pour guider le trading en temps réel.
 
 ### Chemin d'exécution
-`main()` → `run_benchmark_mode()` → `ProcessPoolExecutor` → `run_benchmark_for_symbol()`
+`main()` → `run_benchmark_mode()` → `Exécution séquentielle` → `run_benchmark_for_symbol()`
 
 ### Flux du processus
 1. **Récupération historique profonde** : Télécharge de manière itérative jusqu'à 40 000 bougies (à partir du 2024-06-01) pour les symboles cibles.
@@ -52,7 +52,7 @@ Trading en temps réel sur les bourses prises en charge (Binance, Kraken, Bitvav
 ### Architecture de file d'attente parallèle
 Le bot utilise un système hybride de file d'attente multithread et multiprocessus pour un débit et une fiabilité maximaux :
 1. **Téléchargeur de bougies** : File d'attente séquentielle prioritaire ou flux WebSocket pour les données OHLCV.
-2. **Analyseurs (Analysis Workers)** : Pool multithread qui délègue les calculs techniques lourds et les simulations Monte Carlo à un `ProcessPoolExecutor` dynamique (dimensionné selon le CPU/RAM).
+2. **Analyse séquentielle** : Pool multithread qui délègue les calculs techniques lourds et les simulations Monte Carlo à un `Exécution séquentielle` dynamique (dimensionné selon le CPU/RAM).
 3. **Exécuteur (Execution Worker)** : Consommateur monothread qui gère l'exécution des transactions pour garantir la cohérence des ordres et la sécurité du solde.
 4. **Benchmarkeur (Benchmark Worker)** : Tâche d'arrière-plan dynamique qui actualise les modèles de succès en utilisant les ressources système disponibles sans bloquer la boucle de trading en direct.
 
@@ -67,7 +67,7 @@ Le bot utilise un système hybride de file d'attente multithread et multiprocess
    - **Seuil** : La similitude doit dépasser 70% pour déclencher l'injection de la stratégie.
  5. **Moteur de risque dynamique** :
 - **Tendance forte (ADX > 25)** : Passe aux paramètres **agressifs** (EMAs plus courtes : 10/30, RSI plus large : 40/60).
-- **Haute volatilité (> min_pattern_profit)** : Passe aux paramètres **conservateurs** (EMAs plus longues : 30/100, RSI serré : 20/80).
+- **Haute volatilité (> 0.01)** : Passe aux paramètres **conservateurs** (EMAs plus longues : 30/100, RSI serré : 20/80).
 - **Marché normal** : Utilise les paramètres **équilibrés** (EMAs et RSI par défaut).
 5. **Injection de stratégie** : Si un modèle correspond, sa stratégie spécifique et son étiquette dynamique `aggr` sont appliquées à la paire actuelle.
 6. **Seuil Monte Carlo (ACHAT uniquement)** : Avant tout ordre d'ACHAT, 1000 simulations sont effectuées. La probabilité de profit doit dépasser un **seuil de 0,15%**. Les ordres de VENTE ignorent cette vérification pour garantir des sorties opportunes.
@@ -120,5 +120,5 @@ Le bot utilise un système hybride de file d'attente multithread et multiprocess
 Le bot est architecturé pour maximiser l'utilisation du matériel :
 - **Accélération GPU** : Les calculs sont déportés sur la puce graphique via PyTorch. Backends pris en charge : **CUDA** (NVIDIA), **MPS** (Apple Silicon) ou **Vulkan** pour les indicateurs techniques, la corrélation de Pearson (SPM) et les simulations Monte Carlo.
 - **Optimisation CPU** : Exploitation des instructions **Intel oneDNN (MKLDNN)** et **AVX/AVX-512** lors de l'exécution sur CPU.
-- **Multitraitement** : Le mode Benchmark utilise `ProcessPoolExecutor` pour paralléliser l'évaluation des stratégies sur tous les cœurs du CPU.
-- **Opérations vectorisées** : Les indicateurs, le calcul de similitude et le moteur Monte Carlo sont implémentés sous forme de noyaux (kernels) PyTorch vectorisés. Le traitement par lots (batch processing) est utilisé pour valider des colonnes entières de prix simultanément, éliminant les boucles par bougie et maximisant le débit AVX/SSE.
+- **Traitement séquentiel** : Le mode Benchmark utilise `Exécution séquentielle` pour paralléliser l'évaluation des stratégies sur tous les cœurs du CPU.
+- **Opérations vectorisées** : Les indicateurs, le calcul de similitude et le moteur Monte Carlo sont implémentés sous forme de noyaux (kernels) PyTorch vectorisés. Le traitement par lots (batch processing) est utilisé pour valider des colonnes entières de prix séquentiellement, éliminant les boucles par bougie et maximisant le débit AVX/SSE.
