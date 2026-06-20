@@ -67,17 +67,16 @@ class CCXTExchange(ExchangeInterface):
         except Exception as e: logging.error(f"Error watching OHLCV for {symbol}: {e}"); return None
 
     async def fetch_ticker(self, symbol):
-        return await self.watch_ticker(symbol)
+        try: return await self.exchange.fetch_ticker(symbol)
+        except Exception as e: logging.error(f"Error fetching ticker for {symbol}: {e}"); return None
 
     async def watch_ticker(self, symbol):
         try: return await self.exchange.watch_ticker(symbol)
         except Exception as e: logging.error(f"Error watching ticker for {symbol}: {e}"); return None
 
     async def fetch_balance(self):
-        # Use cached balance from watch_balance if available to avoid blocking REST calls
-        if hasattr(self.exchange, 'balance') and self.exchange.balance:
-            return self.exchange.balance
-        return await self.watch_balance()
+        try: return await self.exchange.fetch_balance()
+        except Exception as e: logging.error(f"Error fetching balance: {e}"); return None
 
     async def watch_balance(self):
         try: return await self.exchange.watch_balance()

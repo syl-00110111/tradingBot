@@ -449,7 +449,7 @@ async def main():
 
         # Initial synchronous asset update to ensure immediate availability
         try:
-            available_assets[:] = await trading_engine.get_sellable_assets(exchange, console, config)
+            available_assets[:] = await trading_engine.get_sellable_assets(exchange, config)
         except Exception as e:
             logging.error(f"Failed to fetch initial available assets: {e}")
 

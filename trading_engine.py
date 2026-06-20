@@ -434,7 +434,7 @@ async def get_sellable_assets_with_amounts(exchange, config=None):
         if not symbol: continue
 
         try:
-            ticker = await exchange.watch_ticker(symbol)
+            ticker = await exchange.fetch_ticker(symbol)
             price = ticker['last'] if ticker else 0
             markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else await exchange.load_markets()
             if symbol in markets:
@@ -448,10 +448,8 @@ async def get_sellable_assets_with_amounts(exchange, config=None):
             if amount > 0.000001: result[asset] = amount
     return result
 
-async def get_sellable_assets(exchange, console, config=None):
-    console.print("TEST 1\n")
+async def get_sellable_assets(exchange, config=None):
     amounts = await get_sellable_assets_with_amounts(exchange, config)
-    console.print("TEST 2\n")
     return sorted(list(amounts.keys()))
 
 async def interactive_sell(exchange, data_manager, engine, config, console):
