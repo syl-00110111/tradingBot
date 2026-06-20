@@ -6,6 +6,8 @@ import logging
 import time
 import pandas as pd
 import torch
+# Disable gradient calculation for entire core to save memory/CPU
+torch.set_grad_enabled(False)
 import threading
 from typing import Dict, List, Set, Optional
 from rich.live import Live
@@ -13,7 +15,87 @@ from rich.live import Live
 from persistence import DataManager, PatternManager, OHLCVCacheManager
 from trading_engine import TradingEngine, execute_buy, execute_sell
 from indicators import get_common_indicators, get_signals, calculate_similarity_batch
-from bot import perform_analysis_calculation
+
+async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, patterns, device, pattern_info, next_strategy=None, config=None, global_pattern_pool=None):
+    """
+    Bare-bone analysis:
+    1. Backtest the next rolling strategy.
+    2. If it's better than the current one, update.
+    3. Use the best strategy's pattern for SPM.
+    """
+    try:
+        from optimization import run_backtest_logic
+        from indicators import STRATEGIES, get_common_indicators, get_signals, calculate_similarity_batch
+
+        # Ensure we have a list of patterns
+        if isinstance(patterns, dict):
+            patterns = [patterns]
+
+        # 1. Backtest rolling strategy
+        if next_strategy:
+            df_bench = df.tail(60).copy()
+            res_bench = await run_backtest_logic(None, symbol, next_strategy, 'balanced', config or {}, df_in=df_bench, device=device, skip_mc=True)
+
+            # Find current pattern for this symbol in the pool
+            current_pattern = next((p for p in patterns if p.get('symbol') == symbol), None)
+            current_profit = current_pattern.get('profit', -999) if current_pattern else -999
+
+            if res_bench and res_bench['profit'] > current_profit:
+                logging.info(f"[{symbol}] Rolling: {next_strategy} ({res_bench['profit']:.4f}) is better than current ({current_profit:.4f}). Updating.")
+                new_pattern = {
+                    'strategy': next_strategy,
+                    'profit': res_bench['profit'],
+                    'prices': res_bench['prices'],
+                    'volumes': res_bench['volumes'],
+                    'tech_state': res_bench['tech_state'],
+                    'win_rate': res_bench['win_rate'],
+                    'symbol': symbol
+                }
+                if global_pattern_pool is not None:
+                    # Keep pool fresh with the best patterns
+                    global_pattern_pool[:] = [p for p in global_pattern_pool if p.get('symbol') != symbol]
+                    global_pattern_pool.append(new_pattern)
+                patterns = [new_pattern]
+            else:
+                patterns = [current_pattern] if current_pattern else []
+
+        if not patterns:
+            return {'symbol': symbol, 'trigger_rebenchmark': True, 'buy_signal': False, 'sell_signal': False}
+
+        # 2. SPM Matching (Batch)
+        sim_results = calculate_similarity_batch(df, patterns, device=device)
+        best_match = sim_results[0] if sim_results else None
+        sim = best_match['sim'] if best_match else 0.0
+        current_pattern = best_match['pattern'] if best_match else patterns[0]
+
+        # 3. Strategy Execution (if similarity is good)
+        latest = df.iloc[-1]
+        buy_signal = False
+        sell_signal = False
+
+        if sim > 0.70:
+            settings = {'strategy': current_pattern['strategy'], 'device': device}
+            df_signals = get_signals(df.copy(), settings)
+            latest_sig = df_signals.iloc[-1]
+            buy_signal = latest_sig.get('buy_signal', False)
+            sell_signal = latest_sig.get('sell_signal', False)
+
+        res = {
+            'symbol': symbol,
+            'price': latest['close'],
+            'strategy': current_pattern['strategy'],
+            'bench_profit': current_pattern['profit'],
+            'sim': sim,
+            'buy_signal': buy_signal,
+            'sell_signal': sell_signal,
+            'active_pattern': current_pattern,
+            'last_processed_ts': latest['timestamp']
+        }
+        return res
+
+    except Exception as e:
+        logging.error(f"Analysis error for {symbol}: {e}")
+        return {'symbol': symbol, 'error': str(e)}
 
 class TradingCore:
     def __init__(self, config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, headless=False, ui=None, shutdown_event=None):
@@ -276,6 +358,7 @@ class TradingCore:
                 await asyncio.sleep(5)
 
     async def shutdown(self):
+        self._stop_event.set()
         self.log("Shutting down core...")
         self.shutdown_event.set()
         self._stop_event.set()

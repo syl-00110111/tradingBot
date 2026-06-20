@@ -52,11 +52,10 @@ Le bot utilise une architecture multithread pour garantir une réactivité en te
 4. **Thread Dashboard** : Un thread dédié pour l'interface TUI interactive basée sur Rich.
 
 ### Flux du processus
-1. **Initialisation** : Synchronise les positions existantes et démarre les threads des workers en arrière-plan.
-2. **Groupement d'analyse** : Les paires sont regroupées par devise de cotation (quote) et par priorité (positions en premier) dans la `analysis_queue`.
-3. **Récupération des tâches** : Si un analyseur échoue, la tâche est automatiquement remise en file d'attente avec une priorité inférieure.
-4. **Vérification de balayage adaptative** : Saute les paires en période de repos (backoff) ou celles dont les données n'ont pas changé.
-4. **Correspondance SPM en temps réel** : Pour chaque bougie, le bot compare la "forme" et "l'état" actuels du marché aux modèles de succès stockés :
+1. **Initialisation** : Synchronise les positions existantes et démarre les threads d'observation en arrière-plan.
+2. **Analyse basée sur les données** : La boucle principale parcourt les symboles configurés et n'effectue l'analyse que lorsque de nouvelles données OHLCV ont été reçues des threads d'observation.
+3. **Utilisation optimisée des ressources** : PyTorch est limité à un seul thread et les calculs sont effectués avec `torch.no_grad()` pour minimiser l'empreinte CPU et mémoire.
+4. **Correspondance SPM en temps réel** : Pour chaque nouvelle bougie, le bot compare la "forme" et "l'état" actuels du marché aux modèles de succès stockés :
    - **Corrélation de forme (70%)** : Corrélation de Pearson de l'action des prix accélérée par GPU.
    - **État technique (30%)** : Distance euclidienne du RSI/ADX/EMA actuel par rapport aux états des modèles.
    - **Seuil** : La similitude doit dépasser 70% pour déclencher l'injection de la stratégie.

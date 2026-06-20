@@ -17,7 +17,7 @@ Dans le code actuel (`trading_engine.py`), la fonction `get_dynamic_settings` aj
 Contrairement aux versions précédentes où l'étiquette était fixée lors de l'optimisation, le bot actuel met à jour l'étiquette d'agressivité en temps réel dans l'interface (Dashboard) :
 
 1.  **Analyse Continue** : Lors de chaque cycle d'analyse, le bot calcule l'ADX et la volatilité récents.
-2.  **Mise à Jour de l'État** : La fonction `perform_analysis_calculation` dans `bot.py` détermine la nouvelle agressivité et met à jour le champ `aggr` du `bot_state`.
+2.  **Mise à Jour de l'État** : La fonction `perform_analysis_calculation` dans `core.py` détermine la nouvelle agressivité et met à jour le champ `aggr` du `bot_state`.
 3.  **Affichage Réactif** : Le tableau de bord affiche instantanément si le bot opère actuellement en mode "aggressive", "balanced" ou "conservative" pour chaque paire.
 
 ## 3. Impact sur les Opérations

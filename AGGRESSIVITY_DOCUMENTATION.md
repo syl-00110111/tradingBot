@@ -17,7 +17,7 @@ In the current code (`trading_engine.py`), the `get_dynamic_settings` function d
 Unlike previous versions where the label was fixed during optimization, the current bot updates the aggressivity label in real-time in the interface (Dashboard):
 
 1.  **Continuous Analysis**: During each analysis cycle, the bot calculates the recent ADX and volatility.
-2.  **State Update**: The `perform_analysis_calculation` function in `bot.py` determines the new aggressivity and updates the `aggr` field of the `bot_state`.
+2.  **State Update**: The `perform_analysis_calculation` function in `core.py` determines the new aggressivity and updates the `aggr` field of the `bot_state`.
 3.  **Reactive Display**: The dashboard instantly displays whether the bot is currently operating in "aggressive", "balanced", or "conservative" mode for each pair.
 
 ## 3. Impact on Operations

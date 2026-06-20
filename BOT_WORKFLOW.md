@@ -52,11 +52,10 @@ The bot uses a multi-threaded architecture to ensure real-time responsiveness:
 4. **Dashboard Thread**: A dedicated thread for the interactive Rich-based TUI.
 
 ### Process Workflow
-1. **Initialization**: Syncs existing positions and starts the background worker threads.
-2. **Analysis Grouping**: Pairs are grouped by quote currency and priority (positions first) in the `analysis_queue`.
-3. **Task Recouping**: If a worker fails, the task is automatically re-queued with a lower priority.
-4. **Adaptive Scan Check**: Skips pairs in backoff or those with unchanged data.
-4. **Real-Time SPM Matching**: For every candle, the bot compares the current market "shape" and "state" to the stored Success Patterns:
+1. **Initialization**: Syncs existing positions and starts the background watcher threads.
+2. **Data-Driven Analysis**: The core loop iterates through configured symbols and performs analysis only when new OHLCV data has been received from the watcher threads.
+3. **Optimized Resource Usage**: PyTorch is limited to a single thread and calculations are performed with `torch.no_grad()` to minimize CPU and memory footprint.
+4. **Real-Time SPM Matching**: For every new candle, the bot compares the current market "shape" and "state" to the stored Success Patterns:
    - **Shape Correlation (70%)**: GPU-accelerated Pearson correlation of price action.
    - **Technical State (30%)**: Euclidean distance of current RSI/ADX/EMA vs. pattern states.
    - **Threshold**: Similarity must exceed 70% to trigger strategy injection.
