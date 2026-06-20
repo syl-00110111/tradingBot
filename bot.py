@@ -461,7 +461,7 @@ async def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Sequential Core handles everything now.
-    core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, headless=args.headless, ui=ui)
+    core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, headless=args.headless, ui=ui, shutdown_event=shutdown_event)
     global global_core
     global_core = core
 
@@ -475,7 +475,9 @@ async def main():
 
     if args.mode in ['live', 'simulation', 'virtual']:
         setup_bot_state(config, data_manager, bot_state)
+        logging.info("Starting initial benchmarking...")
         await run_initial_benchmarking(exchange, config, args, shutdown_event, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state)
+        logging.info("Initial benchmarking complete.")
 
     if args.headless:
         await core.main_loop()
@@ -485,9 +487,7 @@ async def main():
         for h in all_other_handlers:
             logging.root.removeHandler(h)
 
-        with Live(ui.make_dashboard(args.mode, config, bot_state, signal_arrival_times), refresh_per_second=2, screen=True) as live:
-            core.live = live
-            await core.main_loop()
+        await core.main_loop()
 
         # Restore console logging on exit
         for h in all_other_handlers:

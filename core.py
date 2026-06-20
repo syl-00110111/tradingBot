@@ -6,14 +6,16 @@ import logging
 import time
 import pandas as pd
 import torch
+import threading
 from typing import Dict, List, Set, Optional
+from rich.live import Live
 
 from persistence import DataManager, PatternManager, OHLCVCacheManager
 from trading_engine import TradingEngine, execute_buy, execute_sell
 from indicators import get_common_indicators, get_signals, calculate_similarity_batch
 
 class TradingCore:
-    def __init__(self, config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, headless=False, ui=None):
+    def __init__(self, config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, headless=False, ui=None, shutdown_event=None):
         self.config = config
         self.exchange = exchange
         self.data_manager = data_manager
@@ -22,7 +24,7 @@ class TradingCore:
         self.engine = TradingEngine(config)
         self.headless = headless
         self.ui = ui
-        self.live = None # Will be set by bot.py if not headless
+        self.live = None
 
         self.bot_state = {}
         self.global_pattern_pool = []
@@ -30,54 +32,239 @@ class TradingCore:
         self.suspended_pairs = set()
         self.benchmarking_pairs = set()
         self.signal_arrival_times = {}
-        self.shutdown_event = asyncio.Event()
+        self.shutdown_event = shutdown_event or asyncio.Event()
+        self._stop_event = threading.Event()
+
+        self.ohlcv_data = {} # symbol -> DataFrame
+        self.ohlcv_lock = threading.Lock()
+        self.balance_data = {}
+        self.balance_lock = threading.Lock()
+        self.threads = []
+        self.thread_exchanges = []
+        self.mode = config.get('mode', 'simulation')
 
     def log(self, message):
-        if self.headless:
-            logging.info(message)
+        logging.info(message)
+
+    def watch_ohlcv_thread(self, symbol, timeframe):
+        """Thread dedicated to watching OHLCV for a specific symbol."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # We need a fresh exchange instance for each thread to be thread-safe
+        from exchange_handler import EXCHANGE_MAPPING, MockExchange
+        import os
+        import json
+
+        api_creds = {}
+        if os.path.exists('api.json'):
+            try:
+                with open('api.json', 'r') as f: api_creds = json.load(f)
+            except: pass
+
+        api_key = os.environ.get('api_key') or api_creds.get('api_key') or self.config.get('api_key')
+        api_secret = os.environ.get('api_secret') or api_creds.get('api_secret') or self.config.get('api_secret')
+        market_type = api_creds.get('market', self.config.get('market', 'spot'))
+
+        ex_class = EXCHANGE_MAPPING.get(self.config.get('exchange', 'binance'), MockExchange)
+
+        if self.mode == 'live':
+            thread_exchange = ex_class(api_key, api_secret, market_type=market_type)
+        else:
+            thread_exchange = MockExchange(api_key, api_secret, exchange_type=self.config.get('exchange', 'binance'), market_type=market_type)
+
+        self.thread_exchanges.append(thread_exchange)
+
+        async def _run():
+            # First acquisition: Fetch
+            self.log(f"[{symbol}] Initial OHLCV fetch...")
+            ohlcv = await thread_exchange.fetch_ohlcv(symbol, timeframe, limit=100)
+            if ohlcv:
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                with self.ohlcv_lock:
+                    self.ohlcv_data[symbol] = df
+
+            self.log(f"[{symbol}] Starting watch loop...")
+            while not self._stop_event.is_set():
+                try:
+                    # Use timeout to allow periodic check of _stop_event
+                    new_candles = await asyncio.wait_for(thread_exchange.watch_ohlcv(symbol, timeframe), timeout=2.0)
+                    if new_candles:
+                        with self.ohlcv_lock:
+                            # Accumulation logic
+                            if symbol in self.ohlcv_data:
+                                df_new = pd.DataFrame(new_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                                combined = pd.concat([self.ohlcv_data[symbol], df_new]).drop_duplicates('timestamp').sort_values('timestamp')
+                                self.ohlcv_data[symbol] = combined.tail(500) # Keep a reasonable history
+                            else:
+                                self.ohlcv_data[symbol] = pd.DataFrame(new_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    self.log(f"[{symbol}] Watch error: {e}")
+                    await asyncio.sleep(5)
+
+            try:
+                await thread_exchange.close()
+            except: pass
+
+        loop.run_until_complete(_run())
+
+    def watch_balance_thread(self):
+        """Thread dedicated to watching balance."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        from exchange_handler import EXCHANGE_MAPPING, MockExchange
+        import os
+        import json
+
+        api_creds = {}
+        if os.path.exists('api.json'):
+            try:
+                with open('api.json', 'r') as f: api_creds = json.load(f)
+            except: pass
+
+        api_key = os.environ.get('api_key') or api_creds.get('api_key') or self.config.get('api_key')
+        api_secret = os.environ.get('api_secret') or api_creds.get('api_secret') or self.config.get('api_secret')
+        market_type = api_creds.get('market', self.config.get('market', 'spot'))
+
+        ex_class = EXCHANGE_MAPPING.get(self.config.get('exchange', 'binance'), MockExchange)
+
+        if self.mode == 'live':
+            thread_exchange = ex_class(api_key, api_secret, market_type=market_type)
+        else:
+            thread_exchange = MockExchange(api_key, api_secret, exchange_type=self.config.get('exchange', 'binance'), market_type=market_type)
+
+        self.thread_exchanges.append(thread_exchange)
+
+        async def _run():
+            # First acquisition: Fetch
+            self.log("Initial balance fetch...")
+            balance = await thread_exchange.fetch_balance()
+            if balance:
+                with self.balance_lock:
+                    self.balance_data = balance
+
+            self.log("Starting balance watch loop...")
+            while not self._stop_event.is_set():
+                try:
+                    # Not all exchanges support watch_balance, but we try
+                    ccxt_ex = getattr(thread_exchange, 'exchange', None)
+                    if ccxt_ex and hasattr(ccxt_ex, 'watchBalance'):
+                        balance = await asyncio.wait_for(ccxt_ex.watchBalance(), timeout=2.0)
+                        if balance:
+                            with self.balance_lock:
+                                self.balance_data = balance
+                    else:
+                        # Fallback for exchanges without watchBalance (not recommended as per requirement but good for safety)
+                        for _ in range(60):
+                            if self._stop_event.is_set(): break
+                            await asyncio.sleep(1)
+                        if self._stop_event.is_set(): break
+                        balance = await thread_exchange.fetch_balance()
+                        if balance:
+                            with self.balance_lock:
+                                self.balance_data = balance
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    self.log(f"Balance watch error: {e}")
+                    await asyncio.sleep(10)
+
+            try:
+                await thread_exchange.close()
+            except: pass
+
+        loop.run_until_complete(_run())
+
+    def dashboard_thread_func(self):
+        """Thread dedicated to the Dashboard UI."""
+        if self.headless or not self.ui:
+            return
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _run():
+            with Live(self.ui.make_dashboard(self.mode, self.config, self.bot_state, self.signal_arrival_times), refresh_per_second=2, screen=True) as live:
+                self.live = live
+                while not self._stop_event.is_set():
+                    try:
+                        await self.ui.input_handler(self)
+                        live.update(self.ui.make_dashboard(self.mode, self.config, self.bot_state, self.signal_arrival_times))
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logging.error(f"Dashboard error: {e}")
+                        await asyncio.sleep(1)
+
+        loop.run_until_complete(_run())
 
     async def main_loop(self):
-        """Simplified Sequential Async Main Loop."""
-        self.log("DashBoard initialization of our tradingBot:")
+        """Sequential Analysis Loop, consuming data from threads."""
+        self.log("Starting trading bot core...")
 
         symbols = list(self.config.get('pairs', {}).keys())
 
+        # Start Watcher Threads
+        t_bal = threading.Thread(target=self.watch_balance_thread, daemon=True)
+        t_bal.start()
+        self.threads.append(t_bal)
+
+        for symbol in symbols:
+            t = threading.Thread(target=self.watch_ohlcv_thread, args=(symbol, '1m'), daemon=True)
+            t.start()
+            self.threads.append(t)
+
+        # Start Dashboard Thread
+        if not self.headless:
+            t_dash = threading.Thread(target=self.dashboard_thread_func, daemon=True)
+            t_dash.start()
+            self.threads.append(t_dash)
+
+        self.log("All systems launched. Entering analysis loop.")
+
         while not self.shutdown_event.is_set():
             try:
-                if self.live: self.live.refresh()
-                if self.ui: await self.ui.input_handler(self)
+                # 0. Update state from balance thread
+                with self.balance_lock:
+                    if self.balance_data:
+                        # Update available_assets (assets with > 0 balance)
+                        new_assets = []
+                        # CCXT balance format can vary, usually has 'total' or just asset keys
+                        total_bal = self.balance_data.get('total', self.balance_data)
+                        for asset, total in total_bal.items():
+                            if isinstance(total, (int, float)) and total > 0:
+                                new_assets.append(asset)
+                            elif isinstance(total, dict) and total.get('total', 0) > 0:
+                                new_assets.append(asset)
 
-                # 1. Fetch Balance
-                self.log("Step: fetchBalance")
-                balance = await self.exchange.fetch_balance()
-                if balance:
-                    self.log("Balance updated.")
+                        if new_assets:
+                            self.available_assets[:] = sorted(list(set(new_assets)))
 
-                if self.live: self.live.refresh()
+                        # Update bot_state amounts for symbols
+                        for symbol in symbols:
+                            asset = symbol.split('/')[0]
+                            if asset in total_bal:
+                                val = total_bal[asset]
+                                if isinstance(val, (int, float)):
+                                    self.bot_state[symbol]['amt'] = val
+                                elif isinstance(val, dict):
+                                    self.bot_state[symbol]['amt'] = val.get('total', 0)
 
-                # 2. Benchmark Sequentially on Symbols
-                self.log("Step: benchmark sequentially on symbols")
+                # Sequential Analysis on Symbols
                 for symbol in symbols:
                     if self.shutdown_event.is_set(): break
-                    self.log(f"Processing symbol: {symbol}")
+
+                    df = None
+                    with self.ohlcv_lock:
+                        if symbol in self.ohlcv_data:
+                            df = self.ohlcv_data[symbol].copy()
+
+                    if df is None or df.empty:
+                        continue
 
                     try:
-                        # fetch/watch candles for 1m
-                        self.log(f"Step: data acquisition for {symbol}")
-                        ohlcv = None
-                        try:
-                            # Try watch first for real-time, then fallback to fetch
-                            ohlcv = await asyncio.wait_for(self.exchange.watch_ohlcv(symbol, '1m', limit=100), timeout=5.0)
-                        except asyncio.TimeoutError:
-                            self.log(f"watchOHLCV timeout for {symbol}, falling back to fetch")
-                            ohlcv = await self.exchange.fetch_ohlcv(symbol, '1m', limit=100)
-
-                        if not ohlcv:
-                            self.log(f"No OHLCV for {symbol}, skipping.")
-                            continue
-
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
                         # Sequential Analysis
                         from bot import perform_analysis_calculation
                         device = self.config.get('device', torch.device('cpu'))
@@ -90,7 +277,6 @@ class TradingCore:
                             'mc_score': current_data.get('mc_score', 1.1)
                         }
 
-                        self.log(f"Step: Analyzing {symbol}")
                         res = await perform_analysis_calculation(symbol, '1m', 60, df, self.global_pattern_pool, device, pinfo)
 
                         if res and 'error' not in res:
@@ -108,21 +294,18 @@ class TradingCore:
                                     elif symbol in self.suspended_pairs:
                                         self.log(f"Aborted: {symbol} is suspended")
                                     else:
-                                        self.log(f"Step: Monte Carlo validation for {symbol}")
                                         if self.engine.validate_trade_mc(symbol, self.bot_state[symbol], self.config):
-                                            self.log(f"Step: Executing BUY for {symbol}")
+                                            self.log(f"Executing BUY for {symbol}")
                                             await execute_buy(
                                                 self.exchange, self.data_manager, self.engine,
                                                 symbol, self.bot_state[symbol], self.config,
                                                 self.available_assets, self.suspended_pairs
                                             )
-                                        else:
-                                            self.log(f"Aborted: Monte Carlo validation failed for {symbol}")
                                 elif res.get('sell_signal'):
                                     self.log(f"Signal: SELL detected for {symbol}")
                                     positions = self.bot_state[symbol].get('positions', [])
                                     for idx, pos in enumerate(positions):
-                                        self.log(f"Step: Executing SELL for {symbol} (position {idx})")
+                                        self.log(f"Executing SELL for {symbol}")
                                         await execute_sell(
                                             self.exchange, self.data_manager, self.engine,
                                             symbol, self.bot_state[symbol], self.config, idx
@@ -131,16 +314,29 @@ class TradingCore:
                     except Exception as e:
                         logging.error(f"Error processing {symbol}: {e}")
 
-                    if self.live: self.live.refresh()
-
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1)
             except Exception as e:
                 logging.error(f"Main loop error: {e}")
                 await asyncio.sleep(5)
 
     async def shutdown(self):
+        self.log("Shutting down core...")
         self.shutdown_event.set()
+        self._stop_event.set()
+
+        # Give threads a moment to finish
+        await asyncio.sleep(1)
+
+        # Try to close all thread-specific exchanges
+        for ex in self.thread_exchanges:
+            try:
+                # We can't easily await from here if they are in different loops,
+                # but closing the underlying connection might help.
+                pass
+            except: pass
+
         try:
             await self.exchange.close()
         except:
             pass
+        self.log("Core shutdown complete.")
