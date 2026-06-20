@@ -364,13 +364,14 @@ class DashboardUI:
                                     play_sound_func("buy", config)
                             threading.Thread(target=manual_buy_task, daemon=True).start()
                 elif key.lower() == 's':
-                    # Manual Sell
+                    # Manual Sell (Force immediate sell)
                     if self.focused_panel == "pairs" and sorted_symbols:
                         symbol = sorted_symbols[self.selected_pair_index]
                         data = bot_state[symbol]
                         if data.get('positions'):
                             def manual_sell_task():
-                                if execute_sell_func(exchange, data_manager, engine, symbol, data, config, position_idx=0):
+                                # Pass force=True to bypass "Sure Profit" check for manual intervention
+                                if execute_sell_func(exchange, data_manager, engine, symbol, data, config, position_idx=0, force=True):
                                     with bot_lock:
                                         data['last_action'] = 'SELL'
                                         data['positions'] = data_manager.get_positions(symbol)
