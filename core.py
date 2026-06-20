@@ -219,6 +219,13 @@ class TradingCore:
             t_dash.start()
             self.threads.append(t_dash)
 
+        self.log("Waiting for initial data for all symbols...")
+        while not self.shutdown_event.is_set():
+            with self.ohlcv_lock:
+                if all(s in self.ohlcv_data for s in symbols):
+                    break
+            await asyncio.sleep(0.5)
+
         self.log("All systems launched. Entering analysis loop.")
 
         while not self.shutdown_event.is_set():
@@ -253,13 +260,8 @@ class TradingCore:
                 for symbol in symbols:
                     if self.shutdown_event.is_set(): break
 
-                    df = None
                     with self.ohlcv_lock:
-                        if symbol in self.ohlcv_data:
-                            df = self.ohlcv_data[symbol].copy()
-
-                    if df is None or df.empty:
-                        continue
+                        df = self.ohlcv_data[symbol].copy()
 
                     try:
                         # Sequential Analysis
