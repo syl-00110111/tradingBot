@@ -65,18 +65,13 @@ suspended_pairs = set()
 
 # Marquee Timing Control
 last_marquee_update = 0
-pairs_marquee_dir = 1
-logs_marquee_dir = 1
-status_marquee_dir = 1
 pairs_pause_until = 0
 logs_pause_until = 0
 status_pause_until = 0
 
 # State shared between threads
 bot_state = {}
-available_assets = []
 bot_lock = threading.Lock()
-pending_asset_update = False
 
 def format_price(price):
     if price is None: return "-"
@@ -170,7 +165,7 @@ def make_dashboard(global_mode, config):
     now = datetime.now()
     now_ts = time.time()
     global status_scroll_index, pairs_scroll_offset, logs_scroll_offset
-    global pairs_marquee_dir, logs_marquee_dir, status_marquee_dir, pairs_pause_until, logs_pause_until, status_pause_until, last_marquee_update
+    global pairs_pause_until, logs_pause_until, status_pause_until, last_marquee_update
 
     # Slow down marquee (e.g., 2 steps per second)
     should_step = False
@@ -186,18 +181,11 @@ def make_dashboard(global_mode, config):
 
         if max_logs_offset > 0 and should_step:
              if now_ts > logs_pause_until:
-                  if logs_marquee_dir == 1:
-                       if logs_scroll_offset < max_logs_offset:
-                            logs_scroll_offset += 1
-                       if logs_scroll_offset >= max_logs_offset:
-                            logs_marquee_dir = -1
-                            logs_pause_until = now_ts + 2
+                  if logs_scroll_offset > 0:
+                       logs_scroll_offset -= 1
                   else:
-                       if logs_scroll_offset > 0:
-                            logs_scroll_offset -= 1
-                       if logs_scroll_offset <= 0:
-                            logs_marquee_dir = 1
-                            logs_pause_until = now_ts + 2
+                       logs_scroll_offset = max_logs_offset
+                       logs_pause_until = now_ts + 2
 
         logs_scroll_offset = max(0, min(logs_scroll_offset, max_logs_offset))
         start = max(0, len(all_logs) - log_height - logs_scroll_offset)
@@ -208,7 +196,7 @@ def make_dashboard(global_mode, config):
 
         log_panel = Panel(
             log_content,
-            title="[bold]Logs (INFO)[/]",
+            title="[bold]Infos[/]",
             border_style="bold green" if focused_panel == "logs" else "blue"
         )
 
@@ -247,18 +235,11 @@ def make_dashboard(global_mode, config):
 
         if max_pairs_offset > 0 and should_step:
              if now_ts > pairs_pause_until:
-                  if pairs_marquee_dir == 1:
-                       if pairs_scroll_offset < max_pairs_offset:
-                           pairs_scroll_offset += 1
-                       if pairs_scroll_offset >= max_pairs_offset:
-                           pairs_marquee_dir = -1
-                           pairs_pause_until = now_ts + 2
+                  if pairs_scroll_offset < max_pairs_offset:
+                       pairs_scroll_offset += 1
                   else:
-                       if pairs_scroll_offset > 0:
-                           pairs_scroll_offset -= 1
-                       if pairs_scroll_offset <= 0:
-                           pairs_marquee_dir = 1
-                           pairs_pause_until = now_ts + 2
+                       pairs_scroll_offset = 0
+                       pairs_pause_until = now_ts + 2
 
         pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
         visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
@@ -288,7 +269,7 @@ def make_dashboard(global_mode, config):
                  p = data['position']
                  amt_str = f"{p['amount']:.6f}"
                  entry_str = format_price(p['entry_price'])
-                 fee_str = f"{p.get('entry_fee', 0):.4f}"
+                 fee_str = f"{p.get('entry_fee', 0):.6f}"
 
             tendency = data.get('tendency', 'N/A')
             tend_style = "bold green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "bold yellow" if tendency == "Range" else "white"
@@ -341,7 +322,6 @@ def make_dashboard(global_mode, config):
         # 3. Status Bar Marquee
         status_text = Text()
         status_text.append(f"Update: {datetime.now().strftime('%H:%M:%S')} | Mode: {global_mode.capitalize()} | ", style="bold brown")
-        status_text.append(f"Sellable: {', '.join(available_assets) if available_assets else 'None'} | ", style="bold yellow")
         status_text.append("TAB: Switch | Arrows: Scroll | H: Help | Exit: Ctrl+C", style="bold red")
 
         display_width = console.width - 4
@@ -349,18 +329,11 @@ def make_dashboard(global_mode, config):
 
         if max_status_offset > 0:
              if should_step and now_ts > status_pause_until:
-                  if status_marquee_dir == 1:
-                       if status_scroll_index < max_status_offset:
-                            status_scroll_index += 1
-                       if status_scroll_index >= max_status_offset:
-                            status_marquee_dir = -1
-                            status_pause_until = now_ts + 2
+                  if status_scroll_index < max_status_offset:
+                       status_scroll_index += 1
                   else:
-                       if status_scroll_index > 0:
-                            status_scroll_index -= 1
-                       if status_scroll_index <= 0:
-                            status_marquee_dir = 1
-                            status_pause_until = now_ts + 2
+                       status_scroll_index = 0
+                       status_pause_until = now_ts + 2
 
              status_scroll_index = max(0, min(status_scroll_index, max_status_offset))
              status_display = status_text[status_scroll_index : status_scroll_index + display_width]
@@ -395,6 +368,15 @@ def input_thread_func():
     while not shutdown_event.is_set():
         try:
             key = readchar.readkey()
+            # Calculate heights for clamping
+            with bot_lock:
+                 log_height = 8
+                 max_logs_offset = max(0, len(all_logs) - log_height)
+                 sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
+                 pairs_height = console.height - 20
+                 if pairs_height < 3: pairs_height = 3
+                 max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
+
             if key == readchar.key.TAB:
                 focused_panel = "logs" if focused_panel == "pairs" else "pairs"
             elif key == readchar.key.UP:
@@ -402,11 +384,11 @@ def input_thread_func():
                     pairs_scroll_offset = max(0, pairs_scroll_offset - 1)
                     pairs_pause_until = time.time() + 5 # Longer pause on manual interaction
                 else:
-                    logs_scroll_offset = min(500, logs_scroll_offset + 1)
+                    logs_scroll_offset = min(max_logs_offset, logs_scroll_offset + 1)
                     logs_pause_until = time.time() + 5
             elif key == readchar.key.DOWN:
                 if focused_panel == "pairs":
-                    pairs_scroll_offset += 1
+                    pairs_scroll_offset = min(max_pairs_offset, pairs_scroll_offset + 1)
                     pairs_pause_until = time.time() + 5
                 else:
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
@@ -425,27 +407,7 @@ def input_thread_func():
             break
         except Exception: pass
 
-def update_available_assets_live(exchange, config):
-    global available_assets, pending_asset_update
-    # Randomized delay between 3 and 10 seconds
-    delay = random.uniform(3.0, 10.0)
-    time.sleep(delay)
-
-    # We use a buffered approach: even if multiple threads were started,
-    # only one will actually perform the update if they are synchronized.
-    # The 'pending_asset_update' flag in the main loop ensures we don't spawn too many.
-
-    try:
-        new_assets = get_sellable_assets(exchange, config)
-        with bot_lock:
-            available_assets[:] = new_assets
-            pending_asset_update = False
-    except Exception as e:
-        logging.error(f"Failed to update assets from API: {e}")
-        with bot_lock: pending_asset_update = False
-
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
-    global available_assets, pending_asset_update
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
     pair_keys = priority_order if priority_order else list(pairs_dict.keys())
@@ -464,17 +426,9 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
         if mode == 'live' and not sim_init_done:
             # First time load for live
             sync_live_positions(exchange, data_manager, config)
-            new_assets = get_sellable_assets(exchange, config)
-            with bot_lock:
-                available_assets[:] = new_assets
             sim_init_done = True
 
         try:
-            if mode == 'simulation' and time.time() - last_assets_update > 60:
-                new_available_assets = get_sellable_assets_sim(data_manager)
-                with bot_lock:
-                     available_assets[:] = new_available_assets
-                last_assets_update = time.time()
 
             potential_buys = []
 
@@ -497,9 +451,6 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                       with bot_lock:
                                           data['last_action'] = 'SELL'
                                           data['position'] = None
-                                          if mode == 'live' and not pending_asset_update:
-                                              pending_asset_update = True
-                                              threading.Thread(target=update_available_assets_live, args=(exchange, config), daemon=True).start()
                                       play_sound("sell", config)
 
                             if data.get('buy') and not data.get('position'):
@@ -552,7 +503,7 @@ def main():
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
-    parser.add_argument('--mode', choices=['live', 'simulation', 'sell', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
+    parser.add_argument('--mode', choices=['live', 'simulation', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
     parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/EUR)')
     parser.add_argument('--every-symbol', action='store_true', help='Run benchmark for all configured pairs')
@@ -654,7 +605,7 @@ def main():
             console.print(f"[bold green]GPU Acceleration enabled using device: {device}[/]")
 
         db_handler.duration = 5
-        data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation', 'sell'] else None
+        data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation'] else None
         pattern_manager = PatternManager()
         engine = TradingEngine(config)
 
@@ -675,13 +626,6 @@ def main():
         elif args.mode == 'simulation':
             exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange)
             logging.info(f"Starting bot in SIMULATION mode ({args.exchange} discovery)")
-        elif args.mode == 'sell':
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
-            exchange.load_markets()
-            if hasattr(exchange, 'balance'): exchange.balance['TEST'] = True
-            status.stop()  # Stop status before interactive input
-            interactive_sell(exchange, data_manager, engine, config)
-            return
         elif args.mode == 'balance':
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             exchange.load_markets()
@@ -1107,113 +1051,7 @@ def sync_live_positions(exchange, data_manager, config):
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
         logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
 
-def get_sellable_assets_sim(data_manager):
-    positions = data_manager.get_open_positions()
-    return sorted([s.split('/')[0] for s in positions.keys()])
 
-def get_sellable_assets(exchange, config=None):
-    balance = exchange.fetch_balance()
-    assets = []
-    base_currencies = config.get('base_currencies', ['EUR']) if config else ['EUR']
-    free_balances = balance.get('free', balance)
-
-    for asset, amount in free_balances.items():
-        if not isinstance(amount, (int, float)) or amount <= 0: continue
-        if asset in base_currencies or asset == 'USDT': continue
-
-        # Find pair
-        symbol = None
-        for bc in base_currencies:
-            candidate = f"{asset}/{bc}"
-            if config and candidate in config.get('pairs', {}):
-                symbol = candidate
-                break
-        if not symbol: continue
-
-        try:
-            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
-            if symbol in markets:
-                market = markets[symbol]
-                min_amount = market['limits']['amount']['min']
-                min_cost = market['limits']['cost']['min'] or 10
-                ticker = exchange.fetch_ticker(symbol)
-                if ticker and (amount < min_amount or (amount * ticker['last']) < min_cost): continue
-            elif amount <= 0.000001: continue
-            assets.append(asset)
-        except Exception:
-            if amount > 0.000001: assets.append(asset)
-    return sorted(assets)
-
-def interactive_sell(exchange, data_manager, engine, config):
-    console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
-    balance = exchange.fetch_balance()
-    free_balances = balance.get('free', balance)
-    base_currencies = config.get('base_currencies', ['EUR'])
-
-    sellable_found = False
-    for asset, amount in free_balances.items():
-        if asset in base_currencies or asset == 'USDT' or not isinstance(amount, (float, int)) or amount <= 0:
-            continue
-
-        # Find pair
-        symbol = None
-        for bc in base_currencies:
-            candidate = f"{asset}/{bc}"
-            if candidate in config.get('pairs', {}):
-                symbol = candidate
-                break
-        if not symbol: continue
-
-        # Handle markets access for both BinanceExchange and MockExchange
-        markets = {}
-        if hasattr(exchange, 'exchange') and exchange.exchange.markets:
-            markets = exchange.exchange.markets
-        elif hasattr(exchange, 'markets'):
-            markets = exchange.markets
-
-        # Skip if no EUR market exists for this asset
-        if not markets or symbol not in markets:
-            continue
-
-        market = markets[symbol]
-        min_amount = market['limits']['amount']['min']
-        min_cost = market['limits']['cost']['min'] or 10
-
-        ticker = exchange.fetch_ticker(symbol)
-        if not ticker:
-            continue
-
-        price = ticker['last']
-        cost = amount * price
-
-        if amount < min_amount or cost < min_cost:
-            continue
-
-        sellable_found = True
-        console.print(f"\n[bold cyan]Asset:[/] {asset} | [bold cyan]Balance:[/] {amount:.6f} | [bold cyan]Value:[/] {format_price(cost)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-
-        confirm = input(f"Confirm sell of entire {asset} balance? (y/n): ").lower()
-        if confirm == 'y':
-            console.print(f"[yellow]Selling {amount} {asset} at ~{format_price(price)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}...[/]")
-            order = exchange.create_order(symbol, 'sell', amount)
-            if order:
-                fee = order.get('calculated_fee', 0)
-                total_received = (amount * price) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {price}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-                console.print(f"[bold green]Successfully sold {asset}! Final received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}[/]")
-                play_sound("sell", None)
-                # Also close position in data manager if it exists
-                if data_manager.get_position(symbol):
-                    pos = data_manager.get_position(symbol)
-                    profit = total_received - pos.get('entry_total_base', 0)
-                    data_manager.close_position(symbol, price, fee, profit, {}, time.time(), total_base=total_received)
-            else:
-                console.print(f"[bold red]Failed to sell {asset}.[/]")
-        else:
-            console.print(f"[dim]Skipping {asset}.[/]")
-
-    if not sellable_found:
-        console.print("[yellow]No sellable assets (above dust threshold) found in your real wallet.[/]")
 
 def show_balance(exchange):
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
