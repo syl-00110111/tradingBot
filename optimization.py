@@ -309,6 +309,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
     all_pairs = list(config.get('pairs', {}).keys())
     if symbols_to_process:
         symbols = symbols_to_process
+    elif args and args.symbol:
+        symbols = [args.symbol]
     else:
         symbols = all_pairs
     # Prioritize symbols with open positions
