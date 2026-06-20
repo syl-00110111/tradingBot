@@ -93,7 +93,7 @@ class TradingCore:
                             if symbol in self.ohlcv_data:
                                 df_new = pd.DataFrame(new_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                                 combined = pd.concat([self.ohlcv_data[symbol], df_new]).drop_duplicates('timestamp').sort_values('timestamp')
-                                self.ohlcv_data[symbol] = combined.tail(500) # Keep a reasonable history
+                                self.ohlcv_data[symbol] = combined.tail(80) # Keep a reasonable history
                             else:
                                 self.ohlcv_data[symbol] = pd.DataFrame(new_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 except asyncio.TimeoutError:

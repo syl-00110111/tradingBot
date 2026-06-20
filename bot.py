@@ -173,9 +173,6 @@ async def run_initial_benchmarking(exchange, config, args, shutdown_event, globa
     # Set default priority
     config['_priority_pairs'] = sorted(list(config['pairs'].keys()))
 
-    if args.mode in ['simulation', 'virtual', 'live']:
-        await trading_engine.initialize_wallet_positions(exchange, data_manager, pattern_manager, engine, config, bot_state)
-
     # Bare-bone benchmarking at startup
     import optimization
     await optimization.run_benchmark_mode(

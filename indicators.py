@@ -278,12 +278,6 @@ def finalize_signals(df):
     return df
 
 
-def normalize_series(series):
-    """Min-max normalization to [0, 1]."""
-    if series.empty or series.max() == series.min():
-        return series * 0
-    return (series - series.min()) / (series.max() - series.min())
-
 def calculate_similarity_batch(buffer_df, patterns, device=torch.device('cpu')):
     """
     Highly optimized batch similarity calculation for a pool of patterns.

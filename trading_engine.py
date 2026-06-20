@@ -296,25 +296,3 @@ async def get_sellable_assets(exchange, config=None):
     amounts = await get_sellable_assets_with_amounts(exchange, config)
     return sorted(list(amounts.keys()))
 
-async def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine, config, bot_state):
-    logging.info("Initializing positions from real wallet inventory (please wait)...")
-    balance = await exchange.fetch_balance()
-    if not balance: return
-    total_balances = balance.get('total', balance)
-    base_currencies = config.get('base_currencies', ['USDT', 'USDC', 'EUR'])
-    for asset, amount in total_balances.items():
-        if asset in base_currencies or asset == 'USDT' or not isinstance(amount, (float, int)) or amount <= 0: continue
-        symbol = None
-        for bc in base_currencies:
-            candidate = f"{asset}/{bc}"
-            if candidate in config.get('pairs', {}):
-                symbol = candidate
-                break
-        if not symbol: continue
-
-        ohlcv = await exchange.fetch_ohlcv(symbol, '1m', limit=1)
-        price = ohlcv[0][4] if ohlcv else 0
-        if amount * price > 1.0: # Filter dust
-            data_manager.add_position(symbol, price, amount, 0, {"note": "Restored from API"}, time.time())
-            if bot_state and symbol in bot_state:
-                bot_state[symbol]['amt'] = amount
