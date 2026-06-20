@@ -61,8 +61,8 @@ async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_po
         from optimization import run_benchmark_for_symbol
         from indicators import STRATEGIES
 
-        # Reduced strategies for speed during live analysis
-        _, new_patterns = await run_benchmark_for_symbol(symbol, {}, 'short', ['balanced'], STRATEGIES, df, device=device)
+        # Always attempt to discover new patterns from current history to keep pool fresh
+        _, new_patterns = await run_benchmark_for_symbol(symbol, {}, 'short', ['balanced', 'aggressive', 'conservative'], STRATEGIES, df, device=device)
 
         # Merge new patterns with existing ones for this session
         combined_pool = search_pool + new_patterns
@@ -109,6 +109,9 @@ async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_po
             candidates.sort(key=lambda x: x['sim'], reverse=True)
             active_pattern = candidates[0]['pattern']
             active_pattern_id = candidates[0]['id']
+            logging.info(f"[{symbol}] Found {len(candidates)} pattern candidates. Best sim: {candidates[0]['sim']:.4f} ({active_pattern['strategy']})")
+        else:
+            logging.info(f"[{symbol}] No matching patterns found in pool (Pool size: {len(search_pool)})")
 
         latest = df.iloc[-1]
         if active_pattern:
@@ -141,6 +144,8 @@ async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_po
             settings.update({'strategy': active_pattern['strategy'], 'device': device})
             df = get_signals(df, settings, is_backtest=False)
             latest = df.iloc[-1]
+            if latest.get('buy_signal'): logging.info(f"[{symbol}] BUY signal triggered by strategy {active_pattern['strategy']}")
+            if latest.get('sell_signal'): logging.info(f"[{symbol}] SELL signal triggered by strategy {active_pattern['strategy']}")
 
             p_len = len(active_pattern['prices'])
             expired = (abs(candle_ts - pattern_match_ts) // tf_secs) >= p_len

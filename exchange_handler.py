@@ -26,6 +26,7 @@ class ExchangeInterface:
     async def watch_balance(self): raise NotImplementedError
     async def fetch_ticker(self, symbol): raise NotImplementedError
     async def watch_ticker(self, symbol): raise NotImplementedError
+    async def watch_tickers(self, symbols): raise NotImplementedError
     async def fetch_trading_fee(self, symbol): raise NotImplementedError
     async def fetch_order_book(self, symbol, limit=100): raise NotImplementedError
     async def watch_order_book(self, symbol, limit=20): raise NotImplementedError
@@ -71,6 +72,10 @@ class CCXTExchange(ExchangeInterface):
     async def watch_ticker(self, symbol):
         try: return await self.exchange.watch_ticker(symbol)
         except Exception as e: logging.error(f"Error watching ticker for {symbol}: {e}"); return None
+
+    async def watch_tickers(self, symbols):
+        try: return await self.exchange.watch_tickers(symbols)
+        except Exception as e: logging.error(f"Error watching tickers: {e}"); return {}
 
     async def fetch_balance(self):
         try: return await self.exchange.fetch_balance()
@@ -212,6 +217,7 @@ class MockExchange(ExchangeInterface):
     async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100): return []
     async def fetch_ticker(self, symbol): return {'last': 100.0}
     async def watch_ticker(self, symbol): return {'last': 100.0}
+    async def watch_tickers(self, symbols): return {s: {'last': 100.0} for s in symbols}
     async def fetch_balance(self): return {'total': self.balance, 'free': self.balance}
     async def watch_balance(self): return {'total': self.balance, 'free': self.balance}
     async def fetch_my_trades(self, symbol, limit=10): return []
