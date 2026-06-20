@@ -449,7 +449,7 @@ async def get_sellable_assets_with_amounts(exchange, config=None):
     return result
 
 async def get_sellable_assets(exchange, config=None):
-    amounts = get_sellable_assets_with_amounts(exchange, config)
+    amounts = await get_sellable_assets_with_amounts(exchange, config)
     return sorted(list(amounts.keys()))
 
 async def interactive_sell(exchange, data_manager, engine, config, console):
