@@ -173,7 +173,7 @@ def get_signals(df, mode_config, is_backtest=False):
     Dispatcher for multiple trading strategies.
     Selected strategy is defined in mode_config['strategy'].
     """
-    strategy = mode_config.get('strategy', 'simple_ema')
+    strategy = mode_config.get('strategy') or 'simple_ema'
     device = mode_config.get('device', torch.device('cpu'))
     _mc_engine.set_device(device)
 
