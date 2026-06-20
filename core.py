@@ -123,6 +123,17 @@ class ExecutionService:
             self.core.bot_state[symbol].update(analysis_res)
             data = self.core.bot_state[symbol]
 
+            # Sync signal arrival times for UI display
+            if analysis_res.get('buy_signal') or analysis_res.get('sell_signal'):
+                 self.core.signal_arrival_times[symbol] = time.time()
+
+        # Prevent acting multiple times on the same signal candle
+        last_acted_ts = data.get('last_acted_ts', 0)
+        current_candle_ts = analysis_res.get('last_processed_ts', 0)
+
+        if last_acted_ts >= current_candle_ts and current_candle_ts > 0:
+             return
+
         if analysis_res.get('buy_signal'):
             # Double check with Monte Carlo and Order Book
             # Limit to 3 concurrent positions (buyings in-a-row) per pair
@@ -130,12 +141,14 @@ class ExecutionService:
             if len(positions) < 3 and symbol not in self.core.suspended_pairs:
                 if self.core.engine.validate_trade_mc(symbol, data, self.core.config):
                     # execute_buy now includes API-first balance and order book checks
-                    await self.core.run_in_thread(
+                    success = await self.core.run_in_thread(
                         execute_buy,
                         self.core.exchange, self.core.data_manager, self.core.engine,
                         symbol, data, self.core.config, self.core.state_lock,
                         self.core.available_assets, self.core.suspended_pairs
                     )
+                    if success:
+                        data['last_acted_ts'] = current_candle_ts
 
         elif analysis_res.get('sell_signal'):
             positions = data.get('positions', [])
@@ -149,6 +162,7 @@ class ExecutionService:
                     )
 
                     if success:
+                        data['last_acted_ts'] = current_candle_ts
                         break
 
                     # 2. If profit not sure, perform term escalation
@@ -179,6 +193,7 @@ class TradingCore:
         self.available_assets = []
         self.suspended_pairs = set()
         self.benchmarking_pairs = set()
+        self.signal_arrival_times = {}
         self.state_lock = threading.RLock()
         self.shutdown_event = external_shutdown_event or threading.Event()
 

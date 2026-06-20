@@ -841,6 +841,7 @@ def main():
             core.available_assets = available_assets
             core.suspended_pairs = suspended_pairs
             core.benchmarking_pairs = benchmarking_pairs
+            core.signal_arrival_times = signal_arrival_times
 
         async def run_core():
             await core.main_loop()
@@ -881,6 +882,7 @@ def main():
                     core.available_assets = available_assets
                     core.suspended_pairs = suspended_pairs
                     core.benchmarking_pairs = benchmarking_pairs
+                    core.signal_arrival_times = signal_arrival_times
 
                 async def run_core():
                     await core.main_loop()
