@@ -1,38 +1,19 @@
-# Cryptocurrencies multiplatform trading bot - Exchange Interface (CCXT Pro Only)
+# Cryptocurrencies multiplatform trading bot - Simplified Exchange Interface
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import ccxt.pro as ccxtpro
 import asyncio
 import os
-import time
 import logging
-import requests
-import pandas as pd
-from requests.adapters import HTTPAdapter
-import datetime
-
-def create_ccxt_session():
-    session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=200)
-    session.mount('https://', adapter)
-    session.mount('http://', adapter)
-    return session
 
 class ExchangeInterface:
-    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=1000): raise NotImplementedError
-    async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
-    async def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
+    async def load_markets(self): raise NotImplementedError
     async def fetch_balance(self): raise NotImplementedError
-    async def watch_balance(self): raise NotImplementedError
-    async def fetch_ticker(self, symbol): raise NotImplementedError
-    async def watch_ticker(self, symbol): raise NotImplementedError
-    async def watch_tickers(self, symbols): raise NotImplementedError
-    async def fetch_trading_fee(self, symbol): raise NotImplementedError
-    async def fetch_order_book(self, symbol, limit=100): raise NotImplementedError
-    async def watch_order_book(self, symbol, limit=20): raise NotImplementedError
-    async def get_effective_price(self, symbol, side, amount): raise NotImplementedError
-    async def watch_orders(self, symbol=None): raise NotImplementedError
-    async def watch_my_trades(self, symbol=None): raise NotImplementedError
+    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
+    async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
+    async def fetch_order_book(self, symbol, limit=20): raise NotImplementedError
+    async def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
+    async def close(self): raise NotImplementedError
 
 class CCXTExchange(ExchangeInterface):
     def __init__(self, exchange_id, api_key, api_secret, options=None, market_type='spot'):
@@ -57,76 +38,21 @@ class CCXTExchange(ExchangeInterface):
         try: return await self.exchange.load_markets()
         except Exception as e: logging.error(f"Failed to load markets: {e}"); return {}
 
-    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
-        try: return await self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-        except Exception as e: logging.error(f"Error fetching OHLCV for {symbol}: {e}"); return []
-
-    async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100):
-        try: return await self.exchange.watch_ohlcv(symbol, timeframe, since=since, limit=limit)
-        except Exception as e: logging.error(f"Error watching OHLCV for {symbol}: {e}"); return None
-
-    async def fetch_ticker(self, symbol):
-        try: return await self.exchange.fetch_ticker(symbol)
-        except Exception as e: logging.error(f"Error fetching ticker for {symbol}: {e}"); return None
-
-    async def watch_ticker(self, symbol):
-        try: return await self.exchange.watch_ticker(symbol)
-        except Exception as e: logging.error(f"Error watching ticker for {symbol}: {e}"); return None
-
-    async def watch_tickers(self, symbols):
-        try: return await self.exchange.watch_tickers(symbols)
-        except Exception as e: logging.error(f"Error watching tickers: {e}"); return {}
-
     async def fetch_balance(self):
         try: return await self.exchange.fetch_balance()
         except Exception as e: logging.error(f"Error fetching balance: {e}"); return None
 
-    async def watch_balance(self):
-        try: return await self.exchange.watch_balance()
-        except Exception as e: logging.error(f"Error watching balance: {e}"); return None
+    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
+        try: return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+        except Exception as e: logging.error(f"Error fetching OHLCV for {symbol}: {e}"); return []
 
-    async def fetch_my_trades(self, symbol, limit=10):
-        # Fallback to watch_my_trades if possible, but keep fetch for bootstrap
-        return await self.exchange.fetch_my_trades(symbol, limit=limit)
-
-    async def watch_my_trades(self, symbol=None):
-        try: return await self.exchange.watch_my_trades(symbol)
-        except Exception as e: logging.error(f"Error watching my trades: {e}"); return []
-
-    async def fetch_trading_fee(self, symbol):
-        try:
-            fees = await self.exchange.fetch_trading_fee(symbol)
-            return fees.get('taker', 0.001)
-        except Exception as e:
-            logging.warning(f"Error fetching trading fee for {symbol}: {e}. Falling back to 0.1%")
-            return 0.001
+    async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100):
+        try: return await self.exchange.watch_ohlcv(symbol, timeframe, since, limit)
+        except Exception as e: logging.error(f"Error watching OHLCV for {symbol}: {e}"); return None
 
     async def fetch_order_book(self, symbol, limit=20):
-        return await self.watch_order_book(symbol, limit=limit)
-
-    async def watch_order_book(self, symbol, limit=20):
-        try: return await self.exchange.watch_order_book(symbol, limit=limit)
-        except Exception as e: logging.error(f"Error watching order book for {symbol}: {e}"); return None
-
-    async def watch_orders(self, symbol=None):
-        try: return await self.exchange.watch_orders(symbol)
-        except Exception as e: logging.error(f"Error watching orders: {e}"); return []
-
-    async def get_effective_price(self, symbol, side, amount):
-        book = await self.watch_order_book(symbol, limit=50)
-        if not book:
-            ticker = await self.watch_ticker(symbol)
-            return ticker['last'] if ticker else 0
-        orders = book['asks'] if side == 'buy' else book['bids']
-        remaining = amount
-        total_cost = 0
-        for price, vol in orders:
-            exec_vol = min(remaining, vol)
-            total_cost += exec_vol * price
-            remaining -= exec_vol
-            if remaining <= 0: break
-        if remaining > 0: return orders[-1][0] if orders else 0
-        return total_cost / amount
+        try: return await self.exchange.fetch_order_book(symbol, limit)
+        except Exception as e: logging.error(f"Error fetching order book for {symbol}: {e}"); return None
 
     async def create_order(self, symbol, side, amount, price=None):
         try:
@@ -186,12 +112,6 @@ class IndependentReserveExchange(CCXTExchange):
     def __init__(self, api_key, api_secret, market_type='spot'):
         super().__init__('independentreserve', api_key, api_secret, market_type=market_type)
 
-async def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=500, since=None):
-    cached_data = ohlcv_cache_manager.get(symbol, timeframe) or []
-    if limit is None or limit <= 0: return cached_data, 0
-    data = cached_data[-limit:] if len(cached_data) > limit else cached_data
-    return data, 0
-
 EXCHANGE_MAPPING = {
     'binance': BinanceExchange, 'kraken': KrakenExchange, 'bitvavo': BitvavoExchange,
     'coinbase': CoinbaseExchange, 'gemini': GeminiExchange,
@@ -203,30 +123,20 @@ EXCHANGE_MAPPING = {
 class MockExchange(ExchangeInterface):
     def __init__(self, api_key=None, api_secret=None, exchange_type='binance', market_type='spot'):
         self.balance = {'USDT': 1000.0, 'USDC': 1000.0}
-        self.ohlcv_data = {}
-        self.order_book_data = {}
-        self.real_exchange = None
-        self.fee_rate = 0.001
         self.markets = {}
         self.exchange_type = exchange_type
         self.market_type = market_type
-        self._balance_initialized = False
 
     async def load_markets(self): return {}
+    async def fetch_balance(self): return {'total': self.balance, 'free': self.balance}
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): return []
     async def watch_ohlcv(self, symbol, timeframe, since=None, limit=100): return []
-    async def fetch_ticker(self, symbol): return {'last': 100.0}
-    async def watch_ticker(self, symbol): return {'last': 100.0}
-    async def watch_tickers(self, symbols): return {s: {'last': 100.0} for s in symbols}
-    async def fetch_balance(self): return {'total': self.balance, 'free': self.balance}
-    async def watch_balance(self): return {'total': self.balance, 'free': self.balance}
-    async def fetch_my_trades(self, symbol, limit=10): return []
-    async def watch_my_trades(self, symbol=None): return []
-    async def fetch_trading_fee(self, symbol): return self.fee_rate
     async def fetch_order_book(self, symbol, limit=20): return {'bids': [[99, 1]], 'asks': [[101, 1]]}
-    async def watch_order_book(self, symbol, limit=20): return {'bids': [[99, 1]], 'asks': [[101, 1]]}
-    async def watch_orders(self, symbol=None): return []
-    async def get_effective_price(self, symbol, side, amount): return 100.0
     async def create_order(self, symbol, side, amount, price=None):
         return {'id': 'mock', 'status': 'closed', 'price': 100.0, 'amount': amount}
     async def close(self): pass
+
+async def fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=500, since=None):
+    # Simplified fallback to standard fetch_ohlcv
+    ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+    return ohlcv, 0

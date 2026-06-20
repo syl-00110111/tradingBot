@@ -1,4 +1,4 @@
-# Cryptocurrencies multiplatform trading bot - Sequential Core Engine
+# Cryptocurrencies multiplatform trading bot - Simplified Core Engine
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import asyncio
@@ -35,14 +35,10 @@ class TradingCore:
     def log(self, message):
         if self.headless:
             logging.info(message)
-        # If not headless, the DashboardHandler will catch logging.info and show it in the UI logs panel
 
     async def main_loop(self):
-        """Pure Sequential Async Main Loop as per Instruction 2."""
+        """Simplified Sequential Async Main Loop."""
         self.log("DashBoard initialization of our tradingBot:")
-
-        # Step: websocket open (implicit via ccxt pro)
-        self.log("Step: websocket open")
 
         symbols = list(self.config.get('pairs', {}).keys())
 
@@ -51,57 +47,30 @@ class TradingCore:
                 if self.live: self.live.refresh()
                 if self.ui: await self.ui.input_handler(self)
 
-                # 1. Watch Balance
-                self.log("Step: watchBalance")
-                try:
-                    # We use a timeout to keep the loop moving even if no balance update occurs
-                    balance = await asyncio.wait_for(self.exchange.watch_balance(), timeout=2.0)
+                # 1. Fetch Balance
+                self.log("Step: fetchBalance")
+                balance = await self.exchange.fetch_balance()
+                if balance:
                     self.log("Balance updated.")
-                except asyncio.TimeoutError:
-                    self.log("watchBalance timeout, moving on")
 
                 if self.live: self.live.refresh()
 
-                # 2. Watch Orders (All Symbols)
-                self.log("Step: watchOrders")
-                try:
-                    # Watch all orders at once for efficiency
-                    orders = await asyncio.wait_for(self.exchange.watch_orders(None), timeout=2.0)
-                    self.log(f"Fetched {len(orders)} order updates")
-                except asyncio.TimeoutError:
-                    self.log("watchOrders timeout, moving on")
-                except Exception as e:
-                    self.log(f"watchOrders failed: {e}")
-
-                if self.live: self.live.refresh()
-
-                # 2b. Watch Tickers (All Symbols)
-                self.log("Step: watchTickers")
-                try:
-                    tickers = await asyncio.wait_for(self.exchange.watch_tickers(symbols), timeout=2.0)
-                    self.log(f"Tickers updated for {len(tickers)} symbols")
-                except asyncio.TimeoutError:
-                    self.log("watchTickers timeout, moving on")
-                except Exception as e:
-                    self.log(f"watchTickers failed: {e}")
-
-                if self.live: self.live.refresh()
-
-                # 3. Benchmark Sequentially on Symbols
+                # 2. Benchmark Sequentially on Symbols
                 self.log("Step: benchmark sequentially on symbols")
                 for symbol in symbols:
                     if self.shutdown_event.is_set(): break
                     self.log(f"Processing symbol: {symbol}")
 
                     try:
-                        # fetch candles for 1m
-                        self.log(f"Step: fetchOHLCV for {symbol}")
+                        # fetch/watch candles for 1m
+                        self.log(f"Step: data acquisition for {symbol}")
                         ohlcv = None
                         try:
-                            # Prefer fetch_ohlcv (REST) to avoid blocking for minutes if no trade occurs
-                            ohlcv = await asyncio.wait_for(self.exchange.fetch_ohlcv(symbol, '1m', limit=100), timeout=5.0)
+                            # Try watch first for real-time, then fallback to fetch
+                            ohlcv = await asyncio.wait_for(self.exchange.watch_ohlcv(symbol, '1m', limit=100), timeout=5.0)
                         except asyncio.TimeoutError:
-                            self.log(f"fetchOHLCV timeout for {symbol}")
+                            self.log(f"watchOHLCV timeout for {symbol}, falling back to fetch")
+                            ohlcv = await self.exchange.fetch_ohlcv(symbol, '1m', limit=100)
 
                         if not ohlcv:
                             self.log(f"No OHLCV for {symbol}, skipping.")
@@ -131,7 +100,6 @@ class TradingCore:
                             if res.get('buy_signal') or res.get('sell_signal'):
                                 self.signal_arrival_times[symbol] = time.time()
 
-                                # Trade if balance ok, signal detected and monte carlo validates strategy
                                 if res.get('buy_signal'):
                                     self.log(f"Signal: BUY detected for {symbol}")
                                     positions = self.bot_state[symbol].get('positions', [])

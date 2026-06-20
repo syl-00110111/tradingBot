@@ -25,19 +25,22 @@ class DataManager:
         self.positions[symbol].append(pos)
 
 
-    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, position_idx=0):
+    def close_position(self, symbol, exit_price, amount, exit_fee, trigger_data, timestamp, total_base=0, position_idx=0):
         if symbol in self.positions and position_idx < len(self.positions[symbol]):
             pos = self.positions[symbol].pop(position_idx)
+
+            # Simplified profit calculation
+            profit = (exit_price * amount) - (pos['entry_price'] * amount) - pos['entry_fee'] - exit_fee
 
             trade = {
                 'symbol': symbol,
                 'entry_price': pos['entry_price'],
                 'exit_price': exit_price,
-                'amount': pos['amount'],
+                'amount': amount,
                 'entry_fee': pos['entry_fee'],
                 'exit_fee': exit_fee,
                 'entry_total_base': pos['entry_total_base'],
-                'exit_total_base': total_base if total_base > 0 else (exit_price * pos['amount']),
+                'exit_total_base': total_base if total_base > 0 else (exit_price * amount),
                 'profit': profit,
                 'trigger_data': trigger_data,
                 'entry_timestamp': pos['timestamp'],
