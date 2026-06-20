@@ -256,9 +256,11 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
             equity[i] = balance + (pos_amt * prices[i])
 
         # 3. Sliding the Window (O(N))
-        # Profit = Equity[current_index + eval_window] - Equity[current_index]
+        # Profit = Percentage change over the window
         if len(equity) > eval_window:
-            profits = equity[eval_window:] - equity[:-eval_window]
+            # Shifted equity to avoid division by zero
+            denom = np.where(equity[:-eval_window] <= 0, 100.0, equity[:-eval_window])
+            profits = (equity[eval_window:] - equity[:-eval_window]) / denom
 
             # Find peaks (top 5 non-overlapping or simply top 5)
             # Documentation says "Top 5 Profitable Windows"
@@ -298,6 +300,12 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
                 })
 
     patterns.sort(key=lambda x: x['profit'], reverse=True)
+
+    # Calculate total performance over entire history for recommendations
+    total_history_profit = float((equity[-1] - equity[0]) / 100.0)
+    for p in patterns:
+        p['total_history_profit'] = total_history_profit
+
     return symbol, patterns[:5]
 
 def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None, ohlcv_cache_manager=None, priority_symbols=None, bot_state=None):
@@ -467,6 +475,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
                             avg_profit = patterns[0]['profit']
 
                         best_for_symbol = patterns[0].copy()
+                        # Use total history profit for the recommendation
+                        avg_profit = best_for_symbol.get('total_history_profit', avg_profit)
                         best_for_symbol['avg_bench_profit'] = avg_profit
                         best_per_symbol[sym] = best_for_symbol
                         if data_manager:
