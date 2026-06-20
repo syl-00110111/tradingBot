@@ -164,7 +164,7 @@ async def execute_buy(exchange, data_manager, engine, symbol, data, config, avai
 
     # Calculate initial amount to check liquidity
     quote_curr = symbol.split('/')[1]
-    ticker = await exchange.watch_ticker(symbol)
+    ticker = await exchange.fetch_ticker(symbol)
     initial_price = ticker['last'] if ticker else 0
     amount = engine.calculate_position_size(balance, initial_price, quote_curr, win_streak=win_streak, exchange=exchange, symbol=symbol, data_manager=data_manager)
 
@@ -340,7 +340,7 @@ async def initialize_wallet_positions(exchange, data_manager, pattern_manager, e
         if not symbol: continue
 
         # Check if it's dust
-        ticker = await exchange.watch_ticker(symbol)
+        ticker = await exchange.fetch_ticker(symbol)
         curr_price = ticker['last'] if ticker else 0
 
         is_dust = False
@@ -482,7 +482,7 @@ async def interactive_sell(exchange, data_manager, engine, config, console):
         min_amount = market['limits']['amount']['min']
         min_cost = market['limits']['cost']['min'] or 10
 
-        ticker = await exchange.watch_ticker(symbol)
+        ticker = await exchange.fetch_ticker(symbol)
         if not ticker: continue
 
         price = ticker['last']
@@ -554,13 +554,13 @@ async def show_balance(exchange, config, console, table_class):
             ticker = None
             for bc in [base_bet_curr, 'USDT', 'USDC']:
                 candidate = f"{asset}/{bc}"
-                ticker = await exchange.watch_ticker(candidate)
+                ticker = await exchange.fetch_ticker(candidate)
                 if ticker and ticker.get('last', 0) > 0:
                      val_in_base = total * ticker['last']
                      break
             if not ticker or ticker.get('last', 0) <= 0:
-                ticker_usdt = await exchange.watch_ticker(f"{asset}/USDT")
-                ticker_base_usdt = await exchange.watch_ticker(f"{base_bet_curr}/USDT")
+                ticker_usdt = await exchange.fetch_ticker(f"{asset}/USDT")
+                ticker_base_usdt = await exchange.fetch_ticker(f"{base_bet_curr}/USDT")
                 if ticker_usdt and ticker_base_usdt and ticker_base_usdt['last'] > 0:
                     val_in_base = (total * ticker_usdt['last']) / ticker_base_usdt['last']
 
