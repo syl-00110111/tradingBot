@@ -207,246 +207,91 @@ async def run_benchmark_for_strategy(symbol, strategy, config, term_to_test, agg
 
 async def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None, threshold_conv=1.0):
     """
-    Implements the O(N) Sliding Window Algorithm as described in ALGO_FENETRE_GLISSANTE.md.
-    Instead of re-running full backtests, we calculate the equity curve once and slide a window.
+    Bare-bone benchmarking: backtest strategies on the provided history (max 400 candles)
+    and return patterns for Success Pattern Matching (SPM).
     """
-    eval_window = 60
-    profit_threshold = 0.01
-    profit_threshold *= threshold_conv
     now_ts = time.time()
     patterns = []
 
-    # 1. Global Signal Generation (Vectorized)
-    df_base = get_common_indicators(df_in, device)
-    base_cols = [c for c in df_base.columns if c not in ['buy_signal', 'sell_signal', 'buy_candidate', 'sell_candidate', 'tendency']]
-    df_base = df_base[base_cols]
+    # Limit to latest 400 candles as per requirement
+    df_work = df_in.tail(400).copy()
 
-    fee_rate = 0.001 # Default fallback
+    # Pre-calculate common indicators once
+    df_work = get_common_indicators(df_work, device)
 
     for strategy in strategies:
-        df_strat = df_base.copy()
-        test_cfg = {'strategy': strategy, 'device': device or torch.device('cpu')}
-        df_strat = get_signals(df_strat, test_cfg, is_backtest=True)
+        res = await run_backtest_logic(
+            None, symbol, strategy, 'balanced', config,
+            df_in=df_work, engine=engine, device=device,
+            skip_mc=True, copy_df=True
+        )
 
-        # 2. Equity Mapping (O(N))
-        # We calculate a simplified equity curve based on signals
-        prices = df_strat['close'].values
-        buys = df_strat['buy_signal'].values
-        sells = df_strat['sell_signal'].values
+        if res:
+            patterns.append({
+                'strategy': strategy,
+                'aggr': 'balanced',
+                'symbol': symbol,
+                'profit': res['profit'],
+                'win_rate': res['win_rate'],
+                'max_dd': res['max_dd'],
+                'start_time': res['start_time'],
+                'end_time': res['end_time'],
+                'start_ts': res['start_ts'],
+                'prices': res['prices'],
+                'volumes': res['volumes'],
+                'tech_state': res['tech_state'],
+                'mc_score': res.get('mc_score', 1.0),
+                'last_bench_ts': now_ts
+            })
 
-        equity = np.zeros(len(prices))
-        balance = 100.0
-        pos_amt = 0
-
-        for i in range(len(prices)):
-            if pos_amt == 0 and buys[i]:
-                pos_amt = (balance * (1 - fee_rate)) / prices[i]
-                balance = 0
-            elif pos_amt > 0 and sells[i]:
-                balance = pos_amt * prices[i] * (1 - fee_rate)
-                pos_amt = 0
-            equity[i] = balance + (pos_amt * prices[i])
-
-        # 3. Sliding the Window (O(N))
-        # Profit = Percentage change over the window
-        if len(equity) > eval_window:
-            # Shifted equity to avoid division by zero
-            denom = np.where(equity[:-eval_window] <= 0, 100.0, equity[:-eval_window])
-            profits = (equity[eval_window:] - equity[:-eval_window]) / denom
-
-            # Find peaks (top 5 non-overlapping or simply top 5)
-            # Documentation says "Top 5 Profitable Windows"
-            top_indices = np.argsort(profits)[-10:] # Get some extras to filter
-
-            found_indices = []
-            for idx in reversed(top_indices):
-                if profits[idx] < profit_threshold: continue
-
-                # Check for overlap to get diverse patterns
-                if any(abs(idx - prev) < eval_window // 2 for prev in found_indices):
-                    continue
-
-                found_indices.append(idx)
-                if len(found_indices) >= 5: break
-
-            for idx in found_indices:
-                window_df = df_strat.iloc[idx : idx + eval_window]
-                latest = window_df.iloc[-1]
-                patterns.append({
-                    'strategy': strategy, 'aggr': 'balanced', 'symbol': symbol,
-                    'profit': float(profits[idx]), 'win_rate': 1.0, 'max_dd': 0.0,
-                    'start_time': window_df.iloc[0]['timestamp'].strftime("%Y-%m-%d %H:%M"),
-                    'end_time': latest['timestamp'].strftime("%Y-%m-%d %H:%M"),
-                    'start_ts': window_df.iloc[0]['timestamp'].timestamp(),
-                    'prices': window_df['close'].tolist(),
-                    'volumes': window_df['volume'].tolist(),
-                    'tech_state': {
-                        'rsi': float(latest.get('rsi', 50)),
-                        'adx': float(latest.get('adx', 0)),
-                        'volatility': float(latest.get('volatility', 0)),
-                        'ema_f': float(latest.get('ema_f', 0)),
-                        'ema_s': float(latest.get('ema_s', 0))
-                    },
-                    'mc_score': 1.1, # Default
-                    'last_bench_ts': now_ts
-                })
-
+    # Sort by profit and return patterns
     patterns.sort(key=lambda x: x['profit'], reverse=True)
-
-    # Calculate total performance over entire history for recommendations
-    total_history_profit = float((equity[-1] - equity[0]) / 100.0)
-    for p in patterns:
-        p['total_history_profit'] = total_history_profit
-
-    return symbol, patterns[:5]
+    return symbol, patterns
 
 async def run_benchmark_mode(exchange, config, args, shutdown_event, global_pattern_pool, benchmarking_pairs, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None, ohlcv_cache_manager=None, priority_symbols=None, bot_state=None):
-    term_to_test = 'short'
-    timeframe = '1m'
-
     from indicators import STRATEGIES
-    strategies = STRATEGIES
-    aggrs = ['balanced']
 
-    all_pairs = list(config.get('pairs', {}).keys())
-    if symbols_to_process:
-        symbols = symbols_to_process
-    elif args and args.symbol:
-        symbols = [args.symbol]
-    else:
-        symbols = all_pairs
+    symbols = symbols_to_process or ( [args.symbol] if args and args.symbol else list(config.get('pairs', {}).keys()) )
 
-    # Prioritize symbols with open positions
-    open_pos_symbols = []
-    if data_manager:
-        open_pos_symbols = [s for s, pos in data_manager.get_open_positions().items() if pos]
-
-    if open_pos_symbols:
-        priority_set = set(open_pos_symbols)
-        symbols = [s for s in symbols if s in priority_set] + [s for s in symbols if s not in priority_set]
-    elif priority_symbols:
-        # Move priority symbols to the front
-        priority_set = set(priority_symbols)
-        symbols = [s for s in symbols if s.split('/')[0] in priority_set] + [s for s in symbols if s.split('/')[0] not in priority_set]
-
-    base_bet_curr = get_base_currency(None, config)
-    cache_mgr = CacheManager()
-    best_overall = {t: {'profit': -999, 'params': None} for t in ['short', 'total']}
     best_per_symbol = {}
-    optimization_map = {}
-    symbol_data_map = {}
 
-    # Sequential processing
+    console.print("\n[bold magenta]=== BARE-BONE BENCHMARK ===[/]")
+
     for i, sym in enumerate(symbols):
         if shutdown_event.is_set(): break
-        if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Processing {sym}...")
+        if status: status.update(f"[bold cyan][{i+1}/{len(symbols)}] Benchmarking {sym}...")
+        else: console.print(f"[{i+1}/{len(symbols)}] Benchmarking {sym}...")
 
         try:
-            cached_patterns = cache_mgr.get(sym, term_to_test)
-            best_cached = None
-
-            if cached_patterns:
-                best_cached = cached_patterns[0]
-                now_ts = time.time()
-                p_len = len(best_cached.get('prices', []))
-                p_duration_secs = p_len * 60
-                spm_threshold_secs = p_duration_secs * 0.05 if p_len > 0 else (3600 * 24)
-
-                if now_ts - best_cached.get('last_bench_ts', 0) <= spm_threshold_secs:
-                    best_per_symbol[sym] = best_cached.copy()
-                    optimization_map[sym] = best_cached
-                    if data_manager:
-                        pattern_manager.set_patterns(sym, cached_patterns)
-                    continue
-
-            # Fetch deep history sequentially (this uses REST but let's assume it's for initial bench)
-            # User instruction 1 says "use only ccxt.pro" and Instruction 2 global design mentions "benchmark sequentially on symbols"
-            # It's likely we need some history for benchmarks.
-            limit = 1000
-            ohlcv, _ = await fetch_ohlcv_incremental(exchange, sym, timeframe, ohlcv_cache_manager, limit=limit)
+            # Fetch latest 400 candles
+            limit = 400
+            ohlcv, _ = await fetch_ohlcv_incremental(exchange, sym, '1m', ohlcv_cache_manager, limit=limit)
             if not ohlcv: continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
-            # Run benchmark sequentially
-            _, patterns = await run_benchmark_for_symbol(sym, config, term_to_test, aggrs, strategies, df, engine, device)
+            _, patterns = await run_benchmark_for_symbol(sym, config, 'short', ['balanced'], STRATEGIES, df, engine, device)
 
             if patterns:
-                bench_threshold = config.get('profit_thresholds', {}).get('bench_avg_threshold', 0.05)
-                winning_patterns = [p for p in patterns if p['profit'] >= bench_threshold]
-                avg_profit = sum(p['profit'] for p in winning_patterns) / len(winning_patterns) if winning_patterns else patterns[0]['profit']
+                best = patterns[0]
+                best_per_symbol[sym] = best
+                console.print(f"  > {sym}: [bold green]{best['strategy']}[/] (Profit: {best['profit']:.4f})")
 
-                best_for_symbol = patterns[0].copy()
-                avg_profit = best_for_symbol.get('total_history_profit', avg_profit)
-                best_for_symbol['avg_bench_profit'] = avg_profit
-                best_per_symbol[sym] = best_for_symbol
+                if pattern_manager:
+                    pattern_manager.set_patterns(sym, [best], save=True)
 
-                if data_manager:
-                    pattern_manager.set_patterns(sym, patterns, save=False)
+                if global_pattern_pool is not None:
+                    # Keep pool fresh with the best patterns
+                    global_pattern_pool[:] = [p for p in global_pattern_pool if p.get('symbol') != sym]
+                    global_pattern_pool.append(best)
 
-                if bot_state is not None and sym in bot_state:
+                if bot_state and sym in bot_state:
                     bot_state[sym].update({
-                        'aggr': best_for_symbol['aggr'],
-                        'strategy': best_for_symbol['strategy'],
-                        'bench_profit': avg_profit
+                        'strategy': best['strategy'],
+                        'bench_profit': best['profit'],
+                        'active_pattern': best
                     })
-
-                if sym in config.get('pairs', {}):
-                    config['pairs'][sym].update({
-                        'aggr': best_for_symbol['aggr'],
-                        'strategy': best_for_symbol['strategy'],
-                        'expected_profit': avg_profit
-                    })
-
-                cache_mgr.set(sym, term_to_test, patterns, save=False)
-                optimization_map[sym] = best_for_symbol
-
-                if best_for_symbol['profit'] > best_overall['short']['profit']:
-                    best_overall['short'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
-
-                if best_for_symbol['profit'] > best_overall['total']['profit']:
-                     best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
-
         except Exception as e:
             logging.error(f"Error benchmarking {sym}: {e}")
 
-    # Final maintenance
-    cache_mgr.save_all()
-    if data_manager: pattern_manager.save_all()
-
-    if term_override:
-        global_pattern_pool.clear()
-        all_pairs = list(config.get('pairs', {}).keys())
-        for sym in all_pairs:
-            patterns = pattern_manager.get_patterns(sym)
-            global_pattern_pool.extend(patterns)
-        benchmarking_pairs.difference_update(set(symbols))
-
-        gc.collect()
-        if device.type == 'cuda' and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return optimization_map
-
-    console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
-    found_any = False
-    for term in ['short', 'total']:
-        label = term.upper()
-        data = best_overall.get(term)
-        if not data: continue
-        if data['params']:
-            found_any = True
-            strat, aggr, sym = data['params']
-            console.print(f"[{label}] Best Performance on {sym}:")
-            console.print(f"  > [bold cyan]Strategy:[/] {strat}")
-            console.print(f"  > [bold cyan]Agressivity:[/] {aggr}")
-            console.print(f"  > [bold green]Estimated Gain:[/] {format_price(data['profit'])} {base_bet_curr}\n")
-
-    if not found_any:
-        if total_balance > 0:
-            msg_threshold_val = min(0.01, total_balance * threshold_pct)
-        else:
-            msg_threshold_val = 0.01
-
-        msg_threshold = f"{msg_threshold_val:.4g} {base_bet_curr}"
-        console.print(f"[yellow]No successful patterns (> {msg_threshold}) were found in the scanned historical data.[/]")
     return best_per_symbol

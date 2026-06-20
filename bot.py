@@ -49,151 +49,78 @@ shutdown_event = asyncio.Event()
 console = Console()
 ui = dashboard.DashboardUI(console)
 
-async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, device, pattern_info, pattern_manager=None):
+async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, current_pattern, device, pattern_info, next_strategy=None, config=None, global_pattern_pool=None):
     """
-    CPU-intensive analysis task.
+    Bare-bone analysis:
+    1. Backtest the next rolling strategy.
+    2. If it's better than the current one, update.
+    3. Use the best strategy's pattern for SPM.
     """
     try:
-        # 1. Indicators
-        df = get_common_indicators(df, device)
+        from optimization import run_backtest_logic
+        from indicators import STRATEGIES, get_common_indicators, get_signals
 
-        # SPM: Try to find new patterns in the current in-memory history (O(N))
-        from optimization import run_benchmark_for_symbol
-        from indicators import STRATEGIES
+        # 1. Backtest rolling strategy
+        if next_strategy:
+            df_bench = df.tail(400).copy()
+            res_bench = await run_backtest_logic(None, symbol, next_strategy, 'balanced', config or {}, df_in=df_bench, device=device, skip_mc=True)
 
-        # Always attempt to discover new patterns from current history to keep pool fresh
-        _, new_patterns = await run_benchmark_for_symbol(symbol, {}, 'short', ['balanced', 'aggressive', 'conservative'], STRATEGIES, df, device=device)
+            current_profit = current_pattern.get('profit', -999) if current_pattern else -999
 
-        # Merge new patterns with existing ones for this session
-        combined_pool = search_pool + new_patterns
+            if res_bench and res_bench['profit'] > current_profit:
+                logging.info(f"[{symbol}] Rolling: {next_strategy} ({res_bench['profit']:.4f}) is better than current ({current_profit:.4f}). Updating.")
+                current_pattern = {
+                    'strategy': next_strategy,
+                    'profit': res_bench['profit'],
+                    'prices': res_bench['prices'],
+                    'volumes': res_bench['volumes'],
+                    'tech_state': res_bench['tech_state'],
+                    'win_rate': res_bench['win_rate'],
+                    'symbol': symbol
+                }
+                if global_pattern_pool is not None:
+                    # Keep pool fresh with the best patterns
+                    global_pattern_pool[:] = [p for p in global_pattern_pool if p.get('symbol') != symbol]
+                    global_pattern_pool.append(current_pattern)
 
-        current_pattern_id = pattern_info.get('active_pattern_id')
-        pattern_match_ts = pattern_info.get('pattern_match_ts', 0)
-        last_mc_ts = pattern_info.get('last_mc_ts', 0)
-        last_mc_score = pattern_info.get('mc_score', 1.1)
-        candle_ts = df.iloc[-1]['timestamp']
+        if not current_pattern:
+            return {'symbol': symbol, 'trigger_rebenchmark': True, 'buy_signal': False, 'sell_signal': False}
 
-        # 2. Similarity Matching (Vectorized Batch)
-        active_patterns = []
-        if combined_pool:
-            active_patterns = calculate_similarity_batch(df, combined_pool, device=device)
+        # 2. SPM Matching
+        sim = calculate_similarity(df, current_pattern, device=device)
 
-        candidates = []
-        for item in active_patterns:
-            p = item['pattern']
-            p_id = f"{p.get('symbol')}_{p.get('start_time')}_{p.get('strategy')}"
-            p_match_ts = pattern_match_ts if p_id == current_pattern_id else candle_ts
-            p_len = len(p['prices'])
-            p_expired = (abs(candle_ts - p_match_ts) // tf_secs) >= p_len
-
-            p_tech = p.get('tech_state', {})
-            latest_row = df.iloc[-1]
-            curr_adx = latest_row.get('adx', 0)
-            curr_vol = latest_row.get('volatility', 0)
-            p_adx = p_tech.get('adx', curr_adx)
-            p_vol = p_tech.get('volatility', curr_vol)
-
-            p_regime_shift = False
-            if p_adx > 0 and abs(curr_adx - p_adx) / p_adx > 0.50: p_regime_shift = True
-            if p_vol > 0 and abs(curr_vol - p_vol) / p_vol > 0.50: p_regime_shift = True
-
-            item['expired'] = p_expired
-            item['regime_shift'] = p_regime_shift
-            item['id'] = p_id
-            candidates.append(item)
-
-        # 3. Selection
-        active_pattern = None
-        active_pattern_id = None
-        if candidates:
-            candidates.sort(key=lambda x: x['sim'], reverse=True)
-            active_pattern = candidates[0]['pattern']
-            active_pattern_id = candidates[0]['id']
-            logging.info(f"[{symbol}] Found {len(candidates)} pattern candidates. Best sim: {candidates[0]['sim']:.4f} ({active_pattern['strategy']})")
-        else:
-            logging.info(f"[{symbol}] No matching patterns found in pool (Pool size: {len(search_pool)})")
-
+        # 3. Strategy Execution (if similarity is good)
         latest = df.iloc[-1]
-        if active_pattern:
-            if active_pattern_id != current_pattern_id:
-                pattern_match_ts = candle_ts
-                current_pattern_id = active_pattern_id
+        buy_signal = False
+        sell_signal = False
 
-            curr_adx = latest.get('adx', 0)
-            curr_vol = latest.get('volatility', 0)
+        if sim > 0.70:
+            settings = {'strategy': current_pattern['strategy'], 'device': device}
+            df_signals = get_signals(df.copy(), settings)
+            latest_sig = df_signals.iloc[-1]
+            buy_signal = latest_sig.get('buy_signal', False)
+            sell_signal = latest_sig.get('sell_signal', False)
 
-            # Replicate get_dynamic_settings logic with dynamic labeling
-            settings = {
-                "ema_fast": 9, "ema_slow": 21, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
-                "label": "balanced"
-            }
-            if curr_adx > 25:
-                settings.update({
-                    "ema_fast": 10, "ema_slow": 30,
-                    "rsi_buy": 40, "rsi_sell": 60,
-                    "label": "aggressive"
-                })
-            elif curr_vol > 0.01:
-                settings.update({
-                    "ema_fast": 30, "ema_slow": 100,
-                    "rsi_buy": 20, "rsi_sell": 80,
-                    "label": "conservative"
-                })
+        res = {
+            'symbol': symbol,
+            'price': latest['close'],
+            'strategy': current_pattern['strategy'],
+            'bench_profit': current_pattern['profit'],
+            'sim': sim,
+            'buy_signal': buy_signal,
+            'sell_signal': sell_signal,
+            'active_pattern': current_pattern,
+            'last_processed_ts': latest['timestamp']
+        }
+        return res
 
-            settings.update({'strategy': active_pattern['strategy'], 'device': device})
-            df = get_signals(df, settings, is_backtest=False)
-            latest = df.iloc[-1]
-            if latest.get('buy_signal'): logging.info(f"[{symbol}] BUY signal triggered by strategy {active_pattern['strategy']}")
-            if latest.get('sell_signal'): logging.info(f"[{symbol}] SELL signal triggered by strategy {active_pattern['strategy']}")
-
-            p_len = len(active_pattern['prices'])
-            expired = (abs(candle_ts - pattern_match_ts) // tf_secs) >= p_len
-            regime_shift = False # Already checked above
-            if curr_adx > 0 and abs(curr_adx - active_pattern.get('tech_state', {}).get('adx', curr_adx)) / curr_adx > 0.50: regime_shift = True
-
-            trigger_rebench = False
-            if expired or regime_shift:
-                p_duration_secs = p_len * tf_secs
-                if (time.time() - pattern_match_ts) > (p_duration_secs * 0.05):
-                    trigger_rebench = True
-
-            res = {
-                'symbol': symbol,
-                'price': latest['close'],
-                'mc_score': active_pattern.get('mc_score', 1.1),
-                'ema_f': latest.get('ema_f', 0),
-                'ema_s': latest.get('ema_s', 0),
-                'macd_hist': latest.get('macd_hist', 0),
-                'rsi': latest.get('rsi', 0),
-                'adx': latest.get('adx', 0),
-                'volatility': latest.get('volatility', 0),
-                'whale_active': latest.get('whale_active', 0),
-                'is_mean_rev': latest.get('is_mean_rev', 0),
-                'tendency': latest.get('tendency', 'Neutral'),
-                'buy_signal': latest.get('buy_signal', False),
-                'sell_signal': latest.get('sell_signal', False),
-                'strategy': active_pattern['strategy'],
-                'aggr': settings.get('label', active_pattern['aggr']),
-                'bench_profit': active_pattern.get('avg_bench_profit', active_pattern['profit']),
-                'score': latest.get('score', active_pattern.get('mc_score', pattern_info.get('mc_score', 1.1))),
-                'active_pattern_id': active_pattern_id,
-                'pattern_match_ts': pattern_match_ts,
-                'last_mc_ts': last_mc_ts,
-                'last_processed_ts': candle_ts,
-                'last_20_candles': {'prices': df['close'].tail(20).tolist(), 'volumes': df['volume'].tail(20).tolist()},
-                'last_100_candles': {'prices': df['close'].tail(100).tolist(), 'volumes': df['volume'].tail(100).tolist()},
-                'trigger_rebenchmark': trigger_rebench
-            }
-            return res
-        else:
-            return {'symbol': symbol, 'price': latest['close'], 'trigger_rebenchmark': True, 'no_patterns': True, 'buy_signal': False, 'sell_signal': False}
     except Exception as e:
+        logging.error(f"Analysis error for {symbol}: {e}")
         return {'symbol': symbol, 'error': str(e)}
 
-def wrapped_analysis_task(symbol, timeframe, tf_secs, df, search_pool, device, pattern_info):
+def wrapped_analysis_task(symbol, timeframe, tf_secs, df, current_pattern, device, pattern_info):
     """Picklable wrapper for the analysis task."""
-    return perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, device, pattern_info)
+    return perform_analysis_calculation(symbol, timeframe, tf_secs, df, current_pattern, device, pattern_info)
 
 def setup_bot_state(config, data_manager, bot_state):
     """Initializes the bot state for all configured pairs, using cache if available."""
@@ -249,20 +176,25 @@ async def run_initial_benchmarking(exchange, config, args, shutdown_event, globa
     if args.mode in ['simulation', 'virtual', 'live']:
         await trading_engine.initialize_wallet_positions(exchange, data_manager, pattern_manager, engine, config, bot_state)
 
+    # Bare-bone benchmarking at startup
+    import optimization
+    await optimization.run_benchmark_mode(
+        exchange, config, args, shutdown_event, global_pattern_pool,
+        benchmarking_pairs, data_manager=data_manager, engine=engine,
+        device=device, ohlcv_cache_manager=ohlcv_cache_manager, bot_state=bot_state
+    )
+
     for symbol in config['pairs']:
         pos_list = data_manager.get_positions(symbol)
-        # Default values as we don't have benchmarks anymore
-        if 'aggr' not in config['pairs'][symbol]: config['pairs'][symbol]['aggr'] = 'balanced'
-        if 'strategy' not in config['pairs'][symbol]: config['pairs'][symbol]['strategy'] = 'simple_ema'
-        if 'expected_profit' not in config['pairs'][symbol]: config['pairs'][symbol]['expected_profit'] = 0
+        state = bot_state.get(symbol, {})
 
         bot_state[symbol].update({
-            'aggr': config['pairs'][symbol]['aggr'],
-            'strategy': config['pairs'][symbol]['strategy'],
+            'aggr': 'balanced',
             'last_action': 'BUY' if pos_list else 'Waiting',
             'positions': pos_list,
             'position': pos_list[0] if pos_list else None,
-            'bench_profit': config['pairs'][symbol]['expected_profit']
+            'strategy': state.get('strategy', 'simple_ema'),
+            'bench_profit': state.get('bench_profit', 0)
         })
 
 async def main():
