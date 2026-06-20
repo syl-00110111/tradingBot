@@ -135,6 +135,9 @@ class ExecutionService:
              return
 
         if analysis_res.get('buy_signal'):
+            data['consecutive_buys'] = data.get('consecutive_buys', 0) + 1
+            data['consecutive_sells'] = 0
+
             # Double check with Monte Carlo and Order Book
             # Limit to 3 concurrent positions (buyings in-a-row) per pair
             positions = data.get('positions', [])
@@ -149,8 +152,12 @@ class ExecutionService:
                     )
                     if success:
                         data['last_acted_ts'] = current_candle_ts
+                        data['consecutive_buys'] = 0
 
         elif analysis_res.get('sell_signal'):
+            data['consecutive_sells'] = data.get('consecutive_sells', 0) + 1
+            data['consecutive_buys'] = 0
+
             positions = data.get('positions', [])
             if positions:
                 for idx, pos in enumerate(positions):
@@ -163,6 +170,7 @@ class ExecutionService:
 
                     if success:
                         data['last_acted_ts'] = current_candle_ts
+                        data['consecutive_sells'] = 0
                         break
 
                     # 2. If profit not sure, perform term escalation
