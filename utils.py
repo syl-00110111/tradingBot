@@ -7,7 +7,6 @@ import sys
 import platform
 import datetime
 import random
-import threading
 import signal
 import logging
 import queue
@@ -29,7 +28,6 @@ def sound_worker():
         except Exception:
             pass
 
-threading.Thread(target=sound_worker, daemon=True).start()
 
 def _execute_play_sound(action, config):
     system = platform.system().lower()

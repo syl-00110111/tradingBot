@@ -58,12 +58,12 @@ class TradingEngine:
         min_exit_price = entry_price * (1 + fee_rate * 2)
         return exit_price > min_exit_price
 
-    def check_sure_profit(self, exchange, symbol, amount, entry_price, fee_rate=0.0015):
+    async def check_sure_profit(self, exchange, symbol, amount, entry_price, fee_rate=0.0015):
         """
         Perfect trader logic: verifies that a sell RIGHT NOW would be profitable.
         Used to ensure "profit is sure".
         """
-        effective_sell_price = exchange.get_effective_price(symbol, 'sell', amount)
+        effective_sell_price = await exchange.get_effective_price(symbol, 'sell', amount)
         return self.is_profitable(effective_sell_price, entry_price, fee_rate)
 
     def validate_trade_mc(self, symbol, data, config):
@@ -153,9 +153,9 @@ class TradingEngine:
         if current_price > 0: return final_trade_amount_quote / current_price
         return 0
 
-def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, available_assets, suspended_pairs, balance=None):
+async def execute_buy(exchange, data_manager, engine, symbol, data, config, available_assets, suspended_pairs, balance=None):
     # Perfect Trader: ALWAYS fetch fresh balance and order book before considering execution
-    balance = exchange.fetch_balance()
+    balance = await exchange.fetch_balance()
     if not balance:
         logging.error(f"[{symbol}] Buy aborted: Failed to fetch fresh balance.")
         return False
@@ -164,7 +164,8 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
 
     # Calculate initial amount to check liquidity
     quote_curr = symbol.split('/')[1]
-    initial_price = exchange.fetch_ticker(symbol)['last']
+    ticker = await exchange.watch_ticker(symbol)
+    initial_price = ticker['last'] if ticker else 0
     amount = engine.calculate_position_size(balance, initial_price, quote_curr, win_streak=win_streak, exchange=exchange, symbol=symbol, data_manager=data_manager)
 
     if amount <= 0:
@@ -172,7 +173,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
         return False
 
     # Get effective price considering slippage
-    effective_buy_price = exchange.get_effective_price(symbol, 'buy', amount)
+    effective_buy_price = await exchange.get_effective_price(symbol, 'buy', amount)
     if effective_buy_price <= 0:
         return False
     base_currency = symbol.split('/')[1]
@@ -189,7 +190,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
 
     # Check NOTIONAL / Minimum Cost filter
     try:
-        markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+        markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else await exchange.load_markets()
         if symbol in markets:
             min_cost = markets[symbol]['limits']['cost']['min'] or 0
             if cost < min_cost:
@@ -199,7 +200,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
     except Exception as e:
         logging.debug(f"[{symbol}] Could not verify notional limit: {e}")
 
-    order = exchange.create_order(symbol, 'buy', amount)
+    order = await exchange.create_order(symbol, 'buy', amount)
     if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
         logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
         suspended_pairs.add(symbol)
@@ -223,17 +224,17 @@ def execute_buy(exchange, data_manager, engine, symbol, data, config, bot_lock, 
 
         # Immediately update Sellable list
         asset = symbol.split('/')[0]
-        with bot_lock:
-            if asset not in available_assets:
-                available_assets.append(asset)
-                available_assets.sort()
+
+        if asset not in available_assets:
+            available_assets.append(asset)
+            available_assets.sort()
 
         return True
     else:
         logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {format_amount(amount)}")
     return False
 
-def execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0, force=False):
+async def execute_sell(exchange, data_manager, engine, symbol, data, config, position_idx=0, force=False):
     positions = data_manager.get_positions(symbol)
     if not positions or position_idx >= len(positions):
         return False
@@ -241,13 +242,13 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
     position = positions[position_idx]
 
     # Perfect Trader: ALWAYS fetch fresh balance and order book before considering execution
-    balance = exchange.fetch_balance()
+    balance = await exchange.fetch_balance()
     if not balance:
         logging.error(f"[{symbol}] Sell aborted: Failed to fetch fresh balance.")
         return False
 
-    effective_sell_price = exchange.get_effective_price(symbol, 'sell', position['amount'])
-    fee_rate = exchange.fetch_trading_fee(symbol)
+    effective_sell_price = await exchange.get_effective_price(symbol, 'sell', position['amount'])
+    fee_rate = await exchange.fetch_trading_fee(symbol)
 
     # "Profit is sure" check
     if not force and not engine.is_profitable(effective_sell_price, position['entry_price'], fee_rate=fee_rate):
@@ -271,7 +272,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
                 return False
 
     if is_simulation or free_balance >= sell_amount:
-        order = exchange.create_order(symbol, 'sell', sell_amount)
+        order = await exchange.create_order(symbol, 'sell', sell_amount)
         if isinstance(order, dict) and order.get('error') == 'dust_limit':
             logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
             data_manager.flag_ignore_sell(symbol)
@@ -296,10 +297,10 @@ def execute_sell(exchange, data_manager, engine, symbol, data, config, position_
         logging.warning(f"[{symbol}] Sell aborted: Insufficient balance ({format_amount(free_balance)} < {format_amount(sell_amount)})")
         return False
 
-def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine, config, bot_state):
+async def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine, config, bot_state):
     """Syncs real wallet assets into the bot's tracked positions by fetching balance and trade history."""
     logging.info("Initializing positions from real wallet inventory and API history...")
-    balance = exchange.fetch_balance()
+    balance = await exchange.fetch_balance()
     if not balance:
         logging.error("Failed to fetch balance for initialization.")
         return
@@ -320,7 +321,7 @@ def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine,
                 break
 
         if not symbol:
-            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else await exchange.load_markets()
             for bc in base_currencies:
                 candidate = f"{asset}/{bc}"
                 if candidate in markets:
@@ -339,12 +340,12 @@ def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine,
         if not symbol: continue
 
         # Check if it's dust
-        ticker = exchange.fetch_ticker(symbol)
+        ticker = await exchange.watch_ticker(symbol)
         curr_price = ticker['last'] if ticker else 0
 
         is_dust = False
         try:
-            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else await exchange.load_markets()
             if symbol in markets:
                 m = markets[symbol]
                 min_amt = m['limits']['amount']['min']
@@ -359,7 +360,7 @@ def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine,
 
         # Fetch trade history to determine entry price
         entry_price = 0
-        trades = exchange.fetch_my_trades(symbol, limit=50)
+        trades = await exchange.fetch_my_trades(symbol, limit=50)
         if trades:
             buy_trades = [t for t in trades if t['side'] == 'buy']
             if buy_trades:
@@ -380,9 +381,9 @@ def initialize_wallet_positions(exchange, data_manager, pattern_manager, engine,
                     bot_state[symbol]['positions'] = data_manager.get_positions(symbol)
                     bot_state[symbol]['last_action'] = 'BUY'
 
-def sync_live_positions(exchange, data_manager, config):
+async def sync_live_positions(exchange, data_manager, config):
     """Verifies that all tracked positions in DataManager still exist in the exchange wallet."""
-    balance = exchange.fetch_balance()
+    balance = await exchange.fetch_balance()
     if not balance: return
 
     balances = balance.get('total', balance)
@@ -398,13 +399,13 @@ def sync_live_positions(exchange, data_manager, config):
              while data_manager.get_positions(symbol):
                   data_manager.close_position(symbol, 0, 0, 0, {"note": "Pruned during sync"}, time.time(), position_idx=0)
 
-def get_sellable_assets_sim(data_manager):
+async def get_sellable_assets_sim(data_manager):
     positions = data_manager.get_open_positions()
     return sorted([s.split('/')[0] for s in positions.keys()])
 
-def get_sellable_assets_with_amounts(exchange, config=None):
+async def get_sellable_assets_with_amounts(exchange, config=None):
     """Returns a dict of {asset: amount} for assets that are not dust."""
-    balance = exchange.fetch_balance()
+    balance = await exchange.fetch_balance()
     if not balance: return {}
 
     result = {}
@@ -423,7 +424,7 @@ def get_sellable_assets_with_amounts(exchange, config=None):
                 break
 
         if not symbol:
-            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else await exchange.load_markets()
             for bc in base_currencies:
                 candidate = f"{asset}/{bc}"
                 if candidate in markets:
@@ -433,9 +434,9 @@ def get_sellable_assets_with_amounts(exchange, config=None):
         if not symbol: continue
 
         try:
-            ticker = exchange.fetch_ticker(symbol)
+            ticker = await exchange.watch_ticker(symbol)
             price = ticker['last'] if ticker else 0
-            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else await exchange.load_markets()
             if symbol in markets:
                 market = markets[symbol]
                 min_amount = market['limits']['amount']['min']
@@ -447,14 +448,14 @@ def get_sellable_assets_with_amounts(exchange, config=None):
             if amount > 0.000001: result[asset] = amount
     return result
 
-def get_sellable_assets(exchange, config=None):
+async def get_sellable_assets(exchange, config=None):
     amounts = get_sellable_assets_with_amounts(exchange, config)
     return sorted(list(amounts.keys()))
 
-def interactive_sell(exchange, data_manager, engine, config, console):
+async def interactive_sell(exchange, data_manager, engine, config, console):
     console.print("\n[bold magenta]=== Interactive Sell Mode (Real Wallet) ===[/]")
     play_sound("sell", config)
-    balance = exchange.fetch_balance()
+    balance = await exchange.fetch_balance()
     if not balance:
         console.print("[red]Error: Failed to fetch balance.[/]")
         return
@@ -474,14 +475,14 @@ def interactive_sell(exchange, data_manager, engine, config, console):
                 break
         if not symbol: continue
 
-        markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+        markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else await exchange.load_markets()
         if not markets or symbol not in markets: continue
 
         market = markets[symbol]
         min_amount = market['limits']['amount']['min']
         min_cost = market['limits']['cost']['min'] or 10
 
-        ticker = exchange.fetch_ticker(symbol)
+        ticker = await exchange.watch_ticker(symbol)
         if not ticker: continue
 
         price = ticker['last']
@@ -498,7 +499,7 @@ def interactive_sell(exchange, data_manager, engine, config, console):
         console.print(choice)
         if choice == 'y':
             console.print(f"[yellow]Selling {format_amount(amount)} {asset} at ~{format_price(price)} {quote}...[/]")
-            order = exchange.create_order(symbol, 'sell', amount)
+            order = await exchange.create_order(symbol, 'sell', amount)
             if order:
                 fee = order.get('calculated_fee', 0)
                 total_received = (amount * price) - fee
@@ -520,9 +521,9 @@ def interactive_sell(exchange, data_manager, engine, config, console):
         console.print(f"[yellow]{msg}[/]")
         logging.info(msg)
 
-def show_balance(exchange, config, console, table_class):
+async def show_balance(exchange, config, console, table_class):
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
-    balance = exchange.fetch_balance()
+    balance = await exchange.fetch_balance()
     if not balance:
         console.print("[red]Error: Failed to fetch balance.[/]")
         return
@@ -553,13 +554,13 @@ def show_balance(exchange, config, console, table_class):
             ticker = None
             for bc in [base_bet_curr, 'USDT', 'USDC']:
                 candidate = f"{asset}/{bc}"
-                ticker = exchange.fetch_ticker(candidate)
+                ticker = await exchange.watch_ticker(candidate)
                 if ticker and ticker.get('last', 0) > 0:
                      val_in_base = total * ticker['last']
                      break
             if not ticker or ticker.get('last', 0) <= 0:
-                ticker_usdt = exchange.fetch_ticker(f"{asset}/USDT")
-                ticker_base_usdt = exchange.fetch_ticker(f"{base_bet_curr}/USDT")
+                ticker_usdt = await exchange.watch_ticker(f"{asset}/USDT")
+                ticker_base_usdt = await exchange.watch_ticker(f"{base_bet_curr}/USDT")
                 if ticker_usdt and ticker_base_usdt and ticker_base_usdt['last'] > 0:
                     val_in_base = (total * ticker_usdt['last']) / ticker_base_usdt['last']
 
