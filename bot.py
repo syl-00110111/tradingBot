@@ -183,9 +183,11 @@ def make_dashboard(global_mode, config):
              if now_ts > logs_pause_until:
                   if logs_scroll_offset > 0:
                        logs_scroll_offset -= 1
+                       if logs_scroll_offset == 0:
+                            logs_pause_until = now_ts + 1
                   else:
                        logs_scroll_offset = max_logs_offset
-                       logs_pause_until = now_ts + 2
+                       logs_pause_until = now_ts + 1
 
         logs_scroll_offset = max(0, min(logs_scroll_offset, max_logs_offset))
         start = max(0, len(all_logs) - log_height - logs_scroll_offset)
@@ -237,9 +239,11 @@ def make_dashboard(global_mode, config):
              if now_ts > pairs_pause_until:
                   if pairs_scroll_offset < max_pairs_offset:
                        pairs_scroll_offset += 1
+                       if pairs_scroll_offset == max_pairs_offset:
+                            pairs_pause_until = now_ts + 1
                   else:
                        pairs_scroll_offset = 0
-                       pairs_pause_until = now_ts + 2
+                       pairs_pause_until = now_ts + 1
 
         pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
         visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
@@ -331,9 +335,11 @@ def make_dashboard(global_mode, config):
              if should_step and now_ts > status_pause_until:
                   if status_scroll_index < max_status_offset:
                        status_scroll_index += 1
+                       if status_scroll_index == max_status_offset:
+                            status_pause_until = now_ts + 1
                   else:
                        status_scroll_index = 0
-                       status_pause_until = now_ts + 2
+                       status_pause_until = now_ts + 1
 
              status_scroll_index = max(0, min(status_scroll_index, max_status_offset))
              status_display = status_text[status_scroll_index : status_scroll_index + display_width]
@@ -485,21 +491,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             time.sleep(5)
 
 
-def load_ohlcv_cache():
-    if os.path.exists('ohlcv_cache.pkl'):
-        try:
-            with open('ohlcv_cache.pkl', 'rb') as f:
-                return pickle.load(f)
-        except Exception: return {}
-    return {}
-
-def save_ohlcv_cache(cache):
-    with open('ohlcv_cache.pkl', 'wb') as f:
-        pickle.dump(cache, f)
-
 def main():
-    from persistence import load_from_archive
-    load_from_archive()
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
@@ -714,9 +706,6 @@ def main():
                 time.sleep(0.1)
     except KeyboardInterrupt:
         shutdown_event.set()
-        from persistence import create_consolidated_archive
-        save_ohlcv_cache(ohlcv_cache)
-        create_consolidated_archive()
 
     logging.info("Bot stopped gracefully.")
 
@@ -1541,7 +1530,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
         else: console.print(f"[bold blue]{msg}")
 
         # Pre-fetch historical data for all symbols in the process
-        ohlcv_cache = load_ohlcv_cache()
         symbol_data_map = {}
         term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
         timeframe = term_cfg.get('timeframe', '5m')
@@ -1643,9 +1631,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                         if best_for_symbol['profit'] > best_overall['total']['profit']:
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
-                save_ohlcv_cache(ohlcv_cache)
-                from persistence import create_consolidated_archive
-                create_consolidated_archive()
                 signal.signal(signal.SIGINT, original_handler)
 
     # If we are in optimization mode for live/sim, return the map
