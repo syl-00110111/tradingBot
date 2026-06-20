@@ -75,6 +75,18 @@ class TradingCore:
 
                 if self.live: self.live.refresh()
 
+                # 2b. Watch Tickers (All Symbols)
+                self.log("Step: watchTickers")
+                try:
+                    tickers = await asyncio.wait_for(self.exchange.watch_tickers(symbols), timeout=2.0)
+                    self.log(f"Tickers updated for {len(tickers)} symbols")
+                except asyncio.TimeoutError:
+                    self.log("watchTickers timeout, moving on")
+                except Exception as e:
+                    self.log(f"watchTickers failed: {e}")
+
+                if self.live: self.live.refresh()
+
                 # 3. Benchmark Sequentially on Symbols
                 self.log("Step: benchmark sequentially on symbols")
                 for symbol in symbols:
