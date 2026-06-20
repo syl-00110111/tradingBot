@@ -194,6 +194,10 @@ def get_signals(df, mode_config, is_backtest=False):
     choices = ["Neutral", "Range", "Bullish", "Bearish"]
     df['tendency'] = np.select(conditions, choices, default="Neutral")
 
+    # Initialize candidates to avoid Length Mismatch if a strategy fails to set them
+    if 'buy_candidate' not in df.columns: df['buy_candidate'] = False
+    if 'sell_candidate' not in df.columns: df['sell_candidate'] = False
+
     # Strategy Selection
     if df.empty:
         return finalize_signals(df)
