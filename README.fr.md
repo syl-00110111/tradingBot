@@ -69,7 +69,6 @@ Stockez vos identifiants et l'échange préféré :
     "base_bet": "10%",
     "global_risk_multiplier": 1.2,
     "profit_thresholds": {
-        "min_pattern_profit": 0.01,
         "bench_avg_threshold": 0.05
     }
 }

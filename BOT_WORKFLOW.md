@@ -67,7 +67,7 @@ The bot uses a hybrid multi-threaded and multi-processed queued system for maxim
    - **Threshold**: Similarity must exceed 70% to trigger strategy injection.
 5. **Dynamic Risk Engine**:
 - **Strong Trend (ADX > 25)**: Switches to **aggressive** settings (shorter EMAs: 10/30, wider RSI: 40/60).
-- **High Volatility (> min_pattern_profit)**: Switches to **conservative** settings (longer EMAs: 30/100, tight RSI: 20/80).
+- **High Volatility (> 0.01)**: Switches to **conservative** settings (longer EMAs: 30/100, tight RSI: 20/80).
 - **Normal Market**: Uses **balanced** settings (default EMAs and RSI).
 5. **Strategy Injection**: If a pattern matches, its specific `strategy` and dynamic `aggr` label are applied to the current pair.
 6. **Monte Carlo Hurdle (BUY Only)**: Before any BUY order, 1000 simulations are run. The probability of profit must exceed a **0.15% hurdle**. SELL orders bypass this check to ensure timely exits.

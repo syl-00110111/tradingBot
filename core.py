@@ -28,31 +28,7 @@ class MarketDataService:
         self.ws_updates = {} # (symbol, timeframe) -> last_ws_ts
 
     async def get_fresh_data(self, symbol, timeframe):
-        """Ensures we have the latest candles from the API. API-First."""
-        now = time.time()
-
-        # Perfect Trader: If WebSockets are active and recently updated, trust the live cache
-        # This saves API weight for heavy history downloads
-        if now - self.ws_updates.get((symbol, timeframe), 0) < 30.0:
-            cached = self.ohlcv_cache.get(symbol, timeframe)
-            if cached: return cached
-
-        # Otherwise, throttle REST calls to 1s per pair
-        if now - self.last_fetch.get((symbol, timeframe), 0) < 1.0:
-            return self.ohlcv_cache.get(symbol, timeframe)
-
-        loop = asyncio.get_event_loop()
-        from exchange_handler import fetch_ohlcv_incremental
-        await loop.run_in_executor(
-            self.core.executor,
-            fetch_ohlcv_incremental,
-            self.core.exchange,
-            symbol,
-            timeframe,
-            self.ohlcv_cache,
-            500
-        )
-        self.last_fetch[(symbol, timeframe)] = time.time()
+        """Returns data from the live cache (WebSockets)."""
         return self.ohlcv_cache.get(symbol, timeframe)
 
 class AnalysisService:
@@ -91,11 +67,7 @@ class AnalysisService:
             'mc_score': current_data.get('mc_score', 1.1)
         }
 
-        glite = {
-            'device': self.core.config.get('device'),
-            'mc_hurdle': self.core.config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015),
-            'min_profit': self.core.config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
-        }
+        device = self.core.config.get('device')
 
         tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
         tf_secs = tf_map.get(timeframe, 300)
@@ -109,7 +81,7 @@ class AnalysisService:
         return await loop.run_in_executor(
             self.process_executor,
             wrapped_analysis_task,
-            symbol, timeframe, tf_secs, df, search_pool, glite, pinfo
+            symbol, timeframe, tf_secs, df, search_pool, device, pinfo
         )
 
 class ExecutionService:
@@ -118,7 +90,7 @@ class ExecutionService:
         self.core = core
 
     async def process_signal(self, symbol, analysis_res):
-        """API-First Signal Processor with Documentation-based Term Escalation."""
+        """Signal Processor with 1m timeframe constraint."""
         with self.core.state_lock:
             self.core.bot_state[symbol].update(analysis_res)
             data = self.core.bot_state[symbol]
@@ -143,7 +115,7 @@ class ExecutionService:
             positions = data.get('positions', [])
             if len(positions) < 3 and symbol not in self.core.suspended_pairs:
                 if self.core.engine.validate_trade_mc(symbol, data, self.core.config):
-                    # execute_buy now includes API-first balance and order book checks
+                    # execute_buy now includes balance and order book checks
                     success = await self.core.run_in_thread(
                         execute_buy,
                         self.core.exchange, self.core.data_manager, self.core.engine,
@@ -161,7 +133,7 @@ class ExecutionService:
             positions = data.get('positions', [])
             if positions:
                 for idx, pos in enumerate(positions):
-                    # 1. Try to sell with sure profit
+                    # Try to sell with sure profit
                     success = await self.core.run_in_thread(
                         execute_sell,
                         self.core.exchange, self.core.data_manager, self.core.engine,
@@ -172,19 +144,6 @@ class ExecutionService:
                         data['last_acted_ts'] = current_candle_ts
                         data['consecutive_sells'] = 0
                         break
-
-                    # 2. If profit not sure, perform term escalation
-                    current_term = pos.get('term', 'short')
-                    term_order = ['short', 'medium', 'long']
-                    if current_term in term_order and term_order.index(current_term) < len(term_order) - 1:
-                        new_term = term_order[term_order.index(current_term) + 1]
-                        if self.core.data_manager.update_position_term(symbol, idx, new_term):
-                            logging.info(f"[{symbol}] Sure profit not met. Upgrading position and pair to {new_term} term.")
-                            # Persistent for the pair during this session and future analysis cycles
-                            self.core.config.setdefault('pairs', {}).setdefault(symbol, {})['term_override'] = new_term
-                    else:
-                        # Already at long term, just wait but warn user
-                        logging.warning(f"[{symbol}] Sure profit not met on LONG term position. Waiting for better price.")
 
 class TradingCore:
     """The 'Perfect Trader' Core with 10 hands (Services)."""
@@ -244,20 +203,10 @@ class TradingCore:
             try:
                 pair_cfg = self.config.get('pairs', {}).get(symbol, {})
 
-                # Perfect Trader: prioritize term of open positions
-                open_positions = self.data_manager.get_positions(symbol)
-                term_order = ['short', 'medium', 'long']
-                if open_positions:
-                    max_term_idx = max([term_order.index(p.get('term', 'short')) for p in open_positions])
-                    term = term_order[max_term_idx]
-                else:
-                    term = pair_cfg.get('term_override', self.config.get('_active_term', 'short'))
+                # Force 1m timeframe as per requirement
+                timeframe = '1m'
 
-                term_cfg = self.config.get('expected_profit_terms', {}).get(term, {})
-                # Use 1m as default as per instruction
-                timeframe = term_cfg.get('timeframe', '1m')
-
-                # 1. API-First: Fetch fresh candles
+                # 1. WS-Only: Fetch candles from memory
                 ohlcv = await self.market_data.get_fresh_data(symbol, timeframe)
                 if not ohlcv:
                     await asyncio.sleep(2)
@@ -270,6 +219,9 @@ class TradingCore:
                 res = await self.analysis.analyze_pair(symbol, timeframe, df, patterns)
 
                 if res and 'error' not in res:
+                    if res.get('trigger_rebenchmark'):
+                        with self.state_lock:
+                            self.benchmarking_pairs.add(symbol)
                     # 3. Execution: Verified trade
                     await self.execution.process_signal(symbol, res)
 
@@ -324,7 +276,7 @@ class TradingCore:
                     optimization.run_benchmark_mode,
                     self.exchange, self.config, None, threading.Event(), # Dummy shutdown for thread
                     self.state_lock, self.global_pattern_pool, self.benchmarking_pairs,
-                    self.config.get('_active_term', 'short'), None,
+                    'short', None,
                     self.data_manager, self.pattern_manager, self.engine,
                     self.config.get('device'), to_bench, self.ohlcv_cache_manager,
                     None, self.bot_state

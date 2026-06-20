@@ -18,7 +18,7 @@ from rich.console import Console
 import datetime
 
 from utils import format_price, format_amount, parse_base_bet, get_base_currency, silent_worker_init
-from indicators import get_signals, get_common_indicators, STRATEGIES, CORE_STRATEGIES
+from indicators import get_signals, get_common_indicators, STRATEGIES
 from exchange_handler import fetch_ohlcv_incremental
 from monte_carlo import MonteCarloEngine
 from persistence import CacheManager
@@ -65,14 +65,11 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         except Exception:
             pass
 
-    term_settings = config.get('expected_profit_terms', {}).get(term, {})
-    if not term_settings:
-        return None
-    timeframe = term_settings.get('timeframe', '1m')
+    timeframe = '1m'
 
     if df_in is None:
         try:
-            fetch_limit = limit or term_settings.get('eval_candles', 500)
+            fetch_limit = limit or 500
             # Add padding for indicators
             fetch_limit += 200
             ohlcv, _ = fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=fetch_limit)
@@ -106,7 +103,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
 
     if df is None or df.empty: return None
 
-    eval_window_base = term_settings.get('eval_candles', 60)
+    eval_window_base = 60
     max_rand = max(1, int(eval_window_base * 0.1))
     eval_window = eval_window_base + random.randint(-max_rand, max_rand)
     start_idx = max(0, len(df) - eval_window)
@@ -217,9 +214,8 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     Implements the O(N) Sliding Window Algorithm as described in ALGO_FENETRE_GLISSANTE.md.
     Instead of re-running full backtests, we calculate the equity curve once and slide a window.
     """
-    term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
-    eval_window = term_cfg.get('eval_candles', 60)
-    profit_threshold = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
+    eval_window = 60
+    profit_threshold = 0.01
     profit_threshold *= threshold_conv
     now_ts = time.time()
     patterns = []
@@ -309,12 +305,11 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
     return symbol, patterns[:5]
 
 def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None, symbols_to_process=None, ohlcv_cache_manager=None, priority_symbols=None, bot_state=None):
-    term_to_test = term_override if term_override else (args.term if args else 'short')
-    terms_cfg = config.get('expected_profit_terms', {})
-    term_cfg = terms_cfg.get(term_to_test, {})
-    timeframe = term_cfg.get('timeframe', '1m')
+    term_to_test = 'short'
+    timeframe = '1m'
 
-    strategies = CORE_STRATEGIES
+    from indicators import STRATEGIES
+    strategies = STRATEGIES
     aggrs = ['balanced']
 
     all_pairs = list(config.get('pairs', {}).keys())
@@ -542,8 +537,8 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
     found_any = False
-    for term in ['short', 'medium', 'long', 'total']:
-        label = terms_cfg.get(term, {}).get('label', term.upper())
+    for term in ['short', 'total']:
+        label = term.upper()
         data = best_overall.get(term)
         if not data: continue
         if data['params']:
@@ -563,12 +558,10 @@ def run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_
             total_balance = 0
 
         threshold_pct = config.get('profit_thresholds', {}).get('no_patterns_msg_threshold_pct', 0.005)
-        min_pattern_profit = config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
-
         if total_balance > 0:
-            msg_threshold_val = min(min_pattern_profit, total_balance * threshold_pct)
+            msg_threshold_val = min(0.01, total_balance * threshold_pct)
         else:
-            msg_threshold_val = min(min_pattern_profit, config.get('profit_thresholds', {}).get('no_patterns_msg_threshold', 0.01))
+            msg_threshold_val = 0.01
 
         msg_threshold = f"{msg_threshold_val:.4g} {base_bet_curr}"
         if symbols:

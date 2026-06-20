@@ -67,7 +67,7 @@ Le bot utilise un système hybride de file d'attente multithread et multiprocess
    - **Seuil** : La similitude doit dépasser 70% pour déclencher l'injection de la stratégie.
  5. **Moteur de risque dynamique** :
 - **Tendance forte (ADX > 25)** : Passe aux paramètres **agressifs** (EMAs plus courtes : 10/30, RSI plus large : 40/60).
-- **Haute volatilité (> min_pattern_profit)** : Passe aux paramètres **conservateurs** (EMAs plus longues : 30/100, RSI serré : 20/80).
+- **Haute volatilité (> 0.01)** : Passe aux paramètres **conservateurs** (EMAs plus longues : 30/100, RSI serré : 20/80).
 - **Marché normal** : Utilise les paramètres **équilibrés** (EMAs et RSI par défaut).
 5. **Injection de stratégie** : Si un modèle correspond, sa stratégie spécifique et son étiquette dynamique `aggr` sont appliquées à la paire actuelle.
 6. **Seuil Monte Carlo (ACHAT uniquement)** : Avant tout ordre d'ACHAT, 1000 simulations sont effectuées. La probabilité de profit doit dépasser un **seuil de 0,15%**. Les ordres de VENTE ignorent cette vérification pour garantir des sorties opportunes.

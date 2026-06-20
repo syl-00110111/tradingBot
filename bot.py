@@ -75,31 +75,6 @@ pending_asset_update = False
 console = Console()
 ui = dashboard.DashboardUI(console)
 
-class CandleDownloader(threading.Thread):
-    def __init__(self, exchange, ohlcv_cache_manager):
-        super().__init__(daemon=True)
-        self.exchange = exchange
-        self.ohlcv_cache_manager = ohlcv_cache_manager
-
-    def run(self):
-        while not shutdown_event.is_set():
-            try:
-                # Priority, Symbol, Timeframe, Limit, Since
-                item = candle_queue.get(timeout=1)
-                priority, symbol, timeframe, limit, since = item
-
-                try:
-                    fetch_ohlcv_incremental(self.exchange, symbol, timeframe, self.ohlcv_cache_manager, limit=limit, since=since)
-                finally:
-                    with bot_lock:
-                        pending_downloads.discard((symbol, timeframe))
-                        last_download_time[(symbol, timeframe)] = time.time()
-                    candle_queue.task_done()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logging.error(f"CandleDownloader error: {e}")
-
 def update_available_assets_live(exchange, config):
     global pending_asset_update
     time.sleep(random.uniform(1.0, 2.0))
@@ -122,14 +97,23 @@ def update_available_assets_live(exchange, config):
         logging.error(f"Failed to update assets from API: {e}")
         with bot_lock: pending_asset_update = False
 
-def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info):
+def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, device, pattern_info, pattern_manager=None):
     """
     CPU-intensive analysis task designed to run in a subprocess.
     """
     try:
-        device = global_config_lite.get('device', torch.device('cpu'))
         # 1. Indicators
         df = get_common_indicators(df, device)
+
+        # SPM: Try to find new patterns in the current in-memory history (O(N))
+        from optimization import run_benchmark_for_symbol
+        from indicators import STRATEGIES
+
+        # Reduced strategies for speed during live analysis
+        _, new_patterns = run_benchmark_for_symbol(symbol, {}, 'short', ['balanced'], STRATEGIES, df, device=device)
+
+        # Merge new patterns with existing ones for this session
+        combined_pool = search_pool + new_patterns
 
         current_pattern_id = pattern_info.get('active_pattern_id')
         pattern_match_ts = pattern_info.get('pattern_match_ts', 0)
@@ -139,8 +123,8 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
 
         # 2. Similarity Matching (Vectorized Batch)
         active_patterns = []
-        if search_pool:
-            active_patterns = calculate_similarity_batch(df, search_pool, device=device)
+        if combined_pool:
+            active_patterns = calculate_similarity_batch(df, combined_pool, device=device)
 
         candidates = []
         for item in active_patterns:
@@ -195,7 +179,7 @@ def perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, gl
                     "rsi_buy": 40, "rsi_sell": 60,
                     "label": "aggressive"
                 })
-            elif curr_vol > global_config_lite.get('min_profit', 0.01):
+            elif curr_vol > 0.01:
                 settings.update({
                     "ema_fast": 30, "ema_slow": 100,
                     "rsi_buy": 20, "rsi_sell": 80,
@@ -254,20 +238,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     try:
         patterns = pattern_manager.get_patterns(symbol)
 
-        # Determine analysis term based on open positions
-        open_positions = data_manager.get_positions(symbol) if data_manager else []
-        term_order = ['short', 'medium', 'long']
-        active_term = global_config.get('_active_term', 'short')
-
-        if open_positions:
-            # Find the "longest" term among open positions for this symbol
-            max_term_idx = max([term_order.index(p.get('term', 'short')) for p in open_positions])
-            term = term_order[max_term_idx]
-        else:
-            term = pair_config.get('term_override', active_term)
-
-        term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
-        timeframe = term_cfg.get('timeframe', '1m')
+        timeframe = '1m'
 
         # Request candle update from background downloader
         with bot_lock:
@@ -302,11 +273,6 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         tf_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
         tf_secs = tf_map.get(timeframe, 300)
 
-        global_config_lite = {
-            'device': global_config.get('device'),
-            'mc_hurdle': global_config.get('profit_thresholds', {}).get('mc_validation_hurdle', 0.0015),
-            'min_profit': global_config.get('profit_thresholds', {}).get('min_pattern_profit', 0.01)
-        }
 
         pattern_info = {
             'active_pattern_id': current_data.get('active_pattern_id'),
@@ -315,8 +281,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             'mc_score': current_data.get('mc_score', 1.1)
         }
 
+        device = global_config.get('device')
         # This call will be parallelized in trading_thread_func
-        res = perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info)
+        res = perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, device, pattern_info)
 
         if res and 'error' not in res:
             if res.get('trigger_rebenchmark'):
@@ -328,14 +295,6 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
                         bot_state[symbol]['scan_attempts'] = bot_state[symbol].get('scan_attempts', 0) + 1
                         attempts = bot_state[symbol]['scan_attempts']
                         bot_state[symbol]['next_scan_allowed'] = time.time() + (attempts * 60)
-                        if attempts >= 5:
-                            current_term = pair_config.get('term_override', global_config.get('_active_term', 'short'))
-                            term_order = ['short', 'medium', 'long']
-                            if current_term in term_order:
-                                idx = term_order.index(current_term)
-                                if idx < len(term_order) - 1:
-                                    pair_config['term_override'] = term_order[idx + 1]
-                                    bot_state[symbol]['scan_attempts'] = 0
                 with bot_lock: benchmarking_pairs.add(symbol)
                 return None
 
@@ -349,9 +308,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         logging.error(f"Error in analyze_pair for {symbol}: {e}")
         return None
 
-def wrapped_analysis_task(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info):
+def wrapped_analysis_task(symbol, timeframe, tf_secs, df, search_pool, device, pattern_info):
     """Picklable wrapper for the multiprocess analysis task."""
-    return perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, global_config_lite, pattern_info)
+    return perform_analysis_calculation(symbol, timeframe, tf_secs, df, search_pool, device, pattern_info)
 
 # Async Core handles all workers now.
 # Legacy synchronous workers removed.
@@ -390,9 +349,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     # Pre-warm OHLCV cache for all symbols in parallel
     logging.info("Pre-warming OHLCV cache for all symbols...")
     with bot_lock:
-        term = config.get('_active_term', 'short')
-        term_cfg = config.get('expected_profit_terms', {}).get(term, {})
-        timeframe = term_cfg.get('timeframe', '1m')
+        timeframe = '1m'
         for sym in all_symbols:
             if (sym, timeframe) not in pending_downloads:
                 candle_queue.put((2, sym, timeframe, 500, None))
@@ -406,7 +363,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             rebench_syms = list(benchmarking_pairs)
 
         if rebench_syms:
-            optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override=config.get('_active_term', 'short'), data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=config.get('device'), symbols_to_process=rebench_syms, ohlcv_cache_manager=ohlcv_cache_manager, bot_state=bot_state)
+            optimization.run_benchmark_mode(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, term_override='short', data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=config.get('device'), symbols_to_process=rebench_syms, ohlcv_cache_manager=ohlcv_cache_manager, bot_state=bot_state)
 
         for symbol in all_symbols:
             # Allow analysis if we have a position, even if suspended (so we can sell)
@@ -450,13 +407,12 @@ def setup_bot_state(config, data_manager, bot_state):
     """Initializes the bot state for all configured pairs, using cache if available."""
     from persistence import CacheManager
     cache_mgr = CacheManager()
-    active_term = config.get('_active_term', 'short')
 
     for symbol in config['pairs']:
         pos_list = data_manager.get_positions(symbol) if data_manager else []
 
         # Load from cache to avoid "Discovering..." if we already know this pair
-        cached = cache_mgr.get(symbol, active_term)
+        cached = cache_mgr.get(symbol, 'short')
         if cached and isinstance(cached, list) and len(cached) > 0:
             best = cached[0]
             aggr = best.get('aggr', 'balanced')
@@ -483,10 +439,8 @@ def setup_bot_state(config, data_manager, bot_state):
         }
 
 def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, global_pattern_pool, benchmarking_pairs, data_manager, pattern_manager, engine, device, ohlcv_cache_manager, available_assets, trading_engine, bot_state, ui=None):
-    """Runs the initial benchmarking and sets pair priorities."""
-    config['_active_term'] = args.term
-    import optimization
-    sellable = []
+    """Initializes the bot state and discover wallet assets/positions."""
+    sellable_with_amounts = {}
     try:
         sellable_with_amounts = trading_engine.get_sellable_assets_with_amounts(exchange, config)
         sellable = sorted(list(sellable_with_amounts.keys()))
@@ -495,46 +449,20 @@ def run_initial_benchmarking(exchange, config, args, shutdown_event, bot_lock, g
             for symbol, state in bot_state.items():
                 asset = symbol.split('/')[0]
                 state['amt'] = sellable_with_amounts.get(asset, 0)
-    except: pass
+    except Exception as e:
+        logging.error(f"Failed to fetch initial wallet assets: {e}")
 
     # Set default priority
     config['_priority_pairs'] = sorted(list(config['pairs'].keys()))
 
-    def bg_benchmark():
-        # Initial re-benchmarking
-        opt_map = optimization.run_benchmark_mode(
-            exchange, config, args, shutdown_event, bot_lock, global_pattern_pool,
-            benchmarking_pairs, term_override=args.term, status=None,
-            data_manager=data_manager, pattern_manager=pattern_manager,
-            engine=engine, device=device, ohlcv_cache_manager=ohlcv_cache_manager,
-            priority_symbols=sellable, bot_state=bot_state
-        )
-
-        pair_priorities = []
-        for sym, best in opt_map.items():
-            if sym in config['pairs']:
-                with bot_lock:
-                    config['pairs'][sym].update({
-                        'aggr': best['aggr'],
-                        'strategy': best['strategy'],
-                        'expected_profit': best.get('avg_bench_profit', best['profit'])
-                    })
-                pair_priorities.append((sym, best['profit']))
-
-        if pair_priorities:
-            with bot_lock:
-                config['_priority_pairs'] = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
-
-    threading.Thread(target=bg_benchmark, daemon=True).start()
-
-    if args.mode in ['simulation', 'virtual']:
-        trading_engine.initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
+    if args.mode in ['simulation', 'virtual', 'live']:
+        trading_engine.initialize_wallet_positions(exchange, data_manager, pattern_manager, engine, config, bot_state)
 
     for symbol in config['pairs']:
         pos_list = data_manager.get_positions(symbol)
         with bot_lock:
-            # Ensure keys exist for the trading loop
-            if 'aggr' not in config['pairs'][symbol]: config['pairs'][symbol]['aggr'] = 'normal'
+            # Default values as we don't have benchmarks anymore
+            if 'aggr' not in config['pairs'][symbol]: config['pairs'][symbol]['aggr'] = 'balanced'
             if 'strategy' not in config['pairs'][symbol]: config['pairs'][symbol]['strategy'] = 'simple_ema'
             if 'expected_profit' not in config['pairs'][symbol]: config['pairs'][symbol]['expected_profit'] = 0
 
@@ -599,11 +527,11 @@ def main():
     logging.root.setLevel(logging.INFO)
 
     global ohlcv_cache_manager
-    migrate_fresh_files_to_archive()
-    load_from_archive()
-
-
     ohlcv_cache_manager = OHLCVCacheManager(mode=args.mode)
+
+    # Hardcode max_symbol_bet default if not in config
+    if 'max_symbol_bet' not in config:
+        config['max_symbol_bet'] = '10%'
 
     num_cores = os.cpu_count() or 1
     torch.set_num_threads(num_cores)
@@ -738,29 +666,6 @@ def main():
             available_assets[:] = trading_engine.get_sellable_assets(exchange, config)
         except: pass
 
-    # Prior to websockets, perform initial download with REST API
-    if args.mode in ['live', 'simulation', 'virtual']:
-        logging.info("Performing initial REST API data download for all pairs (wallet assets prioritized)...")
-        term = config.get('_active_term', 'short')
-        timeframe = config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '1m')
-
-        # Prioritize wallet assets for absolute priority
-        all_configured_symbols = list(config.get('pairs', {}).keys())
-        wallet_assets = set(available_assets)
-        prioritized_symbols = [s for s in all_configured_symbols if s.split('/')[0] in wallet_assets]
-        other_symbols = [s for s in all_configured_symbols if s.split('/')[0] not in wallet_assets]
-        symbols = prioritized_symbols + other_symbols
-
-        if symbols:
-            # Throttled download: 5 workers and 0.2s delay to avoid 429 errors
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(symbols), 5)) as executor:
-                futures = []
-                for sym in symbols:
-                    if shutdown_event.is_set(): break
-                    futures.append(executor.submit(fetch_ohlcv_incremental, exchange, sym, timeframe, ohlcv_cache_manager, limit=500))
-                    time.sleep(0.2)
-                concurrent.futures.wait(futures)
-        logging.info("Initial REST API download complete.")
 
     def signal_handler(sig, frame):
         logging.info("Interrupt received, shutting down gracefully...")
@@ -773,7 +678,7 @@ def main():
     ws_started = False
     if args.mode in ['live', 'simulation', 'virtual'] and args.exchange != 'mock':
         from exchange_handler import AsyncExchangeManager
-        timeframes = [config.get('expected_profit_terms', {}).get(t, {}).get('timeframe', '1m') for t in ['short', 'medium', 'long']]
+        timeframes = ['1m']
         market_type = api_creds.get('market', config.get('market', 'spot'))
         # Transition to Async Core
         core = TradingCore(config, exchange, data_manager, pattern_manager, ohlcv_cache_manager, shutdown_event)
@@ -795,10 +700,6 @@ def main():
         else:
             logging.warning(f"Websockets not supported by ccxt.pro for {args.exchange}. Falling back to polling.")
 
-    if not ws_started:
-        # Start candle downloader fallback
-        downloader = CandleDownloader(exchange, ohlcv_cache_manager)
-        downloader.start()
 
     # Dynamic benchmarking if capacity exists - increased frequency for "10 hands"
     def dynamic_benchmark_worker():
@@ -907,9 +808,6 @@ def main():
             asyncio.run(global_core.shutdown())
         except: pass
 
-    if ohlcv_cache_manager:
-        ohlcv_cache_manager.flush_all()
-    archiver.stop()
     shutdown_msg = "Bot shutdown gracefully."
     console.print(f"[bold green]{shutdown_msg}[/]")
 

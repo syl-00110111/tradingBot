@@ -20,7 +20,6 @@ This report explains the configuration parameters found in `config.default.json`
 
 ### Profit Thresholds (`profit_thresholds`)
 
-*   **`min_pattern_profit`** (Default: `0.01` / 1.0%)
     *   **Description**: The minimum profit a pattern must generate during the benchmarking phase to be considered a "Success Pattern" (SPM).
     *   **Influence**: Filters out low-performing signals during historical analysis. Only strategies that yield at least this much profit in the test window are saved.
 
@@ -50,7 +49,6 @@ This report explains the configuration parameters found in `config.default.json`
     *   **Description**: The factor by which the position size is multiplied when the threshold is met.
     *   **Influence**: Rewards successful performance by increasing exposure on "hot" pairs.
 
-### Expected Profit Terms (`expected_profit_terms`)
 
 *   Defines three profiles: **Short**, **Medium**, and **Long**.
 *   **`duration_hours`**: The historical window looked at for benchmarking.
@@ -91,5 +89,4 @@ This report explains the configuration parameters found in `config.default.json`
     The bot will attempt to BUY **0.00312 BTC**.
     The cost will be **156 USDT** (+ fees).
 
-6.  **Profitability Check (`min_pattern_profit`)**:
     If a pattern is detected, the bot expects a minimum profit of **1.5%** (1.5% of 156 USDT = 2.34 USDT) based on historical performance before it considers the entry high-quality.
