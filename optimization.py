@@ -65,7 +65,7 @@ async def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term
 
     if df_in is None:
         try:
-            fetch_limit = limit or 500
+            fetch_limit = limit or 60
             # Add padding for indicators
             fetch_limit += 200
             ohlcv, _ = await fetch_ohlcv_incremental(exchange, symbol, timeframe, ohlcv_cache_manager, limit=fetch_limit)
@@ -99,9 +99,7 @@ async def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term
 
     if df is None or df.empty: return None
 
-    eval_window_base = 60
-    max_rand = max(1, int(eval_window_base * 0.1))
-    eval_window = eval_window_base + random.randint(-max_rand, max_rand)
+    eval_window = 60
     start_idx = max(0, len(df) - eval_window)
 
     base_percentage, _ = parse_base_bet(config)
@@ -207,14 +205,14 @@ async def run_benchmark_for_strategy(symbol, strategy, config, term_to_test, agg
 
 async def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None, threshold_conv=1.0):
     """
-    Bare-bone benchmarking: backtest strategies on the provided history (max 400 candles)
+    Bare-bone benchmarking: backtest strategies on the provided history (max 60 candles)
     and return patterns for Success Pattern Matching (SPM).
     """
     now_ts = time.time()
     patterns = []
 
-    # Limit to latest 400 candles as per requirement
-    df_work = df_in.tail(400).copy()
+    # Limit to latest 60 candles as per requirement
+    df_work = df_in.tail(60).copy()
 
     # Pre-calculate common indicators once
     df_work = get_common_indicators(df_work, device)
@@ -263,8 +261,8 @@ async def run_benchmark_mode(exchange, config, args, shutdown_event, global_patt
         else: console.print(f"[{i+1}/{len(symbols)}] Benchmarking {sym}...")
 
         try:
-            # Fetch latest 400 candles
-            limit = 400
+            # Fetch latest 60 candles
+            limit = 60
             ohlcv, _ = await fetch_ohlcv_incremental(exchange, sym, '1m', ohlcv_cache_manager, limit=limit)
             if not ohlcv: continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -294,4 +292,6 @@ async def run_benchmark_mode(exchange, config, args, shutdown_event, global_patt
         except Exception as e:
             logging.error(f"Error benchmarking {sym}: {e}")
 
+    if not best_per_symbol:
+        console.print(f"[yellow]No successful patterns were found in the scanned historical data.[/]")
     return best_per_symbol

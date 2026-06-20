@@ -62,7 +62,7 @@ async def perform_analysis_calculation(symbol, timeframe, tf_secs, df, current_p
 
         # 1. Backtest rolling strategy
         if next_strategy:
-            df_bench = df.tail(400).copy()
+            df_bench = df.tail(60).copy()
             res_bench = await run_backtest_logic(None, symbol, next_strategy, 'balanced', config or {}, df_in=df_bench, device=device, skip_mc=True)
 
             current_profit = current_pattern.get('profit', -999) if current_pattern else -999
