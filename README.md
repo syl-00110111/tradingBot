@@ -25,7 +25,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **Auto-Position Discovery**: Automatically identifies existing assets in your wallet and populates them as managed positions for strategy-based exits.
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
 - **Dynamic Timeframe Selection**: Automatically determines the optimal timeframe (1m, 3m, 5m, 15m) for each pair based on 24h volume, spread, volatility, and trading activity.
-- **Signal-Based Re-benchmarking**: If a pair fails to generate signals for a set period (default 160 candles), the bot re-evaluates the market to find a better-fitting strategy or update the timeframe using the latest 1000 candles.
+- **Signal-Based Re-benchmarking**: If a pair fails to generate signals for a set period (default 8 candles), the bot re-evaluates the market to find a better-fitting strategy or update the timeframe using the latest 60 candles.
 
 ### 🛡 Risk Management
 - **Confirmation Logic**: Requires consecutive identical signals dynamically adjusted by timeframe and volatility:
@@ -34,7 +34,7 @@ This bot implements strategies and logic recommended by leading empirical studie
   - **15m**: 3 signals
   - *High volatility adds an additional confirmation signal.*
 - **Automatic Suspension**: Automatically suspends trading for symbols where orders fail (e.g. insufficient balance or exchange limits) to prevent logic loops.
-- **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 10.0 = 10%).
+- **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 9.0 = 9%).
 
 ---
 
