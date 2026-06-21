@@ -499,7 +499,7 @@ def input_thread_func():
 
 def ohlcv_watcher_thread(exchange, symbol, timeframe):
     """Background thread to watch OHLCV and update cache."""
-    logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
+    # logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
     try:
         # Pre-fill cache with historical data for indicator stability
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)

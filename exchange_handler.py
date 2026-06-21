@@ -63,7 +63,7 @@ class BinanceExchange(ExchangeInterface):
     def watch_ohlcv(self, symbol, timeframe):
         # Implementation of watch_ohlcv as a generator
         # Fallback to polling for sync CCXT
-        logging.info(f"Starting watch_ohlcv for {symbol} ({timeframe}) via polling fallback")
+        # logging.info(f"Starting watch_ohlcv for {symbol} ({timeframe}) via polling fallback")
         last_ts = None
         while True:
             try:
