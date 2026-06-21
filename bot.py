@@ -1308,7 +1308,7 @@ def sync_live_positions(exchange, data_manager, config):
              logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. Please manage manually.")
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
-        logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
+        logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits) or maybe adjust you pairs.txt file.")
 
 
 
