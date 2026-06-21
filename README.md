@@ -1,6 +1,6 @@
 # 🛸 Cryptocurrencies Trading Bot: Advanced Quantitative & Scientific Suite
 
-An industrial-grade trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, and **Bitvavo** (MICA-compliant European exchanges) via the CCXT library.
+An industrial-grade trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, and **Bitvavo** (MICA-compliant European exchanges) via the CCXT library. Other markets could be added easily.
 
 ---
 
@@ -82,8 +82,8 @@ Main bot settings.
     *   `multiplier`: (float) Balance multiplier applied to trade size during a streak (default: `1.2`).
 
 #### Dynamic Logic Settings
-*   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-benchmark of the symbol (default: `8`).
-*   **`rebenchmark_window`**: (int) Number of historical candles used during a re-benchmark to find the optimal strategy (default: `60`).
+*   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-benchmark of the symbol (default: `32`).
+*   **`rebenchmark_window`**: (int) Number of historical candles used during a re-benchmark to find the optimal strategy (default: `160`).
 *   **`timeframe_thresholds`**: (Object) Criteria for dynamic timeframe selection (1m, 3m, 5m, 15m).
     *   **`volume_24h`**: (low/high) thresholds for 24h trading volume (default: `1000`/`10000`).
     *   **`spread_pct`**: (low/high) thresholds for the bid/ask spread percentage (default: `0.01`/`0.05`).
