@@ -1022,20 +1022,7 @@ def sync_live_positions(exchange, data_manager, config):
 
         if is_dust: continue
         sellable_found = True
-
-        # Try to find purchase price
-        entry_price = 0
-        trades = exchange.fetch_my_trades(symbol, limit=20)
-        if trades:
-            buy_trades = [t for t in trades if t['side'] == 'buy']
-            if buy_trades:
-                entry_price = buy_trades[-1]['price']
-
-        if entry_price > 0:
-            logging.info(f"[{symbol}] Found purchase price: {entry_price}. Adding to tracking.")
-            data_manager.add_position(symbol, entry_price, amount, 0, {}, time.time())
-        else:
-            logging.warning(f"[{symbol}] Asset found in wallet but no purchase record found via API. Please connect to exchange and sell manually or manage this asset.")
+        logging.warning(f"[{symbol}] Asset found in wallet. Please manage this asset manually as previous trades are not retrieved.")
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
         logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
