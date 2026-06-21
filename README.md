@@ -26,10 +26,11 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
 
 ### 🛡 Risk Management
-- **Confirmation Logic**: Requires consecutive identical signals dynamically adjusted by term duration:
-  - **Short Term (1h)**: 1 signal
-  - **Medium Term (1d)**: 2 signals
-  - **Long Term (1w)**: 3 signals
+- **Confirmation Logic**: Requires consecutive identical signals dynamically adjusted by timeframe and volatility:
+  - **1m**: 1 signal
+  - **3m / 5m**: 2 signals
+  - **15m**: 3 signals
+  - *High volatility adds an additional confirmation signal.*
 - **Automatic Suspension**: Automatically suspends trading for symbols where orders fail (e.g. insufficient balance or exchange limits) to prevent logic loops.
 - **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 10.0 = 10%).
 
@@ -62,7 +63,9 @@ Store your credentials and preferred exchange:
 {
     "max_open_positions": 8,
     "base_trade_amount": 10.0,
-    "global_risk_multiplier": 1.0
+    "global_risk_multiplier": 1.0,
+    "no_signal_threshold": 160,
+    "rebenchmark_window": 1000
 }
 ```
 
@@ -88,8 +91,8 @@ Store your credentials and preferred exchange:
 To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to trigger the entire dependency upgrade process.
 
 ### Execution Modes
-- **Simulation**: `python bot.py --mode simulation --term short`
-- **Live**: `python bot.py --mode live --term medium`
+- **Simulation**: `python bot.py --mode simulation`
+- **Live**: `python bot.py --mode live`
 - **Benchmark**: `python bot.py --mode benchmark --every-symbol`
 - **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`

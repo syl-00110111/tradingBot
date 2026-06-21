@@ -167,10 +167,78 @@ def load_config():
         sys.exit(1)
     return load_config_from_path(path)
 
+def get_optimal_timeframe(exchange, symbol, config):
+    """
+    Dynamically determines the optimal timeframe for a pair based on volume, spread, volatility, and trades/min.
+    """
+    thresholds = config.get('timeframe_thresholds', {})
+
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=24)
+        trades = exchange.fetch_trades(symbol, limit=100)
+
+        # 1. Volume 24h
+        volume_24h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
+        vol_low = thresholds.get('volume_24h', {}).get('low', 1000)
+        vol_high = thresholds.get('volume_24h', {}).get('high', 10000)
+
+        # 2. Spread
+        spread_pct = 0.5
+        if ticker.get('ask') and ticker.get('bid') and ticker['bid'] > 0:
+            spread = ticker['ask'] - ticker['bid']
+            spread_pct = (spread / ticker['bid']) * 100
+        spr_low = thresholds.get('spread_pct', {}).get('low', 0.1)
+        spr_high = thresholds.get('spread_pct', {}).get('high', 0.5)
+
+        # 3. Volatility
+        volatility = 0.05
+        if ohlcv and len(ohlcv) > 0:
+            closes = [candle[4] for candle in ohlcv]
+            volatility = (max(closes) - min(closes)) / min(closes)
+        vlt_low = thresholds.get('volatility_pct', {}).get('low', 0.02)
+        vlt_high = thresholds.get('volatility_pct', {}).get('high', 0.05)
+
+        # 4. Trades per minute
+        if trades:
+            times = [t['timestamp'] for t in trades]
+            duration_mins = (max(times) - min(times)) / 60000
+            trades_per_min = len(trades) / duration_mins if duration_mins > 0 else 0
+        else:
+            trades_per_min = 0
+        tpm_low = thresholds.get('trades_per_minute', {}).get('low', 5)
+        tpm_high = thresholds.get('trades_per_minute', {}).get('high', 20)
+
+        # Scoring logic: higher score = faster timeframe
+        score = 0
+        reasons = []
+        if volume_24h > vol_high: score += 1; reasons.append("High Vol")
+        elif volume_24h < vol_low: score -= 1; reasons.append("Low Vol")
+
+        if spread_pct < spr_low: score += 1; reasons.append("Tight Spread")
+        elif spread_pct > spr_high: score -= 1; reasons.append("Wide Spread")
+
+        if volatility < vlt_low: score += 1; reasons.append("Stable")
+        elif volatility > vlt_high: score -= 1; reasons.append("Volatile")
+
+        if trades_per_min > tpm_high: score += 1; reasons.append("Active")
+        elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
+
+        if score >= 2: tf = '1m'
+        elif score >= 0: tf = '3m'
+        elif score >= -2: tf = '5m'
+        else: tf = '15m'
+
+        logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
+        return tf
+
+    except Exception as e:
+        logging.warning(f"Error determining timeframe for {symbol}: {e}. Defaulting to 1m.")
+        return '1m'
+
 def render_ascii_chart(symbol, config):
     global chart_cache
-    term = config.get('_active_term', 'short')
-    timeframe = config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '5m')
+    timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
     cache_key = f"{symbol}_{timeframe}"
 
     with ohlcv_cache_lock:
@@ -497,12 +565,12 @@ def input_thread_func():
             break
         except Exception: pass
 
-def ohlcv_watcher_thread(exchange, symbol, timeframe):
+def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
     """Background thread to watch OHLCV and update cache."""
     # logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
     try:
         # Pre-fill cache with historical data for indicator stability
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=max(500, config.get('rebenchmark_window', 1000)))
         if ohlcv:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -538,12 +606,9 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe):
 
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
     # Start watchers for all pairs
-    term = config.get('_active_term', 'short')
-    term_cfg = config.get('expected_profit_terms', {}).get(term, {})
-    timeframe = term_cfg.get('timeframe', '5m')
-
     for symbol in config.get('pairs', {}):
-        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, timeframe), daemon=True).start()
+        timeframe = config['pairs'][symbol].get('timeframe', '1m')
+        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, timeframe, config), daemon=True).start()
 
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
@@ -580,8 +645,50 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                         data = future.result()
                         if data:
                             with bot_lock:
+                                # Re-benchmarking logic
+                                no_signal_thresh = config.get('no_signal_threshold', 160)
+                                if not data.get('buy') and not data.get('sell'):
+                                    bot_state[symbol]['candles_since_last_signal'] = bot_state[symbol].get('candles_since_last_signal', 0) + 1
+                                else:
+                                    bot_state[symbol]['candles_since_last_signal'] = 0
+
+                                if bot_state[symbol]['candles_since_last_signal'] >= no_signal_thresh:
+                                    logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Re-benchmarking...")
+                                    bot_state[symbol]['candles_since_last_signal'] = 0
+
+                                    # Re-evaluate timeframe
+                                    new_tf = get_optimal_timeframe(exchange, symbol, config)
+                                    if new_tf != config['pairs'][symbol].get('timeframe'):
+                                        logging.info(f"[{symbol}] Updating timeframe to {new_tf}")
+                                        config['pairs'][symbol]['timeframe'] = new_tf
+                                        # Restart watcher for new timeframe?
+                                        # For simplicity, we'll keep the same watcher but fetch for benchmark with new tf
+
+                                    # Fetch data for re-benchmark
+                                    target_limit = config.get('rebenchmark_window', 1000)
+                                    timeframe = config['pairs'][symbol].get('timeframe', '1m')
+                                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=target_limit)
+                                    if ohlcv:
+                                        df_bench = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                                        df_bench['timestamp'] = pd.to_datetime(df_bench['timestamp'], unit='ms')
+                                        df_bench = df_bench.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
+
+                                        global_aggr = config.get('force_agressivity_to_all_pairs')
+                                        global_strat = config.get('force_strategy_to_all_pairs')
+                                        aggrs = [global_aggr] if global_aggr else ['dynamic']
+                                        strategies = [global_strat] if global_strat else STRATEGIES
+
+                                        _, patterns = run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_bench, engine, device)
+                                        if patterns:
+                                            best = patterns[0]
+                                            config['pairs'][symbol]['aggr'] = best['aggr']
+                                            config['pairs'][symbol]['strategy'] = best['strategy']
+                                            config['pairs'][symbol]['expected_profit'] = best['profit']
+                                            pattern_manager.set_patterns(symbol, patterns)
+                                            logging.info(f"[{symbol}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+
                                 data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
-                                bot_state[symbol] = data
+                                bot_state[symbol].update(data)
 
                             if data.get('sell_triggered'):
                                  if execute_sell(exchange, data_manager, engine, symbol, data):
@@ -635,7 +742,7 @@ def main():
     parser.add_argument('--strategy', help=strat_help)
     parser.add_argument('--aggr', help='Agressivity for backtest')
     parser.add_argument('--backtest-positions', type=int, default=1, help='Max simultaneous positions in backtest (1-4)')
-    parser.add_argument('--term', choices=['short', 'medium', 'long'], default='short', help='Time term for strategy optimization (default: short)')
+    parser.add_argument('--timeframe', choices=['1m', '3m', '5m', '15m'], help='Manual timeframe override')
     parser.add_argument('--since', help='Start date for backtest/benchmark (YYYY-MM-DD HH:MM)')
     parser.add_argument('--until', help='End date for backtest/benchmark (YYYY-MM-DD HH:MM)')
 
@@ -776,9 +883,18 @@ def main():
 
         # Auto-optimization via benchmarking
         if args.mode in ['live', 'simulation']:
-            config['_active_term'] = args.term
-            status.update(f"[bold blue]Optimizing strategies for {args.term} term...")
-            opt_map = run_benchmark_mode(exchange, config, args, term_override=args.term, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
+            # Determine optimal timeframe for each pair first
+            status.update("[bold blue]Determining optimal timeframes for all pairs...")
+            for symbol in config['pairs']:
+                if args.timeframe:
+                    tf = args.timeframe
+                else:
+                    tf = get_optimal_timeframe(exchange, symbol, config)
+                config['pairs'][symbol]['timeframe'] = tf
+                console.print(f"[dim][{symbol}] Optimal timeframe: {tf}")
+
+            status.update(f"[bold blue]Optimizing strategies for all pairs...")
+            opt_map = run_benchmark_mode(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             # Store profits for prioritization
             pair_priorities = []
             for sym, data in opt_map.items():
@@ -792,12 +908,12 @@ def main():
                         if isinstance(data, list):
                              pattern_manager.set_patterns(sym, data)
 
-                        # Score for prioritization (the profit predicted for the term)
+                        # Score for prioritization (the predicted profit)
                         priority_score = best['profit']
                         config['pairs'][sym]['expected_profit'] = priority_score
                         pair_priorities.append((sym, priority_score))
                         if best.get('is_cached'):
-                             console.print(f"[bold green][{sym}][/] Optimized from [cyan]cached results[/] to [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | {args.term.upper()} Term Profit: {format_price(priority_score)} EUR")
+                             console.print(f"[bold green][{sym}][/] Optimized from [cyan]cached results[/] to [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Predicted Profit: {format_price(priority_score)} EUR")
 
                 time.sleep(1) # Brief pause after bench
 
@@ -868,10 +984,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     # Retrieve patterns for matching
     patterns = pattern_manager.get_patterns(symbol)
 
-    # Timeframe now comes from the expected_profit_terms based on the bot's term (default short)
-    term = global_config.get('_active_term', 'short')
-    term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
-    timeframe = term_cfg.get('timeframe', '5m')
+    timeframe = pair_config.get('timeframe', '1m')
 
     # Try to get from cache first (updated by watch_ohlcv)
     cache_key = f"{symbol}_{timeframe}"
@@ -978,11 +1091,16 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             consecutive_buys = 0
             consecutive_sells = 0
 
-    # Dynamic confirmation window based on term (Instruction 2)
-    # Short: 3, Medium: 2, Long: 1
-    buy_threshold = 1
-    if term == 'medium': buy_threshold = 2
-    elif term == 'long': buy_threshold = 3
+    # Dynamic confirmation window based on timeframe and volatility
+    # 1m -> 1, 3m/5m -> 2, 15m -> 3
+    if timeframe == '1m': buy_threshold = 1
+    elif timeframe in ['3m', '5m']: buy_threshold = 2
+    else: buy_threshold = 3
+
+    # Temper with volatility
+    volatility = latest_row.get('volatility', 0)
+    if volatility > 0.05: # High volatility
+        buy_threshold += 1
 
     return {
         'price': latest_row['close'],
@@ -1015,8 +1133,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
     win_streak = data_manager.get_win_streak(symbol)
 
     # Use the freshest price from our watched OHLCV cache
-    term = global_config.get('_active_term', 'short')
-    timeframe = global_config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '5m')
+    timeframe = global_config['pairs'].get(symbol, {}).get('timeframe', '1m')
     cache_key = f"{symbol}_{timeframe}"
 
     current_price = data['price']
@@ -1289,7 +1406,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     console.print(f"[bold green]Backtest plot saved as {filename}[/]")
     plt.close()
 
-def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='short', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False):
+def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe='1m', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False, eval_candles=None):
     """Core backtesting simulation logic."""
     from indicators import get_signals
 
@@ -1315,14 +1432,9 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
     mc.set_device(device if device is not None else torch.device("cpu"))
 
-    term_settings = config.get('expected_profit_terms', {}).get(term, {})
-    if not term_settings:
-        return None
-
     # Copy settings and inject strategy and timeframe
     test_config = aggr_settings.copy()
     test_config['strategy'] = strategy
-    timeframe = term_settings.get('timeframe', '5m')
 
     if df_in is None:
         # Use a large buffer for indicator stability
@@ -1357,7 +1469,16 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
         return None
 
     # Evaluation window (how many candles we actually trade on)
-    eval_window_base = term_settings.get('eval_candles', 60)
+    if eval_candles:
+        eval_window_base = eval_candles
+    else:
+        # Default based on timeframe
+        if timeframe == '1m': eval_window_base = 60
+        elif timeframe == '3m': eval_window_base = 60
+        elif timeframe == '5m': eval_window_base = 60
+        elif timeframe == '15m': eval_window_base = 96
+        else: eval_window_base = 60
+
     max_rand = max(1, int(eval_window_base * 0.1))
     eval_window = eval_window_base + random.randint(-max_rand, max_rand)
     # We always trade on the LAST eval_window candles of df
@@ -1365,7 +1486,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
 
     if len(df) < eval_window:
         if exchange is not None:
-             console.print(f"[yellow]Warning: Only {len(df)} candles available for {symbol}, but term requested {eval_window}.[/]")
+             console.print(f"[yellow]Warning: Only {len(df)} candles available for {symbol}, but requested {eval_window}.[/]")
 
     # Simulation
     balance = 100.0 # Starting virtual EUR
@@ -1427,7 +1548,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
     equity_series = pd.Series(equity_curve)
     max_dd = (equity_series.cummax() - equity_series).max() / equity_series.cummax().max() if not equity_series.empty else 0
 
-    # Determine evaluation date range
+    # Determine evaluation range
     eval_df = df.iloc[start_idx:] if start_idx < len(df) else df.iloc[-1:]
     start_time_dt = eval_df['timestamp'].iloc[0]
     end_time_dt = eval_df['timestamp'].iloc[-1]
@@ -1462,7 +1583,7 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
 
     strategy = args.strategy or default_strategy
     aggr = args.aggr or config.get('force_agressivity_to_all_pairs', 'normal')
-    term = getattr(args, 'term', 'short')
+    timeframe = args.timeframe or config['pairs'].get(args.symbol, {}).get('timeframe', '1m')
 
     if strategy not in STRATEGIES:
         console.print(f"[bold red]Error: Strategy '{strategy}' not found.[/]")
@@ -1470,8 +1591,8 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
         console.print("[dim]Please check for typos.[/]")
         return
 
-    console.print(f"[bold blue]Running Backtest for {args.symbol} | Strategy: {strategy} | Aggr: {aggr} | Term: {term}...[/]")
-    results = run_backtest_logic(exchange, args.symbol, strategy, aggr, config, term=term, engine=engine, device=device)
+    console.print(f"[bold blue]Running Backtest for {args.symbol} | Strategy: {strategy} | Aggr: {aggr} | Timeframe: {timeframe}...[/]")
+    results = run_backtest_logic(exchange, args.symbol, strategy, aggr, config, timeframe=timeframe, engine=engine, device=device)
 
     if results:
         if results['trades_count'] > 0:
@@ -1487,14 +1608,19 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df_in, engine=None, device=None):
+def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None):
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
     if df_in is None or len(df_in) < 100: return symbol, []
 
-    term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
-    eval_window_base = term_cfg.get('eval_candles', 60)
+    # Default based on timeframe
+    if timeframe == '1m': eval_window_base = 60
+    elif timeframe == '3m': eval_window_base = 60
+    elif timeframe == '5m': eval_window_base = 60
+    elif timeframe == '15m': eval_window_base = 96
+    else: eval_window_base = 60
+
     max_rand = max(1, int(eval_window_base * 0.1))
     eval_window = eval_window_base + random.randint(-max_rand, max_rand)
     patterns = []
@@ -1525,17 +1651,9 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
         # 2. Run a single backtest for the entire dataset
         # We set eval_candles to the whole length to get a continuous equity curve
-        full_term_config = copy.deepcopy(config)
-        # Create a temporary term that covers the whole DF
-        full_term_name = f"full_{strategy}"
-        full_term_config['expected_profit_terms'][full_term_name] = {
-            'eval_candles': len(full_df),
-            'timeframe': term_cfg.get('timeframe', '5m')
-        }
-
-        res_full = run_backtest_logic(None, symbol, strategy, aggr, full_term_config,
-                                     term=full_term_name, df_in=full_df, engine=engine,
-                                     device=device, skip_mc=True, return_full_df=True)
+        res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
+                                     timeframe=timeframe, df_in=full_df, engine=engine,
+                                     device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
 
         if not res_full or not res_full.get('equity_curve'):
             continue
@@ -1561,11 +1679,11 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
             window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
             age_hours = (now_ts - window_ts) / 3600
             recency_score = 1.0
-            if term_to_test == 'short':
+            if timeframe in ['1m', '3m', '5m']:
                  if age_hours > 24: recency_score = 0.8
                  if age_hours > 168: recency_score = 0.5
                  if age_hours > 720: recency_score = 0.2
-            elif term_to_test == 'medium':
+            elif timeframe == '15m':
                  if age_hours > 168: recency_score = 0.8
                  if age_hours > 720: recency_score = 0.5
 
@@ -1625,7 +1743,7 @@ def run_benchmark_for_symbol(symbol, config, term_to_test, aggrs, strategies, df
 
     return symbol, unique_patterns
 
-def run_benchmark_mode(exchange, config, args, term_override=None, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
+def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
 
     # Respect global overrides if they exist
     global_aggr = config.get('force_agressivity_to_all_pairs')
@@ -1637,13 +1755,8 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
     cache_mgr = CacheManager()
 
-    # Cache validity mapping (1hr per evaluation term)
-    terms_cfg = config.get('expected_profit_terms', {})
-    validity_map = {
-        'short': terms_cfg.get('short', {}).get('duration_hours', 1) * 3600,
-        'medium': terms_cfg.get('medium', {}).get('duration_hours', 24) * 3600,
-        'long': terms_cfg.get('long', {}).get('duration_hours', 168) * 3600
-    }
+    # Cache validity mapping (default 1hr)
+    validity_duration = 3600
 
     symbols = [args.symbol] if (hasattr(args, 'symbol') and args.symbol) else list(config.get('pairs', {}).keys())
 
@@ -1652,30 +1765,23 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
     # Best performers across all symbols
     best_overall = {
-        'short': {'profit': -999999, 'params': None},
-        'medium': {'profit': -999999, 'params': None},
-        'long': {'profit': -999999, 'params': None},
         'total': {'profit': -999999, 'params': None}
     }
 
     optimization_map = {}
-    # If explicit benchmark mode (no term_override and not backtest), we scan all terms
-    # Otherwise we scan just the requested term.
-    # Actually, to fulfill Instruction 3, we should ensure we scan what is requested.
-    term_to_test = term_override if term_override else getattr(args, 'term', 'short')
 
     symbols_to_bench = []
     for symbol in symbols:
-        if term_override:
-            cached_patterns = cache_mgr.get(symbol, term_override, validity_map.get(term_override, 3600))
-            if cached_patterns:
-                # cached_patterns is a list of pattern dicts
-                best = cached_patterns[0]
-                best['is_cached'] = True
-                optimization_map[symbol] = best
-                if data_manager:
-                    pattern_manager.set_patterns(symbol, cached_patterns)
-                continue
+        timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+        cached_patterns = cache_mgr.get(symbol, timeframe, validity_duration)
+        if cached_patterns:
+            # cached_patterns is a list of pattern dicts
+            best = cached_patterns[0]
+            best['is_cached'] = True
+            optimization_map[symbol] = best
+            if data_manager:
+                pattern_manager.set_patterns(symbol, cached_patterns)
+            continue
         symbols_to_bench.append(symbol)
 
     if symbols_to_bench:
@@ -1685,8 +1791,6 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
         # Pre-fetch historical data for all symbols in the process
         symbol_data_map = {}
-        term_cfg = config.get('expected_profit_terms', {}).get(term_to_test, {})
-        timeframe = term_cfg.get('timeframe', '5m')
 
         # Date filtering logic
         since_ts = None
@@ -1696,10 +1800,11 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_limit = 10000
+            target_limit = max(1000, config.get('rebenchmark_window', 1000))
             current_since = since_ts
+            timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
 
-            if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching up to {target_limit} candles for {symbol}...")
+            if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching up to {target_limit} candles for {symbol} ({timeframe})...")
 
             try:
                 # Check cache first
@@ -1756,7 +1861,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             # Register signal handler during optimization
             original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
-                futures = [executor.submit(run_benchmark_for_symbol, sym, config, term_to_test, aggrs, strategies, symbol_data_map[sym], engine, device)
+                futures = [executor.submit(run_benchmark_for_symbol, sym, config, config['pairs'][sym].get('timeframe', '1m'), aggrs, strategies, symbol_data_map[sym], engine, device)
                            for sym in symbol_data_map]
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
@@ -1771,37 +1876,33 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                              pattern_manager.set_patterns(sym, patterns)
 
                         period_str = f" [dim](From {best_for_symbol.get('start_time')} to {best_for_symbol.get('end_time')})[/]"
-                        # Always save patterns to benchmark_cache.json
-                        cache_mgr.set(sym, term_to_test, patterns)
+                        # Always save patterns to cache
+                        timeframe = config['pairs'][sym].get('timeframe', '1m')
+                        cache_mgr.set(sym, timeframe, patterns)
 
                         msg_target = status.console if status else console
-                        if term_override:
-                            optimization_map[sym] = best_for_symbol
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym} ({term_override}):[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
-                        else:
-                            msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
+                        optimization_map[sym] = best_for_symbol
+                        msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
 
-                        if best_overall.get(term_to_test) and best_for_symbol['profit'] > best_overall[term_to_test]['profit']:
-                            best_overall[term_to_test] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
-
-                        # Use a generic 'total' score if no term specified
+                        # Use a generic 'total' score for recommendations
                         if best_for_symbol['profit'] > best_overall['total']['profit']:
                              best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
             finally:
                 signal.signal(signal.SIGINT, original_handler)
 
     # If we are in optimization mode for live/sim, return the map
-    if term_override:
-        if status: status.update('[bold green]Optimization complete.')
-        if best_per_symbol:
-            time.sleep(3)
+    if status: status.update('[bold green]Optimization complete.')
+    if best_per_symbol:
+        time.sleep(3)
+
+    if args.mode in ['live', 'simulation']:
         return optimization_map
 
     console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
     found_any = False
-    for term in ['short', 'medium', 'long', 'total']:
-        label = terms_cfg.get(term, {}).get('label', term.upper())
-        data = best_overall.get(term)
+    for key in ['total']:
+        label = "Recommended"
+        data = best_overall.get(key)
         if not data: continue
         if data['params']:
             found_any = True

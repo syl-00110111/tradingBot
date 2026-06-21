@@ -73,13 +73,13 @@ class CacheManager:
     def __init__(self):
         self.cache = {}
 
-    def get(self, symbol, term, max_age_seconds):
-        key = f"{symbol}_{term}"
+    def get(self, symbol, timeframe, max_age_seconds):
+        key = f"{symbol}_{timeframe}"
         if key in self.cache:
             entry = self.cache[key]
             if time.time() - entry['timestamp'] < max_age_seconds: return entry['data']
         return None
 
-    def set(self, symbol, term, data):
-        key = f"{symbol}_{term}"
+    def set(self, symbol, timeframe, data):
+        key = f"{symbol}_{timeframe}"
         self.cache[key] = {'timestamp': time.time(), 'data': data}
