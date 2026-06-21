@@ -46,11 +46,20 @@ The bot features 30+ distinct trading strategies, including:
 
 ## ⚙️ Configuration
 
-### `pairs.txt`
-Trading pairs are now defined in a simple `pairs.txt` file (one per line, e.g., `BTC/EUR`). Base currencies are automatically identified from this list.
+The bot uses several files for configuration. If `config.json` is missing, it falls back to `config.default.json`.
 
-### `api.json`
-Store your credentials and preferred exchange:
+### 📄 `pairs.txt`
+Define the trading pairs you want the bot to monitor (one per line).
+Example:
+```text
+BTC/USDC
+ETH/USDC
+SOL/USDC
+```
+*Base currencies (e.g., USDC) are automatically detected.*
+
+### 🔑 `api.json`
+Store your API credentials and preferred exchange.
 ```json
 {
   "api_key": "YOUR_KEY",
@@ -58,18 +67,42 @@ Store your credentials and preferred exchange:
   "exchange": "binance"
 }
 ```
-*Options: `binance`, `kraken`, `bitvavo`.*
+*   **`exchange`**: Options are `binance`, `kraken`, or `bitvavo`.
 
-### `config.json`
-```json
-{
-    "max_open_positions": 8,
-    "base_trade_amount": 10.0,
-    "global_risk_multiplier": 1.0,
-    "no_signal_threshold": 160,
-    "rebenchmark_window": 1000
-}
-```
+### 🛠 `config.json`
+Main bot settings.
+
+#### Core Settings
+*   **`max_open_positions`**: (int) Maximum number of trades the bot can hold simultaneously.
+*   **`base_trade_amount`**: (float) The amount to spend per trade. If `>= 1.0`, it's treated as a percentage of available balance (e.g., `10.0` = 10%). If `< 1.0`, it's treated as a decimal fraction (e.g., `0.1` = 10%).
+*   **`global_risk_multiplier`**: (float) Scaler for position sizing and technical confirmations. Higher values increase trade size but also require more confirmation signals.
+*   **`win_streak_bonus`**: (Object)
+    *   `enabled`: (bool) Enable/disable position sizing increase on win streaks.
+    *   `threshold`: (int) Number of consecutive wins required.
+    *   `multiplier`: (float) Balance multiplier applied to trade size during a streak.
+
+#### Dynamic Logic Settings
+*   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-benchmark of the symbol (default: `160`).
+*   **`rebenchmark_window`**: (int) Number of historical candles used during a re-benchmark to find the optimal strategy (default: `1000`).
+*   **`timeframe_thresholds`**: (Object) Criteria for dynamic timeframe selection (1m, 3m, 5m, 15m).
+    *   **`volume_24h`**: (low/high) thresholds for 24h trading volume.
+    *   **`spread_pct`**: (low/high) thresholds for the bid/ask spread percentage.
+    *   **`volatility_pct`**: (low/high) thresholds for price volatility percentage.
+    *   **`trades_per_minute`**: (low/high) thresholds for trading frequency.
+
+#### Advanced Overrides (Optional)
+*   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy (e.g., `double_ema_macd_rsi`) for every pair, bypassing benchmarking.
+*   **`force_agressivity_to_all_pairs`**: (string) Force a specific aggressiveness level (e.g., `dynamic`, `normal`, `aggressive`).
+*   **`pairs`**: (Object) Allows per-pair configuration overrides.
+    Example:
+    ```json
+    "pairs": {
+        "BTC/USDC": {
+            "strategy": "moving_averages",
+            "aggr": "aggressive"
+        }
+    }
+    ```
 
 ---
 
