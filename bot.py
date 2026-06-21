@@ -224,12 +224,12 @@ def get_optimal_timeframe(exchange, symbol, config):
         if trades_per_min > tpm_high: score += 1; reasons.append("Active")
         elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
 
-        if score >= 2: tf = '1m'
-        elif score >= 0: tf = '3m'
+        if score >= 0: tf = '1m'
+        elif score >= -1: tf = '3m'
         elif score >= -2: tf = '5m'
         else: tf = '15m'
 
-        logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
+        # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
         return tf
 
     except Exception as e:
@@ -650,7 +650,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                 bot_state[sym]['aggr'] = best['aggr']
                                 bot_state[sym]['strategy'] = best['strategy']
                                 bot_state[sym]['expected_profit'] = best['profit']
-                            logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+                            # logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
 
                             # Re-evaluate timeframe after re-benchmarking (background)
                             new_tf = get_optimal_timeframe(exchange, sym, config)
@@ -689,7 +689,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
                             # 3. Handle re-benchmarking triggers (Asynchronous)
                             if candles_since >= no_signal_thresh and symbol not in active_benchmarks:
-                                logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Scheduling background re-benchmark...")
+                                # logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Scheduling background re-benchmark...")
                                 candles_since = 0
 
                                 # Use cached OHLCV data instead of blocking network call
