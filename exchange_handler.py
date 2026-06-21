@@ -45,6 +45,7 @@ class ExchangeInterface:
     def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
     def fetch_balances(self): raise NotImplementedError
     def fetch_ticker(self, symbol): raise NotImplementedError
+    def fetch_trades(self, symbol, limit=100): raise NotImplementedError
     def fetch_trading_fee(self, symbol): raise NotImplementedError
 
 class BinanceExchange(ExchangeInterface):
@@ -92,6 +93,10 @@ class BinanceExchange(ExchangeInterface):
         try:
             return self.exchange.fetch_balance()
         except Exception as e: logging.error(f"Error fetching balances: {e}"); return None
+
+    def fetch_trades(self, symbol, limit=100):
+        try: return self.exchange.fetch_trades(symbol, limit=limit)
+        except Exception as e: logging.error(f"Error fetching trades for {symbol}: {e}"); return []
 
     def fetch_my_trades(self, symbol, limit=10):
         try: return self.exchange.fetch_my_trades(symbol, limit=limit)
@@ -217,6 +222,14 @@ class MockExchange(ExchangeInterface):
     def fetch_balances(self):
         self._init_balance()
         return {'total': self.balance, 'free': self.balance}
+
+    def fetch_trades(self, symbol, limit=100):
+        if self.real_exchange:
+            return self.real_exchange.fetch_trades(symbol, limit=limit)
+        try:
+            public_ex = ccxt.binance({'session': create_ccxt_session()})
+            return public_ex.fetch_trades(symbol, limit=limit)
+        except Exception: return []
 
     def fetch_my_trades(self, symbol, limit=10):
         if self.real_exchange:
