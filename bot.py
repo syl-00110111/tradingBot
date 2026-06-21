@@ -194,6 +194,7 @@ def render_ascii_chart(symbol, config):
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
+    df_plot.reset_index(drop=True, inplace=True)
 
     plt_ascii.candlestick(indices, df_plot)
 
