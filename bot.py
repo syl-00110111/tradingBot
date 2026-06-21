@@ -55,6 +55,7 @@ pairs_scroll_offset = 0
 logs_scroll_offset = 0
 focused_panel = "pairs"
 ohlcv_cache = {}
+ohlcv_cache_lock = threading.Lock()
 all_logs = []
 status_scroll_index = 0
 expert_mode = False
@@ -413,7 +414,50 @@ def input_thread_func():
             break
         except Exception: pass
 
+def ohlcv_watcher_thread(exchange, symbol, timeframe):
+    """Background thread to watch OHLCV and update cache."""
+    logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
+    try:
+        # Pre-fill cache with historical data for indicator stability
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+        if ohlcv:
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            with ohlcv_cache_lock:
+                ohlcv_cache[f"{symbol}_{timeframe}"] = df
+
+        for candle in exchange.watch_ohlcv(symbol, timeframe):
+            if shutdown_event.is_set(): break
+            # Update cache
+            with ohlcv_cache_lock:
+                cache_key = f"{symbol}_{timeframe}"
+                if cache_key in ohlcv_cache:
+                    df = ohlcv_cache[cache_key]
+                    # candle is [timestamp, open, high, low, close, volume]
+                    new_row = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    new_row['timestamp'] = pd.to_datetime(new_row['timestamp'], unit='ms')
+
+                    # Update or append
+                    if not df.empty and df.iloc[-1]['timestamp'] == new_row.iloc[0]['timestamp']:
+                        df.iloc[-1] = new_row.iloc[0]
+                    else:
+                        ohlcv_cache[cache_key] = pd.concat([df, new_row]).tail(1000)
+                else:
+                    df = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    ohlcv_cache[cache_key] = df
+    except Exception as e:
+        logging.error(f"Error in OHLCV watcher for {symbol}: {e}")
+
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
+    # Start watchers for all pairs
+    term = config.get('_active_term', 'short')
+    term_cfg = config.get('expected_profit_terms', {}).get(term, {})
+    timeframe = term_cfg.get('timeframe', '5m')
+
+    for symbol in config.get('pairs', {}):
+        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, timeframe), daemon=True).start()
+
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
     pair_keys = priority_order if priority_order else list(pairs_dict.keys())
@@ -471,7 +515,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                 if slots_available > 0:
                      # Prioritize by benchmark profit (casted to float for robust sorting)
                      potential_buys.sort(key=lambda x: float(x[1].get('expected_profit', 0)), reverse=True)
-                     balance = exchange.fetch_balance()
+                     balance = exchange.fetch_balances()
                      for i in range(min(len(potential_buys), slots_available)):
                           if shutdown_event.is_set(): break
                           symbol, data = potential_buys[i]
@@ -481,7 +525,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                    data['position'] = data_manager.get_position(symbol)
                                play_sound("buy", config)
                                # Update balance for next iteration
-                               balance = exchange.fetch_balance()
+                               balance = exchange.fetch_balances()
 
             for _ in range(100):
                  if shutdown_event.is_set(): break
@@ -621,7 +665,7 @@ def main():
         elif args.mode == 'balance':
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             exchange.load_markets()
-            show_balance(exchange)
+            show_balances(exchange)
             return
         elif args.mode == 'backtest':
             if not args.symbol:
@@ -742,10 +786,18 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     term_cfg = global_config.get('expected_profit_terms', {}).get(term, {})
     timeframe = term_cfg.get('timeframe', '5m')
 
-    # Large buffer for indicator stability + pattern matching (500 is enough)
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
-    if not ohlcv: return None
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    # Try to get from cache first (updated by watch_ohlcv)
+    cache_key = f"{symbol}_{timeframe}"
+    with ohlcv_cache_lock:
+        if cache_key in ohlcv_cache:
+            df = ohlcv_cache[cache_key].copy()
+        else:
+            # Fallback to fetch if not yet watched
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+            if not ohlcv: return None
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            ohlcv_cache[cache_key] = df
 
     # Pre-calculate common indicators for regime detection
     df = get_signals(df, {"device": device}, is_backtest=False)
@@ -769,28 +821,25 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     if active_pattern:
         strategy_name = active_pattern['strategy']
         mode_name = active_pattern['aggr']
-
-        # Use Dynamic Risk Engine if engine is available
-        if engine:
-            mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
-        else:
-            # Fallback to balanced defaults if no engine
-            mode_settings = {
-                "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
-            }
-
-        mode_settings['strategy'] = strategy_name
-        mode_settings['device'] = device
-        df = get_signals(df, mode_settings, is_backtest=False)
-        latest_row = df.iloc[-1]
     else:
-        # No pattern active -> N/A and No Signals
-        strategy_name = "N/A"
-        mode_name = "N/A"
-        latest_row = latest_row_base.copy()
-        latest_row['buy_signal'] = False
-        latest_row['sell_signal'] = False
+        # Fallback to benchmarked strategy if no pattern matches
+        strategy_name = pair_config.get('strategy', 'double_ema_macd_rsi')
+        mode_name = pair_config.get('aggr', 'normal')
+
+    # Use Dynamic Risk Engine if engine is available
+    if engine:
+        mode_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0))
+    else:
+        # Fallback to balanced defaults if no engine
+        mode_settings = {
+            "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+            "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
+        }
+
+    mode_settings['strategy'] = strategy_name
+    mode_settings['device'] = device
+    df = get_signals(df, mode_settings, is_backtest=False)
+    latest_row = df.iloc[-1]
 
     # Clean up trigger data
     exclude = ['open', 'high', 'low', 'close', 'volume', 'buy_candidate', 'sell_candidate', 'ema_up_win', 'macd_up_win', 'rsi_up_win', 'ema_down_win', 'macd_down_win', 'rsi_down_win', 'ema_up', 'ema_down', 'macd_up', 'macd_down', 'rsi_up', 'rsi_down']
@@ -873,12 +922,18 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
 def execute_buy(exchange, data_manager, engine, symbol, data, global_config, balance=None):
     if balance is None:
-        balance = exchange.fetch_balance()
+        balance = exchange.fetch_balances()
     win_streak = data_manager.get_win_streak(symbol)
 
-    # Refresh price for Spot market accuracy (prevent NOTIONAL filters)
-    fresh_ticker = exchange.fetch_ticker(symbol)
-    current_price = fresh_ticker['last'] if fresh_ticker else data['price']
+    # Use the freshest price from our watched OHLCV cache
+    term = global_config.get('_active_term', 'short')
+    timeframe = global_config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '5m')
+    cache_key = f"{symbol}_{timeframe}"
+
+    current_price = data['price']
+    with ohlcv_cache_lock:
+        if cache_key in ohlcv_cache and not ohlcv_cache[cache_key].empty:
+            current_price = ohlcv_cache[cache_key].iloc[-1]['close']
 
     base_curr = symbol.split('/')[1]
     amount = engine.calculate_position_size(
@@ -927,7 +982,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
         # In simulation, we trust the internal DataManager state
         is_simulation = isinstance(exchange, MockExchange)
 
-        balance = exchange.fetch_balance()
+        balance = exchange.fetch_balances()
         free_balance = balance.get(base_asset, {}).get('free', 0) if 'free' in balance else balance.get(base_asset, 0)
         base_currency = symbol.split('/')[1]
 
@@ -971,7 +1026,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
         if slots_available > 0:
             # Prioritize by benchmark profit
             potential_buys.sort(key=lambda x: float(x[1].get('expected_profit', 0)), reverse=True)
-            balance = exchange.fetch_balance()
+            balance = exchange.fetch_balances()
             for i in range(min(len(potential_buys), slots_available)):
                 symbol, data = potential_buys[i]
                 if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
@@ -980,14 +1035,18 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
                         bot_state[symbol]['price'] = data['price']
                         bot_state[symbol]['last_action'] = 'BUY'
                     # Refresh balance for next buy
-                    balance = exchange.fetch_balance()
+                    balance = exchange.fetch_balances()
 
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
     logging.info("Syncing positions from Binance API...")
-    balance = exchange.fetch_balance()
-    free_balances = balance.get('free', balance)
+    balance = exchange.fetch_balances()
+    # Robustly handle different balance structures
+    if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
+        free_balances = balance['free']
+    else:
+        free_balances = balance
     base_currencies = config.get('base_currencies', ['EUR'])
 
     # We clear local cache for Live mode as requested
@@ -1029,9 +1088,9 @@ def sync_live_positions(exchange, data_manager, config):
 
 
 
-def show_balance(exchange):
+def show_balances(exchange):
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
-    balance = exchange.fetch_balance()
+    balance = exchange.fetch_balances()
 
     table = Table(title="Asset Inventory", expand=True)
     table.add_column("Asset", style="cyan")
@@ -1065,18 +1124,18 @@ def show_balance(exchange):
             for bc in ['EUR', 'USDT', 'USDC']:
                 candidate = f"{asset}/{bc}"
                 # We don't have config here but we can try common ones
-                ticker = exchange.fetch_ticker(candidate)
-                if ticker and ticker.get('last', 0) > 0:
-                     eur_val = total * ticker['last']
+                # Try to use OHLCV instead of fetch_ticker to limit methods
+                ohlcv = exchange.fetch_ohlcv(candidate, '1m', limit=1)
+                if ohlcv and len(ohlcv) > 0:
+                     eur_val = total * ohlcv[0][4]
                      break
-            if ticker:
-                eur_val = total * ticker['last']
-            else:
+
+            if eur_val == 0:
                 # Try USDT bridge if EUR pair not found
-                ticker_usdt = exchange.fetch_ticker(f"{asset}/USDT")
-                ticker_eur_usdt = exchange.fetch_ticker("EUR/USDT")
-                if ticker_usdt and ticker_eur_usdt:
-                    eur_val = (total * ticker_usdt['last']) / ticker_eur_usdt['last']
+                ohlcv_usdt = exchange.fetch_ohlcv(f"{asset}/USDT", '1m', limit=1)
+                ohlcv_eur_usdt = exchange.fetch_ohlcv("EUR/USDT", '1m', limit=1)
+                if ohlcv_usdt and ohlcv_eur_usdt:
+                    eur_val = (total * ohlcv_usdt[0][4]) / ohlcv_eur_usdt[0][4]
 
         total_eur_value += eur_val
         val_str = format_price(eur_val) if eur_val > 0 else "N/A"
@@ -1537,11 +1596,12 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
             try:
                 # Check cache first
                 cache_key = f"{symbol}_{timeframe}_{target_limit}"
-                if cache_key in ohlcv_cache:
-                    df = ohlcv_cache[cache_key]
-                    symbol_data_map[symbol] = df
-                    if not status: console.print(f"[dim][{symbol}] Loaded {len(df)} candles from cache.")
-                    continue
+                with ohlcv_cache_lock:
+                    if cache_key in ohlcv_cache:
+                        df = ohlcv_cache[cache_key]
+                        symbol_data_map[symbol] = df
+                        if not status: console.print(f"[dim][{symbol}] Loaded {len(df)} candles from cache.")
+                        continue
 
                 # Paginate fetch to bypass API limits
                 while len(all_ohlcv) < target_limit:
@@ -1566,7 +1626,8 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                          except Exception: pass
 
                     symbol_data_map[symbol] = df
-                    ohlcv_cache[cache_key] = df
+                    with ohlcv_cache_lock:
+                        ohlcv_cache[cache_key] = df
                     if not status: console.print(f"[dim][{symbol}] Successfully fetched {len(df)} candles.[/]")
                 else:
                     if not status: console.print(f"[yellow]No OHLCV returned for {symbol} ({timeframe}) during pre-fetch.[/]")
