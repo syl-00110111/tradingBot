@@ -149,6 +149,15 @@ def get_signals(df, mode_config, is_backtest=False):
     df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
     df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
 
+    # Calculate base technical score (used for Scr column in UI)
+    df['score'] = 0
+    df.loc[df['ema_f'] > df['ema_s'], 'score'] += 1
+    df.loc[df['ema_f'] < df['ema_s'], 'score'] -= 1
+    df.loc[df['macd_hist'] > 0, 'score'] += 1
+    df.loc[df['macd_hist'] < 0, 'score'] -= 1
+    df.loc[df['rsi'] < 30, 'score'] += 1
+    df.loc[df['rsi'] > 70, 'score'] -= 1
+
     # Calculate tendency (used for UI)
     def get_tendency(row):
         ema_diff = row['ema_f'] - row['ema_s']
