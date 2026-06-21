@@ -1,30 +1,30 @@
 {
-    "max_open_positions": 5,
-    "base_trade_amount": 17.0,
-    "global_risk_multiplier": 1.2,
+    "max_open_positions": 18,
+    "base_trade_amount": 9.0,
+    "global_risk_multiplier": 1.1,
     "win_streak_bonus": {
         "enabled": true,
         "threshold": 2,
-        "multiplier": 1.3
+        "multiplier": 1.2
     },
-    "no_signal_threshold": 160,
-    "rebenchmark_window": 1000,
+    "no_signal_threshold": 8,
+    "rebenchmark_window": 60,
     "timeframe_thresholds": {
         "volume_24h": {
-            "low": 10000,
-            "high": 100000
+            "low": 1000,
+            "high": 10000
         },
         "spread_pct": {
-            "low": 0.05,
-            "high": 0.2
+            "low": 0.01,
+            "high": 0.05
         },
         "volatility_pct": {
             "low": 0.02,
             "high": 0.05
         },
         "trades_per_minute": {
-            "low": 10,
-            "high": 50
+            "low": 5,
+            "high": 20
         }
     }
 }
