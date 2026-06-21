@@ -30,6 +30,7 @@ import signal
 import random
 import concurrent.futures
 import matplotlib.pyplot as plt
+import plotext as plt_ascii
 import torch
 from datetime import datetime, timedelta
 
@@ -52,6 +53,9 @@ from monte_carlo import MonteCarloEngine
 
 # Global controls for dashboard
 pairs_scroll_offset = 0
+selected_pair_index = 0
+show_chart = False
+chart_symbol = None
 logs_scroll_offset = 0
 focused_panel = "pairs"
 ohlcv_cache = {}
@@ -162,11 +166,43 @@ def load_config():
         sys.exit(1)
     return load_config_from_path(path)
 
+def render_ascii_chart(symbol, config):
+    term = config.get('_active_term', 'short')
+    timeframe = config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '5m')
+    cache_key = f"{symbol}_{timeframe}"
+
+    with ohlcv_cache_lock:
+        if cache_key not in ohlcv_cache or ohlcv_cache[cache_key].empty:
+            return Text(f"No data available for {symbol}", style="bold red")
+        df = ohlcv_cache[cache_key].copy()
+
+    # Limit to last 100 candles for the chart
+    df = df.tail(100)
+
+    plt_ascii.clf()
+    plt_ascii.theme('dark')
+    plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
+    # plotext expects columns: Open, High, Low, Close
+    df_plot = df[['open', 'high', 'low', 'close']].copy()
+    df_plot.columns = ['Open', 'High', 'Low', 'Close']
+    plt_ascii.candlestick(df['timestamp'], df_plot)
+
+    # Get plot size from console
+    # make_dashboard is called with console context
+    width = console.width - 10
+    height = console.height - 15
+    if width < 20: width = 20
+    if height < 10: height = 10
+
+    plt_ascii.plotsize(width, height)
+    return Text.from_ansi(plt_ascii.build())
+
 def make_dashboard(global_mode, config):
     now = datetime.now()
     now_ts = time.time()
     global status_scroll_index, pairs_scroll_offset, logs_scroll_offset
     global pairs_pause_until, logs_pause_until, status_pause_until, last_marquee_update
+    global selected_pair_index, show_chart, chart_symbol
 
     # Slow down marquee (e.g., 2 steps per second)
     should_step = False
@@ -249,7 +285,11 @@ def make_dashboard(global_mode, config):
         pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
         visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
 
-        for symbol in visible_symbols:
+        for i, symbol in enumerate(visible_symbols):
+            abs_idx = pairs_scroll_offset + i
+            is_selected = (abs_idx == selected_pair_index and focused_panel == "pairs")
+            row_style = "bold reverse" if is_selected else ""
+
             data = bot_state[symbol]
             has_position = data.get('position') is not None
 
@@ -311,7 +351,7 @@ def make_dashboard(global_mode, config):
                       data.get('strategy', 'N/A')
                  ]
 
-            table.add_row(*row_vals)
+            table.add_row(*row_vals, style=row_style)
 
         # Add a spacer row if we are at the end of the list to ensure the last line isn't cut off
         if len(visible_symbols) > 0 and visible_symbols[-1] == sorted_symbols[-1]:
@@ -352,13 +392,18 @@ def make_dashboard(global_mode, config):
         help_text = Text()
         help_text.append("\n[bold cyan]Keyboard Shortcuts:[/]\n", style="white")
         help_text.append("  TAB    : Switch focus between Logs and Pairs\n")
-        help_text.append("  UP/DN  : Scroll the focused panel\n")
+        help_text.append("  UP/DN  : Move selection / Scroll the focused panel\n")
+        help_text.append("  ENTER  : Show/Hide K-Lines for selected symbol\n")
         help_text.append("  X      : Toggle Expert Mode (Show/Hide Indicators)\n")
         help_text.append("  M      : Toggle Marquee Effect (Pause/Resume scrolling)\n")
         help_text.append("  H      : Close this help menu\n")
         help_text.append("  Ctrl+C : Stop the bot gracefully\n")
 
         pairs_panel = Panel(help_text, title="[bold]Help / Info[/]", border_style="bold yellow")
+
+    if show_chart:
+        chart_content = render_ascii_chart(chart_symbol, config)
+        pairs_panel = Panel(chart_content, title=f"[bold]K-Lines: {chart_symbol}[/]", border_style="bold magenta")
 
     layout = Layout()
     layout.split(
@@ -370,7 +415,7 @@ def make_dashboard(global_mode, config):
     return layout
 
 def input_thread_func():
-    global pairs_scroll_offset, logs_scroll_offset, focused_panel
+    global pairs_scroll_offset, selected_pair_index, show_chart, chart_symbol, logs_scroll_offset, focused_panel
     global pairs_pause_until, logs_pause_until, expert_mode, show_help, marquee_enabled
     while not shutdown_event.is_set():
         try:
@@ -384,22 +429,35 @@ def input_thread_func():
                  if pairs_height < 3: pairs_height = 3
                  max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
 
+            if show_chart:
+                if key in [readchar.key.ENTER, readchar.key.ESC, 'q', 'Q']:
+                    show_chart = False
+                continue
+
             if key == readchar.key.TAB:
                 focused_panel = "logs" if focused_panel == "pairs" else "pairs"
             elif key == readchar.key.UP:
                 if focused_panel == "pairs":
-                    pairs_scroll_offset = max(0, pairs_scroll_offset - 1)
+                    selected_pair_index = max(0, selected_pair_index - 1)
+                    if selected_pair_index < pairs_scroll_offset:
+                        pairs_scroll_offset = selected_pair_index
                     pairs_pause_until = time.time() + 5 # Longer pause on manual interaction
                 else:
                     logs_scroll_offset = min(max_logs_offset, logs_scroll_offset + 1)
                     logs_pause_until = time.time() + 5
             elif key == readchar.key.DOWN:
                 if focused_panel == "pairs":
-                    pairs_scroll_offset = min(max_pairs_offset, pairs_scroll_offset + 1)
+                    selected_pair_index = min(len(sorted_symbols) - 1, selected_pair_index + 1)
+                    if selected_pair_index >= pairs_scroll_offset + pairs_height:
+                        pairs_scroll_offset = selected_pair_index - pairs_height + 1
                     pairs_pause_until = time.time() + 5
                 else:
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
                     logs_pause_until = time.time() + 5
+            elif key == readchar.key.ENTER:
+                if focused_panel == "pairs" and sorted_symbols:
+                    chart_symbol = sorted_symbols[selected_pair_index]
+                    show_chart = True
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'm':
@@ -423,6 +481,7 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe):
         if ohlcv:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
             with ohlcv_cache_lock:
                 ohlcv_cache[f"{symbol}_{timeframe}"] = df
 
@@ -435,16 +494,19 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe):
                     df = ohlcv_cache[cache_key]
                     # candle is [timestamp, open, high, low, close, volume]
                     new_row = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    new_row['timestamp'] = pd.to_datetime(new_row['timestamp'], unit='ms')
+                    new_ts = pd.to_datetime(new_row['timestamp'], unit='ms').iloc[0]
+                    new_row['timestamp'] = new_ts
+                    new_row.set_index('timestamp', drop=False, inplace=True)
 
                     # Update or append
-                    if not df.empty and df.iloc[-1]['timestamp'] == new_row.iloc[0]['timestamp']:
-                        df.iloc[-1] = new_row.iloc[0]
+                    if not df.empty and new_ts in df.index:
+                        df.loc[new_ts] = new_row.iloc[0]
                     else:
                         ohlcv_cache[cache_key] = pd.concat([df, new_row]).tail(1000)
                 else:
                     df = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df.set_index('timestamp', drop=False, inplace=True)
                     ohlcv_cache[cache_key] = df
     except Exception as e:
         logging.error(f"Error in OHLCV watcher for {symbol}: {e}")
@@ -797,7 +859,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            ohlcv_cache[cache_key] = df
+            df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
+            with ohlcv_cache_lock:
+                ohlcv_cache[cache_key] = df
 
     # Pre-calculate common indicators for regime detection
     df = get_signals(df, {"device": device}, is_backtest=False)
@@ -1231,6 +1295,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, term='shor
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
     else:
         df = df_in.copy()
 
@@ -1617,6 +1682,7 @@ def run_benchmark_mode(exchange, config, args, term_override=None, status=None, 
                 if all_ohlcv:
                     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
 
                     # Filter by --until if provided
                     if args.until:
