@@ -73,22 +73,22 @@ Store your API credentials and preferred exchange.
 Main bot settings.
 
 #### Core Settings
-*   **`max_open_positions`**: (int) Maximum number of trades the bot can hold simultaneously.
-*   **`base_trade_amount`**: (float) The amount to spend per trade. If `>= 1.0`, it's treated as a percentage of available balance (e.g., `10.0` = 10%). If `< 1.0`, it's treated as a decimal fraction (e.g., `0.1` = 10%).
-*   **`global_risk_multiplier`**: (float) Scaler for position sizing and technical confirmations. Higher values increase trade size but also require more confirmation signals.
+*   **`max_open_positions`**: (int) Maximum number of trades the bot can hold simultaneously (default: `18`).
+*   **`base_trade_amount`**: (float) The amount to spend per trade (default: `9.0`). If `>= 1.0`, it's treated as a percentage of available balance (e.g., `10.0` = 10%). If `< 1.0`, it's treated as a decimal fraction (e.g., `0.1` = 10%).
+*   **`global_risk_multiplier`**: (float) Scaler for position sizing and technical confirmations (default: `1.1`). Higher values increase trade size but also require more confirmation signals.
 *   **`win_streak_bonus`**: (Object)
-    *   `enabled`: (bool) Enable/disable position sizing increase on win streaks.
-    *   `threshold`: (int) Number of consecutive wins required.
-    *   `multiplier`: (float) Balance multiplier applied to trade size during a streak.
+    *   `enabled`: (bool) Enable/disable position sizing increase on win streaks (default: `true`).
+    *   `threshold`: (int) Number of consecutive wins required (default: `2`).
+    *   `multiplier`: (float) Balance multiplier applied to trade size during a streak (default: `1.2`).
 
 #### Dynamic Logic Settings
-*   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-benchmark of the symbol (default: `160`).
-*   **`rebenchmark_window`**: (int) Number of historical candles used during a re-benchmark to find the optimal strategy (default: `1000`).
+*   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-benchmark of the symbol (default: `8`).
+*   **`rebenchmark_window`**: (int) Number of historical candles used during a re-benchmark to find the optimal strategy (default: `60`).
 *   **`timeframe_thresholds`**: (Object) Criteria for dynamic timeframe selection (1m, 3m, 5m, 15m).
-    *   **`volume_24h`**: (low/high) thresholds for 24h trading volume.
-    *   **`spread_pct`**: (low/high) thresholds for the bid/ask spread percentage.
-    *   **`volatility_pct`**: (low/high) thresholds for price volatility percentage.
-    *   **`trades_per_minute`**: (low/high) thresholds for trading frequency.
+    *   **`volume_24h`**: (low/high) thresholds for 24h trading volume (default: `1000`/`10000`).
+    *   **`spread_pct`**: (low/high) thresholds for the bid/ask spread percentage (default: `0.01`/`0.05`).
+    *   **`volatility_pct`**: (low/high) thresholds for price volatility percentage (default: `0.02`/`0.05`).
+    *   **`trades_per_minute`**: (low/high) thresholds for trading frequency (default: `5`/`20`).
 
 #### Advanced Overrides (Optional)
 *   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy (e.g., `double_ema_macd_rsi`) for every pair, bypassing benchmarking.

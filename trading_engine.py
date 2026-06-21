@@ -6,7 +6,7 @@ import logging
 class TradingEngine:
     def __init__(self, config):
         self.config = config
-        self.risk_multiplier = float(config.get('global_risk_multiplier', 1.2))
+        self.risk_multiplier = float(config.get('global_risk_multiplier', 1.1))
 
     def get_dynamic_settings(self, adx, volatility):
         settings = {
@@ -44,14 +44,14 @@ class TradingEngine:
             else: base_balance = balance.get(base_currency, 0)
         else: base_balance = balance.get(base_currency, 0)
 
-        raw_val = float(self.config.get('base_trade_amount', 17.0))
+        raw_val = float(self.config.get('base_trade_amount', 9.0))
         base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
         trade_amount_base = base_balance * base_percentage
         trade_amount_base *= self.risk_multiplier
 
         ws_config = self.config.get('win_streak_bonus', {})
         if ws_config.get('enabled') and win_streak >= ws_config.get('threshold', 2):
-             multiplier = ws_config.get('multiplier', 1.3)
+             multiplier = ws_config.get('multiplier', 1.2)
              trade_amount_base *= multiplier
              logging.info(f"Win streak detected ({win_streak}), applying {multiplier}x multiplier. New target: {trade_amount_base:.2f} {base_currency}")
 
