@@ -56,6 +56,7 @@ pairs_scroll_offset = 0
 selected_pair_index = 0
 show_chart = False
 chart_symbol = None
+chart_cache = {"symbol": None, "last_update": 0, "content": None}
 logs_scroll_offset = 0
 focused_panel = "pairs"
 ohlcv_cache = {}
@@ -167,6 +168,7 @@ def load_config():
     return load_config_from_path(path)
 
 def render_ascii_chart(symbol, config):
+    global chart_cache
     term = config.get('_active_term', 'short')
     timeframe = config.get('expected_profit_terms', {}).get(term, {}).get('timeframe', '5m')
     cache_key = f"{symbol}_{timeframe}"
@@ -178,30 +180,46 @@ def render_ascii_chart(symbol, config):
 
     # Limit to last 100 candles for the chart
     df = df.tail(100)
+    last_ts = int(df.iloc[-1]['timestamp'].timestamp())
 
-    # Ensure integer index for plotext compatibility (must be 0-based for plotext)
-    df.reset_index(drop=True, inplace=True)
+    # Performance: Check cache
+    if chart_cache["symbol"] == symbol and chart_cache["last_update"] == last_ts:
+         return chart_cache["content"]
 
     plt_ascii.clf()
     plt_ascii.theme('dark')
     plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
 
-    # plotext expects columns: Open, High, Low, Close
-    # Bug Fix: Convert timestamps to strings to avoid plotext crash with pandas Timestamp objects
-    dates = df['timestamp'].dt.strftime("%H:%M").tolist()
+    # Use numeric indices for x-axis to avoid parsing crashes (ValueError: Date Form should be...)
+    indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
-    plt_ascii.candlestick(dates, df_plot)
+
+    plt_ascii.candlestick(indices, df_plot)
+
+    # Set xticks manually for labels
+    if len(df) > 5:
+         step = len(df) // 5
+         tick_indices = list(range(0, len(df), step))
+         tick_labels = [df.iloc[i]['timestamp'].strftime("%H:%M") for i in tick_indices]
+         plt_ascii.xticks(tick_indices, tick_labels)
 
     # Get plot size from console
-    # make_dashboard is called with console context
     width = console.width - 10
     height = console.height - 15
     if width < 20: width = 20
     if height < 10: height = 10
 
     plt_ascii.plotsize(width, height)
-    return Text.from_ansi(plt_ascii.build())
+    content = Text.from_ansi(plt_ascii.build())
+
+    # Update cache
+    chart_cache = {
+         "symbol": symbol,
+         "last_update": last_ts,
+         "content": content
+    }
+    return content
 
 def make_dashboard(global_mode, config):
     now = datetime.now()
@@ -1020,23 +1038,29 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)})")
             return False
 
-        order = exchange.create_order(symbol, 'buy', amount)
-        if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
-            logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
+        try:
+            order = exchange.create_order(symbol, 'buy', amount)
+            if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
+                logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
+                suspended_pairs.add(symbol)
+                return False
+            if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
+                logging.error(f"[{symbol}] Buy failed: Filter failure NOTIONAL. Suspending pair.")
+                suspended_pairs.add(symbol)
+                return False
+            if order:
+                fee = order.get('calculated_fee', 0)
+                total_paid = (amount * current_price) + fee
+                logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {current_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
+                return True
+            else:
+                logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}. Suspending pair.")
+                suspended_pairs.add(symbol)
+        except Exception as e:
+            logging.error(f"[{symbol}] Buy failed with exception: {e}. Suspending pair.")
             suspended_pairs.add(symbol)
             return False
-        if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
-            logging.error(f"[{symbol}] Buy failed: Filter failure NOTIONAL. Suspending pair.")
-            suspended_pairs.add(symbol)
-            return False
-        if order:
-            fee = order.get('calculated_fee', 0)
-            total_paid = (amount * current_price) + fee
-            logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {current_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-            data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
-            return True
-        else:
-            logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}")
     else:
         logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
     return False
@@ -1151,7 +1175,19 @@ def sync_live_positions(exchange, data_manager, config):
 
         if is_dust: continue
         sellable_found = True
-        logging.warning(f"[{symbol}] Asset found in wallet. Please manage this asset manually as previous trades are not retrieved.")
+
+        # Fetch current price for placeholder entry
+        curr_price = 0
+        try:
+             ticker = exchange.fetch_ticker(symbol)
+             if ticker: curr_price = ticker['last']
+        except: pass
+
+        if curr_price > 0:
+             logging.info(f"[{symbol}] Auto-populating position from wallet ({amount:.6f} units).")
+             data_manager.add_position(symbol, curr_price, amount, 0, {"info": "auto_populated"}, time.time(), total_base=amount*curr_price)
+        else:
+             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. Please manage manually.")
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
         logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits). Please add funds or use the exchange website to convert dust to a base currency.")
