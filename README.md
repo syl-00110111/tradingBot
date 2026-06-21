@@ -21,6 +21,8 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **GPU Acceleration**: Calculations are offloaded to the graphics chip via PyTorch. Supported backends: **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** and **ROCm**.
 - **Multi-Processing Benchmark**: Strategy optimization is parallelized across all CPU cores.
 - **Fresh Ticker Price**: Fetches a fresh price from the exchange immediately before placing a Buy order to ensure compliance with Spot market NOTIONAL limits and reduce "Filter failure" errors.
+- **Interactive Dashboard**: Navigate through trading pairs with arrow keys and visualize real-time ASCII candlestick charts by pressing **ENTER**.
+- **Auto-Position Discovery**: Automatically identifies existing assets in your wallet and populates them as managed positions for strategy-based exits.
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
 
 ### 🛡 Risk Management
@@ -28,6 +30,7 @@ This bot implements strategies and logic recommended by leading empirical studie
   - **Short Term (1h)**: 1 signal
   - **Medium Term (1d)**: 2 signals
   - **Long Term (1w)**: 3 signals
+- **Automatic Suspension**: Automatically suspends trading for symbols where orders fail (e.g. insufficient balance or exchange limits) to prevent logic loops.
 - **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 10.0 = 10%).
 
 ---
