@@ -74,7 +74,7 @@ Main bot settings.
 
 #### Core Settings
 *   **`max_open_positions`**: (int) Maximum number of trades the bot can hold simultaneously (default: `18`).
-*   **`base_trade_amount`**: (float) The amount to spend per trade (default: `9.0`). If `>= 1.0`, it's treated as a percentage of available balance (e.g., `10.0` = 10%). If `< 1.0`, it's treated as a decimal fraction (e.g., `0.1` = 10%).
+*   **`base_trade_amount`**: (float) The amount to spend per trade (default: `9.0`). If `>= 1.0`, it's treated as a percentage of available balance (e.g., `9.0` = 9%). If `< 1.0`, it's treated as a decimal fraction (e.g., `0.1` = 10%).
 *   **`global_risk_multiplier`**: (float) Scaler for position sizing and technical confirmations (default: `1.1`). Higher values increase trade size but also require more confirmation signals.
 *   **`win_streak_bonus`**: (Object)
     *   `enabled`: (bool) Enable/disable position sizing increase on win streaks (default: `true`).
