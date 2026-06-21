@@ -188,8 +188,8 @@ def get_optimal_timeframe(exchange, symbol, config):
         if ticker.get('ask') and ticker.get('bid') and ticker['bid'] > 0:
             spread = ticker['ask'] - ticker['bid']
             spread_pct = (spread / ticker['bid']) * 100
-        spr_low = thresholds.get('spread_pct', {}).get('low', 0.1)
-        spr_high = thresholds.get('spread_pct', {}).get('high', 0.5)
+        spr_low = thresholds.get('spread_pct', {}).get('low', 0.01)
+        spr_high = thresholds.get('spread_pct', {}).get('high', 0.05)
 
         # 3. Volatility
         volatility = 0.05
@@ -570,7 +570,7 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
     # logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
     try:
         # Pre-fill cache with historical data for indicator stability
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=max(500, config.get('rebenchmark_window', 1000)))
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=max(500, config.get('rebenchmark_window', 60)))
         if ohlcv:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -646,7 +646,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                         if data:
                             with bot_lock:
                                 # Re-benchmarking logic
-                                no_signal_thresh = config.get('no_signal_threshold', 160)
+                                no_signal_thresh = config.get('no_signal_threshold', 8)
                                 if not data.get('buy') and not data.get('sell'):
                                     bot_state[symbol]['candles_since_last_signal'] = bot_state[symbol].get('candles_since_last_signal', 0) + 1
                                 else:
@@ -665,7 +665,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                         # For simplicity, we'll keep the same watcher but fetch for benchmark with new tf
 
                                     # Fetch data for re-benchmark
-                                    target_limit = config.get('rebenchmark_window', 1000)
+                                    target_limit = config.get('rebenchmark_window', 60)
                                     timeframe = config['pairs'][symbol].get('timeframe', '1m')
                                     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=target_limit)
                                     if ohlcv:
@@ -703,7 +703,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                         logging.error(f"Error analyzing {symbol}: {e}")
 
             if potential_buys and not shutdown_event.is_set():
-                max_open = int(config.get('max_open_positions', 5))
+                max_open = int(config.get('max_open_positions', 18))
                 current_open = len(data_manager.get_open_positions())
                 slots_available = max_open - current_open
                 if slots_available > 0:
@@ -963,7 +963,7 @@ def play_sound(action, config=None):
             import winsound
             if action == "startup":
                  # Randomized sequence equal to max_open_positions
-                 num_blips = int(config.get('max_open_positions', 5)) if config else 5
+                 num_blips = int(config.get('max_open_positions', 18)) if config else 18
                  for _ in range(num_blips):
                       freq = random.randint(400, 1200)
                       dur = random.randint(100, 300)
@@ -1232,7 +1232,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
                 potential_buys.append((symbol, data))
 
     if potential_buys:
-        max_open = int(config.get('max_open_positions', 5))
+        max_open = int(config.get('max_open_positions', 18))
         current_open = len(data_manager.get_open_positions())
         slots_available = max_open - current_open
         if slots_available > 0:
@@ -1515,7 +1515,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
             position = None
 
         # Buy logic
-        raw_val = float(config.get('base_trade_amount', 10.0))
+        raw_val = float(config.get('base_trade_amount', 9.0))
         base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
         trade_amount = balance * base_percentage
         if not position and row['buy_signal'] and balance >= trade_amount:
@@ -1800,7 +1800,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_limit = max(1000, config.get('rebenchmark_window', 1000))
+            target_limit = max(1000, config.get('rebenchmark_window', 60))
             current_since = since_ts
             timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
 
