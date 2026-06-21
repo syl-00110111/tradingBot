@@ -1,6 +1,6 @@
-# 🛸 Cryptocurrencies Trading Bot: Advanced Quantitative & Scientific Suite
+# 🛸 Cryptocurrencies Trading Bot
 
-An industrial-grade trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, and **Bitvavo** (MICA-compliant European exchanges) via the CCXT library. Other markets could be added easily.
+A trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, and **Bitvavo** (MICA-compliant European exchanges) via the CCXT library. Other markets could be added easily.
 
 ---
 
