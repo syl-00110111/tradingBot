@@ -179,9 +179,13 @@ def render_ascii_chart(symbol, config):
     # Limit to last 100 candles for the chart
     df = df.tail(100)
 
+    # Ensure integer index for plotext compatibility (must be 0-based for plotext)
+    df.reset_index(drop=True, inplace=True)
+
     plt_ascii.clf()
     plt_ascii.theme('dark')
     plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
+
     # plotext expects columns: Open, High, Low, Close
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
