@@ -187,9 +187,11 @@ def render_ascii_chart(symbol, config):
     plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
 
     # plotext expects columns: Open, High, Low, Close
+    # Bug Fix: Convert timestamps to strings to avoid plotext crash with pandas Timestamp objects
+    dates = df['timestamp'].dt.strftime("%H:%M").tolist()
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
-    plt_ascii.candlestick(df['timestamp'], df_plot)
+    plt_ascii.candlestick(dates, df_plot)
 
     # Get plot size from console
     # make_dashboard is called with console context
