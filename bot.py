@@ -667,7 +667,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                     logging.info(f"[{symbol}] Updating timeframe to {new_tf}")
                                     config['pairs'][symbol]['timeframe'] = new_tf
 
-                                target_limit = config.get('rebenchmark_window', 60)
+                                target_limit = max(500, config.get('rebenchmark_window', 60))
                                 timeframe = config['pairs'][symbol].get('timeframe', '1m')
                                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=target_limit)
                                 if ohlcv:
@@ -697,6 +697,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             if data.get('sell_triggered'):
                                  if execute_sell(exchange, data_manager, engine, symbol, data):
                                       with bot_lock:
+                                          bot_state[symbol]['last_action'] = 'SELL'
+                                          bot_state[symbol]['position'] = None
                                           data['last_action'] = 'SELL'
                                           data['position'] = None
                                       play_sound("sell", config)
@@ -719,6 +721,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                           symbol, data = potential_buys[i]
                           if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
                                with bot_lock:
+                                   bot_state[symbol]['last_action'] = 'BUY'
+                                   bot_state[symbol]['position'] = data_manager.get_position(symbol)
                                    data['last_action'] = 'BUY'
                                    data['position'] = data_manager.get_position(symbol)
                                play_sound("buy", config)
