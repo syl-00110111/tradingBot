@@ -644,51 +644,55 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     try:
                         data = future.result()
                         if data:
+                            # Re-benchmarking logic moved OUTSIDE bot_lock to prevent dashboard freezes
+                            no_signal_thresh = config.get('no_signal_threshold', 8)
+
+                            # Use a temporary read to check threshold without holding the lock long
                             with bot_lock:
-                                # Re-benchmarking logic
-                                no_signal_thresh = config.get('no_signal_threshold', 8)
-                                if not data.get('buy') and not data.get('sell'):
-                                    bot_state[symbol]['candles_since_last_signal'] = bot_state[symbol].get('candles_since_last_signal', 0) + 1
-                                else:
-                                    bot_state[symbol]['candles_since_last_signal'] = 0
+                                candles_since = bot_state[symbol].get('candles_since_last_signal', 0)
 
-                                if bot_state[symbol]['candles_since_last_signal'] >= no_signal_thresh:
-                                    logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Re-benchmarking...")
-                                    bot_state[symbol]['candles_since_last_signal'] = 0
+                            if not data.get('buy') and not data.get('sell'):
+                                candles_since += 1
+                            else:
+                                candles_since = 0
 
-                                    # Re-evaluate timeframe
-                                    new_tf = get_optimal_timeframe(exchange, symbol, config)
-                                    if new_tf != config['pairs'][symbol].get('timeframe'):
-                                        logging.info(f"[{symbol}] Updating timeframe to {new_tf}")
-                                        config['pairs'][symbol]['timeframe'] = new_tf
-                                        # Restart watcher for new timeframe?
-                                        # For simplicity, we'll keep the same watcher but fetch for benchmark with new tf
+                            if candles_since >= no_signal_thresh:
+                                logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Re-benchmarking...")
+                                candles_since = 0
 
-                                    # Fetch data for re-benchmark
-                                    target_limit = config.get('rebenchmark_window', 60)
-                                    timeframe = config['pairs'][symbol].get('timeframe', '1m')
-                                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=target_limit)
-                                    if ohlcv:
-                                        df_bench = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                                        df_bench['timestamp'] = pd.to_datetime(df_bench['timestamp'], unit='ms')
-                                        df_bench = df_bench.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
+                                # Network calls (get_optimal_timeframe, fetch_ohlcv) and heavy CPU (run_benchmark_for_symbol)
+                                # are now done outside bot_lock.
+                                new_tf = get_optimal_timeframe(exchange, symbol, config)
+                                if new_tf != config['pairs'][symbol].get('timeframe'):
+                                    logging.info(f"[{symbol}] Updating timeframe to {new_tf}")
+                                    config['pairs'][symbol]['timeframe'] = new_tf
 
-                                        global_aggr = config.get('force_agressivity_to_all_pairs')
-                                        global_strat = config.get('force_strategy_to_all_pairs')
-                                        aggrs = [global_aggr] if global_aggr else ['dynamic']
-                                        strategies = [global_strat] if global_strat else STRATEGIES
+                                target_limit = config.get('rebenchmark_window', 60)
+                                timeframe = config['pairs'][symbol].get('timeframe', '1m')
+                                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=target_limit)
+                                if ohlcv:
+                                    df_bench = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                                    df_bench['timestamp'] = pd.to_datetime(df_bench['timestamp'], unit='ms')
+                                    df_bench = df_bench.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
 
-                                        _, patterns = run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_bench, engine, device)
-                                        if patterns:
-                                            best = patterns[0]
-                                            config['pairs'][symbol]['aggr'] = best['aggr']
-                                            config['pairs'][symbol]['strategy'] = best['strategy']
-                                            config['pairs'][symbol]['expected_profit'] = best['profit']
-                                            pattern_manager.set_patterns(symbol, patterns)
-                                            logging.info(f"[{symbol}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+                                    global_aggr = config.get('force_agressivity_to_all_pairs')
+                                    global_strat = config.get('force_strategy_to_all_pairs')
+                                    aggrs = [global_aggr] if global_aggr else ['dynamic']
+                                    strategies = [global_strat] if global_strat else STRATEGIES
 
+                                    _, patterns = run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_bench, engine, device)
+                                    if patterns:
+                                        best = patterns[0]
+                                        config['pairs'][symbol]['aggr'] = best['aggr']
+                                        config['pairs'][symbol]['strategy'] = best['strategy']
+                                        config['pairs'][symbol]['expected_profit'] = best['profit']
+                                        pattern_manager.set_patterns(symbol, patterns)
+                                        logging.info(f"[{symbol}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+
+                            with bot_lock:
                                 data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
                                 bot_state[symbol].update(data)
+                                bot_state[symbol]['candles_since_last_signal'] = candles_since
 
                             if data.get('sell_triggered'):
                                  if execute_sell(exchange, data_manager, engine, symbol, data):
@@ -988,18 +992,20 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
     # Try to get from cache first (updated by watch_ohlcv)
     cache_key = f"{symbol}_{timeframe}"
+    df = None
     with ohlcv_cache_lock:
         if cache_key in ohlcv_cache:
             df = ohlcv_cache[cache_key].copy()
-        else:
-            # Fallback to fetch if not yet watched
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
-            if not ohlcv: return None
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
-            with ohlcv_cache_lock:
-                ohlcv_cache[cache_key] = df
+
+    if df is None:
+        # Fallback to fetch if not yet watched (Done OUTSIDE the lock to prevent freezing)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+        if not ohlcv: return None
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
+        with ohlcv_cache_lock:
+            ohlcv_cache[cache_key] = df
 
     # Pre-calculate common indicators for regime detection
     df = get_signals(df, {"device": device}, is_backtest=False)
