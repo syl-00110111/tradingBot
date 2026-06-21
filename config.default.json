@@ -7,24 +7,24 @@
         "threshold": 2,
         "multiplier": 1.3
     },
-    "expected_profit_terms": {
-        "short": {
-            "label": "Short Term (1h)",
-            "duration_hours": 1,
-            "timeframe": "1m",
-            "eval_candles": 60
+    "no_signal_threshold": 160,
+    "rebenchmark_window": 1000,
+    "timeframe_thresholds": {
+        "volume_24h": {
+            "low": 10000,
+            "high": 100000
         },
-        "medium": {
-            "label": "Medium Term (1d)",
-            "duration_hours": 24,
-            "timeframe": "15m",
-            "eval_candles": 96
+        "spread_pct": {
+            "low": 0.05,
+            "high": 0.2
         },
-        "long": {
-            "label": "Long Term (1w)",
-            "duration_hours": 168,
-            "timeframe": "1h",
-            "eval_candles": 168
+        "volatility_pct": {
+            "low": 0.02,
+            "high": 0.05
+        },
+        "trades_per_minute": {
+            "low": 10,
+            "high": 50
         }
     }
 }
