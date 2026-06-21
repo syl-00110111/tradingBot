@@ -616,11 +616,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
     last_assets_update = 0
     sim_init_done = False
+    active_benchmarks = {} # symbol -> future
 
     time.sleep(5)
     exchange.load_markets()
 
-    while not shutdown_event.is_set():
+    # Use a persistent ProcessPoolExecutor for re-benchmarking
+    with concurrent.futures.ProcessPoolExecutor() as bench_executor:
+      while not shutdown_event.is_set():
         if mode == 'simulation' and not sim_init_done:
             initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
             sim_init_done = True
@@ -631,10 +634,40 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             sim_init_done = True
 
         try:
+            # 1. Check completed re-benchmarks
+            completed_symbols = []
+            for sym, future in active_benchmarks.items():
+                if future.done():
+                    try:
+                        sym_result, patterns = future.result()
+                        if patterns:
+                            best = patterns[0]
+                            config['pairs'][sym]['aggr'] = best['aggr']
+                            config['pairs'][sym]['strategy'] = best['strategy']
+                            config['pairs'][sym]['expected_profit'] = best['profit']
+                            pattern_manager.set_patterns(sym, patterns)
+                            with bot_lock:
+                                bot_state[sym]['aggr'] = best['aggr']
+                                bot_state[sym]['strategy'] = best['strategy']
+                                bot_state[sym]['expected_profit'] = best['profit']
+                            logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+
+                            # Re-evaluate timeframe after re-benchmarking (background)
+                            new_tf = get_optimal_timeframe(exchange, sym, config)
+                            if new_tf != config['pairs'][sym].get('timeframe'):
+                                logging.info(f"[{sym}] Updating timeframe to {new_tf}")
+                                config['pairs'][sym]['timeframe'] = new_tf
+
+                    except Exception as e:
+                        logging.error(f"Error in background re-benchmark for {sym}: {e}")
+                    completed_symbols.append(sym)
+
+            for sym in completed_symbols:
+                del active_benchmarks[sym]
 
             potential_buys = []
 
-            # Parallelize pair analysis
+            # 2. Parallelize pair analysis
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(pair_keys)) as executor:
                 future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pair_keys}
                 for future in concurrent.futures.as_completed(future_to_sym):
@@ -644,10 +677,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     try:
                         data = future.result()
                         if data:
-                            # Re-benchmarking logic moved OUTSIDE bot_lock to prevent dashboard freezes
                             no_signal_thresh = config.get('no_signal_threshold', 8)
 
-                            # Use a temporary read to check threshold without holding the lock long
                             with bot_lock:
                                 candles_since = bot_state[symbol].get('candles_since_last_signal', 0)
 
@@ -656,38 +687,29 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             else:
                                 candles_since = 0
 
-                            if candles_since >= no_signal_thresh:
-                                logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Re-benchmarking...")
+                            # 3. Handle re-benchmarking triggers (Asynchronous)
+                            if candles_since >= no_signal_thresh and symbol not in active_benchmarks:
+                                logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Scheduling background re-benchmark...")
                                 candles_since = 0
 
-                                # Network calls (get_optimal_timeframe, fetch_ohlcv) and heavy CPU (run_benchmark_for_symbol)
-                                # are now done outside bot_lock.
-                                new_tf = get_optimal_timeframe(exchange, symbol, config)
-                                if new_tf != config['pairs'][symbol].get('timeframe'):
-                                    logging.info(f"[{symbol}] Updating timeframe to {new_tf}")
-                                    config['pairs'][symbol]['timeframe'] = new_tf
-
-                                target_limit = max(500, config.get('rebenchmark_window', 60))
+                                # Use cached OHLCV data instead of blocking network call
                                 timeframe = config['pairs'][symbol].get('timeframe', '1m')
-                                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=target_limit)
-                                if ohlcv:
-                                    df_bench = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                                    df_bench['timestamp'] = pd.to_datetime(df_bench['timestamp'], unit='ms')
-                                    df_bench = df_bench.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
+                                cache_key = f"{symbol}_{timeframe}"
+                                df_bench = None
+                                with ohlcv_cache_lock:
+                                    if cache_key in ohlcv_cache:
+                                        df_bench = ohlcv_cache[cache_key].copy()
 
+                                if df_bench is not None and not df_bench.empty:
                                     global_aggr = config.get('force_agressivity_to_all_pairs')
                                     global_strat = config.get('force_strategy_to_all_pairs')
                                     aggrs = [global_aggr] if global_aggr else ['dynamic']
                                     strategies = [global_strat] if global_strat else STRATEGIES
 
-                                    _, patterns = run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_bench, engine, device)
-                                    if patterns:
-                                        best = patterns[0]
-                                        config['pairs'][symbol]['aggr'] = best['aggr']
-                                        config['pairs'][symbol]['strategy'] = best['strategy']
-                                        config['pairs'][symbol]['expected_profit'] = best['profit']
-                                        pattern_manager.set_patterns(symbol, patterns)
-                                        logging.info(f"[{symbol}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+                                    # Submit re-benchmark task to ProcessPoolExecutor
+                                    active_benchmarks[symbol] = bench_executor.submit(
+                                        run_benchmark_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device
+                                    )
 
                             with bot_lock:
                                 data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
@@ -729,7 +751,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                # Update balance for next iteration
                                balance = exchange.fetch_balances()
 
-            for _ in range(100):
+            for _ in range(5):
                  if shutdown_event.is_set(): break
                  time.sleep(0.1)
         except Exception as e:

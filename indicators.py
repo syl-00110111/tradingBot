@@ -108,34 +108,37 @@ def get_signals(df, mode_config, is_backtest=False):
 
     # Common indicators for tendency and background analysis (Expert Mode)
     if df.empty: return df
-    # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
-    use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
-    if use_acceleration:
-        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
-        high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
-        low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
-        df['ema_f'] = torch_ema(close_t, 8).to('cpu').numpy()
-        df['ema_s'] = torch_ema(close_t, 18).to('cpu').numpy()
-        m_val, m_sig, m_hist = torch_macd(close_t)
-        df['macd_val'] = m_val.to('cpu').numpy()
-        df['macd_sig'] = m_sig.to('cpu').numpy()
-        df['macd_hist'] = m_hist.to('cpu').numpy()
-        df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
-        df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
-    else:
-        ema_f = ta.ema(df['close'], length=8)
-        df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
-        ema_s = ta.ema(df['close'], length=18)
-        df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
-        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-        if macd is not None:
-            df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
+
+    # Optimization: Skip if already calculated
+    if 'ema_f' not in df.columns:
+        # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
+        use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
+        if use_acceleration:
+            close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+            high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
+            low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
+            df['ema_f'] = torch_ema(close_t, 8).to('cpu').numpy()
+            df['ema_s'] = torch_ema(close_t, 18).to('cpu').numpy()
+            m_val, m_sig, m_hist = torch_macd(close_t)
+            df['macd_val'] = m_val.to('cpu').numpy()
+            df['macd_sig'] = m_sig.to('cpu').numpy()
+            df['macd_hist'] = m_hist.to('cpu').numpy()
+            df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
+            df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
         else:
-            df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
-        rsi = ta.rsi(df['close'], length=14)
-        df['rsi'] = rsi.fillna(50) if rsi is not None else 50
-        adx_df = ta.adx(df['high'], df['low'], df['close'])
-        df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
+            ema_f = ta.ema(df['close'], length=8)
+            df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
+            ema_s = ta.ema(df['close'], length=18)
+            df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
+            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+            if macd is not None:
+                df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
+            else:
+                df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
+            rsi = ta.rsi(df['close'], length=14)
+            df['rsi'] = rsi.fillna(50) if rsi is not None else 50
+            adx_df = ta.adx(df['high'], df['low'], df['close'])
+            df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
 
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
@@ -150,13 +153,12 @@ def get_signals(df, mode_config, is_backtest=False):
     df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
 
     # Calculate base technical score (used for Scr column in UI)
-    df['score'] = 0
-    df.loc[df['ema_f'] > df['ema_s'], 'score'] += 1
-    df.loc[df['ema_f'] < df['ema_s'], 'score'] -= 1
-    df.loc[df['macd_hist'] > 0, 'score'] += 1
-    df.loc[df['macd_hist'] < 0, 'score'] -= 1
-    df.loc[df['rsi'] < 30, 'score'] += 1
-    df.loc[df['rsi'] > 70, 'score'] -= 1
+    # Robust vectorized calculation handling potential NaN values
+    ema_score = np.where(df['ema_f'] > df['ema_s'], 1, np.where(df['ema_f'] < df['ema_s'], -1, 0))
+    macd_score = np.where(df['macd_hist'] > 0, 1, np.where(df['macd_hist'] < 0, -1, 0))
+    rsi_score = np.where(df['rsi'] < 30, 1, np.where(df['rsi'] > 70, -1, 0))
+
+    df['score'] = ema_score + macd_score + rsi_score
 
     # Calculate tendency (used for UI)
     def get_tendency(row):
