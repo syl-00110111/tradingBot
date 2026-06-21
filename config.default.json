@@ -7,8 +7,8 @@
         "threshold": 2,
         "multiplier": 1.2
     },
-    "no_signal_threshold": 8,
-    "rebenchmark_window": 60,
+    "no_signal_threshold": 32,
+    "rebenchmark_window": 160,
     "timeframe_thresholds": {
         "volume_24h": {
             "low": 1000,
