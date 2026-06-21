@@ -24,6 +24,8 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **Interactive Dashboard**: Navigate through trading pairs with arrow keys and visualize real-time ASCII candlestick charts by pressing **ENTER**.
 - **Auto-Position Discovery**: Automatically identifies existing assets in your wallet and populates them as managed positions for strategy-based exits.
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
+- **Dynamic Timeframe Selection**: Automatically determines the optimal timeframe (1m, 3m, 5m, 15m) for each pair based on 24h volume, spread, volatility, and trading activity.
+- **Signal-Based Re-benchmarking**: If a pair fails to generate signals for a set period (default 160 candles), the bot re-evaluates the market to find a better-fitting strategy or update the timeframe using the latest 1000 candles.
 
 ### 🛡 Risk Management
 - **Confirmation Logic**: Requires consecutive identical signals dynamically adjusted by timeframe and volatility:
