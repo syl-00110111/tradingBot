@@ -625,47 +625,51 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
     # Use a persistent ProcessPoolExecutor for re-benchmarking
     with concurrent.futures.ProcessPoolExecutor() as bench_executor:
-      while not shutdown_event.is_set():
-        if mode == 'simulation' and not sim_init_done:
-            initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
-            sim_init_done = True
-
-        if mode == 'live' and not sim_init_done:
-            # First time load for live
-            sync_live_positions(exchange, data_manager, config)
-            sim_init_done = True
-
         try:
-            # 1. Check completed re-benchmarks
-            completed_symbols = []
-            for sym, future in active_benchmarks.items():
-                if future.done():
-                    try:
-                        sym_result, patterns = future.result()
-                        if patterns:
-                            best = patterns[0]
-                            config['pairs'][sym]['aggr'] = best['aggr']
-                            config['pairs'][sym]['strategy'] = best['strategy']
-                            config['pairs'][sym]['expected_profit'] = best['profit']
-                            pattern_manager.set_patterns(sym, patterns)
-                            with bot_lock:
-                                bot_state[sym]['aggr'] = best['aggr']
-                                bot_state[sym]['strategy'] = best['strategy']
-                                bot_state[sym]['expected_profit'] = best['profit']
-                            # logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+            while not shutdown_event.is_set():
+                if mode == 'simulation' and not sim_init_done:
+                    initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
+                    sim_init_done = True
 
-                            # Re-evaluate timeframe after re-benchmarking (background)
-                            new_tf, _, _ = get_optimal_timeframe(exchange, sym, config)
-                            if new_tf != config['pairs'][sym].get('timeframe'):
-                                # logging.info(f"[{sym}] Updating timeframe to {new_tf}")
-                                config['pairs'][sym]['timeframe'] = new_tf
+                if mode == 'live' and not sim_init_done:
+                    # First time load for live
+                    sync_live_positions(exchange, data_manager, config)
+                    sim_init_done = True
 
-                    except Exception as e:
-                        logging.error(f"Error in background re-benchmark for {sym}: {e}")
-                    completed_symbols.append(sym)
+            try:
+                # 1. Check completed re-benchmarks
+                completed_symbols = []
+                for sym, future in active_benchmarks.items():
+                    if future.done():
+                        try:
+                            sym_result, patterns = future.result()
+                            if patterns:
+                                best = patterns[0]
+                                config['pairs'][sym]['aggr'] = best['aggr']
+                                config['pairs'][sym]['strategy'] = best['strategy']
+                                config['pairs'][sym]['expected_profit'] = best['profit']
+                                pattern_manager.set_patterns(sym, patterns)
+                                with bot_lock:
+                                    bot_state[sym]['aggr'] = best['aggr']
+                                    bot_state[sym]['strategy'] = best['strategy']
+                                    bot_state[sym]['expected_profit'] = best['profit']
+                                # logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
 
-            for sym in completed_symbols:
-                del active_benchmarks[sym]
+                                # Re-evaluate timeframe after re-benchmarking (background)
+                                new_tf, _, _ = get_optimal_timeframe(exchange, sym, config)
+                                if new_tf != config['pairs'][sym].get('timeframe'):
+                                    # logging.info(f"[{sym}] Updating timeframe to {new_tf}")
+                                    config['pairs'][sym]['timeframe'] = new_tf
+
+                        except Exception as e:
+                            logging.error(f"Error in background re-benchmark for {sym}: {e}")
+                        completed_symbols.append(sym)
+
+                for sym in completed_symbols:
+                    del active_benchmarks[sym]
+
+            except Exception as e:
+                logging.error(f"Error in background benchmark processing: {e}")
 
             potential_buys = []
 
@@ -791,12 +795,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                # Update balance for next iteration
                                balance = exchange.fetch_balances()
 
-            for _ in range(5):
-                 if shutdown_event.is_set(): break
-                 time.sleep(0.1)
+                for _ in range(5):
+                     if shutdown_event.is_set(): break
+                     time.sleep(0.1)
         except Exception as e:
             logging.error(f"Error in trading thread: {e}")
             time.sleep(5)
+        finally:
+            bench_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def main():
@@ -1023,7 +1029,7 @@ def main():
             while not shutdown_event.is_set():
                 live.update(make_dashboard(args.mode, config))
                 time.sleep(0.1)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         shutdown_event.set()
 
     logging.info("Bot stopped gracefully.")
@@ -1678,16 +1684,15 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None, double_lookback=False):
+def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None, current_lookback=120):
     """
     Scans historical data for the top 4 success patterns using expanding time slices (tenths).
-    Enforces a mandatory change in technique if exclude_technique is provided.
+    Enforces a mandatory change in technique and recursively doubles lookback if no strategy is found.
     """
-    lookback = 240 if double_lookback else 120
-    if df_in is None or len(df_in) < lookback: return symbol, []
+    if df_in is None or len(df_in) < current_lookback: return symbol, []
 
-    # Standard lookback (120) or doubled (240) if previous failed
-    df_in = df_in.tail(lookback)
+    # Analyze only the requested lookback window
+    df_slice = df_in.tail(current_lookback)
     patterns = []
     now_ts = time.time()
     from indicators import get_signals
@@ -1716,7 +1721,7 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
 
             # 1. Calculate signals once for the current lookback
             try:
-                full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
+                full_df = get_signals(df_slice.copy(), mode_settings, is_backtest=True)
             except Exception:
                 continue
 
@@ -1731,11 +1736,10 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
             equity = res_full['equity_curve']
 
             # 3. Expanding Time Slices (Tenths)
-            # We work backward in increments of 1/10
             segment_profits = []
             segment_scores = []
 
-            tenth = lookback // 10
+            tenth = current_lookback // 10
             for i in range(1, 11):
                 segment_len = i * tenth
                 start_idx = len(full_df) - segment_len
@@ -1780,11 +1784,16 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
                 'start_time': full_df['timestamp'].iloc[0].strftime("%Y-%m-%d %H:%M"),
                 'end_time': full_df['timestamp'].iloc[-1].strftime("%Y-%m-%d %H:%M"),
                 'start_ts': full_df['timestamp'].iloc[0].timestamp(),
-                'prices': full_df['close'].tolist(), # Store full history for correlation
+                'prices': full_df['close'].tolist(),
                 'tech_state': tech_state
             })
 
-    # Keep top 4 patterns
+    # If no profitable strategy found, recursively double lookback if data available
+    if not patterns and current_lookback < 480 and len(df_in) >= current_lookback * 2:
+        return run_benchmark_for_symbol(
+            symbol, config, timeframe, aggrs, strategies, df_in,
+            engine, device, exclude_technique, current_lookback * 2
+        )
     # Rule: "Last for" - we no longer look for the best, but the very last profitable one
     # Note: patterns are added sequentially by strategy, we sort by start_ts (recency)
     patterns.sort(key=lambda x: x['start_ts'], reverse=True)
@@ -1802,7 +1811,7 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
         p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
 
         if p_start_idx != -1:
-            # Validate the full 120 candle block (plus some buffer for indicators)
+            # Validate the full block (standard 120 or doubled 240)
             window_df = df_in.iloc[max(0, p_start_idx-250):]
             mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
             mc.set_device(device if device is not None else torch.device("cpu"))
@@ -1864,14 +1873,14 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         symbol_data_map = {}
 
         # Date filtering logic
-        # Durations (120 candles): 1m(2h), 3m(6h), 5m(10h), 15m(30h), 30m(60h)
+        # Durations (up to 240 candles for doubling): 1m(4h), 3m(12h), 5m(20h), 15m(60h), 30m(120h)
         now_ts = time.time()
         since_map = {
-            '1m': int((now_ts - 2 * 3600) * 1000),
-            '3m': int((now_ts - 6 * 3600) * 1000),
-            '5m': int((now_ts - 10 * 3600) * 1000),
-            '15m': int((now_ts - 30 * 3600) * 1000),
-            '30m': int((now_ts - 60 * 3600) * 1000)
+            '1m': int((now_ts - 4 * 3600) * 1000),
+            '3m': int((now_ts - 12 * 3600) * 1000),
+            '5m': int((now_ts - 20 * 3600) * 1000),
+            '15m': int((now_ts - 60 * 3600) * 1000),
+            '30m': int((now_ts - 120 * 3600) * 1000)
         }
         if args.since:
              try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
@@ -1920,9 +1929,10 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                          except Exception: pass
 
                     # Enforce timeframe-specific limits (Using UTC for consistency with exchange data)
+                    # We fetch enough for 240 candles but the default benchmark only uses 120
                     duration_hours = {
-                        '1m': 8, '3m': 24, '5m': 40, '15m': 120, '30m': 240
-                    }.get(timeframe, 8)
+                        '1m': 4, '3m': 12, '5m': 20, '15m': 60, '30m': 120
+                    }.get(timeframe, 4)
                     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=duration_hours)
                     df = df[df['timestamp'] >= cutoff]
 
@@ -1962,19 +1972,6 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
-
-                    # If no profitable strategy found, try doubling lookback
-                    if not patterns:
-                         # We need to re-fetch more data to support 240 candles
-                         # This is complex in a future loop, but we can do a synchronous retry
-                         # for just this symbol if it's high priority.
-                         # For now, we assume pre-fetched data in symbol_data_map might have enough candles.
-                         if sym in symbol_data_map and len(symbol_data_map[sym]) >= 240:
-                              _, patterns = run_benchmark_for_symbol(
-                                   sym, config, config['pairs'][sym].get('timeframe', '1m'),
-                                   aggrs, strategies, symbol_data_map[sym], engine, device,
-                                   exclude_technique=exclude, double_lookback=True
-                              )
 
                     if patterns:
                         # "Last for": pick the most recent profitable pattern
