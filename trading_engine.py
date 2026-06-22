@@ -32,9 +32,13 @@ class TradingEngine:
 
         return settings
 
+    def get_min_exit_price(self, entry_price, fee_rate=0.001):
+        # Precise break-even: Price_exit * (1 - f) = Price_entry * (1 + f)
+        # Price_exit = Price_entry * (1 + f) / (1 - f)
+        return entry_price * (1 + fee_rate) / (1 - fee_rate)
+
     def is_profitable(self, current_price, entry_price, fee_rate=0.001):
-        min_exit_price = entry_price * (1 + fee_rate * 2)
-        return current_price > min_exit_price
+        return current_price > self.get_min_exit_price(entry_price, fee_rate)
 
     def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
         return self.is_profitable(current_price, entry_price, fee_rate)
