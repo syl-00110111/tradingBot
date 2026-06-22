@@ -32,7 +32,7 @@ import concurrent.futures
 import matplotlib.pyplot as plt
 import plotext as plt_ascii
 import torch
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from rich.live import Live
 from rich.table import Table
@@ -593,7 +593,10 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
                     if not df.empty and new_ts in df.index:
                         df.loc[new_ts] = new_row.iloc[0]
                     else:
-                        ohlcv_cache[cache_key] = pd.concat([df, new_row]).tail(1000)
+                        df = pd.concat([df, new_row]).tail(1000)
+                        # Ensure chronological order and remove potential duplicates
+                        df = df[~df.index.duplicated(keep='last')].sort_index()
+                        ohlcv_cache[cache_key] = df
                 else:
                     df = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -1872,8 +1875,8 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                               df = df[df['timestamp'] <= until_dt]
                          except Exception: pass
 
-                    # Enforce 12h limit in all cases
-                    cutoff = datetime.now() - timedelta(hours=12)
+                    # Enforce 12h limit in all cases (Using UTC for consistency with exchange data)
+                    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=12)
                     df = df[df['timestamp'] >= cutoff]
 
                     symbol_data_map[symbol] = df

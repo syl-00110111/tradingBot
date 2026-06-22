@@ -65,15 +65,16 @@ class BinanceExchange(ExchangeInterface):
         # Implementation of watch_ohlcv as a generator
         # Fallback to polling for sync CCXT
         # logging.info(f"Starting watch_ohlcv for {symbol} ({timeframe}) via polling fallback")
-        last_ts = None
+        last_candle = None
         while True:
             try:
-                ohlcv = self.fetch_ohlcv(symbol, timeframe, limit=2)
+                ohlcv = self.fetch_ohlcv(symbol, timeframe, limit=5)
                 if ohlcv:
                     for candle in ohlcv:
-                        if last_ts is None or candle[0] > last_ts:
+                        # Yield if it's a new candle OR if the current candle has changed data
+                        if last_candle is None or candle[0] > last_candle[0] or (candle[0] == last_candle[0] and candle != last_candle):
                             yield candle
-                            last_ts = candle[0]
+                            last_candle = candle
             except Exception as e:
                 logging.error(f"Error in watch_ohlcv loop for {symbol}: {e}")
             time.sleep(2)
