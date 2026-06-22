@@ -175,8 +175,8 @@ def get_optimal_timeframe(exchange, symbol, config):
 
     try:
         ticker = exchange.fetch_ticker(symbol)
-        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=24)
-        trades = exchange.fetch_trades(symbol, limit=100)
+        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=48)
+        trades = exchange.fetch_trades(symbol, limit=1000)
 
         # 1. Volume 24h
         volume_24h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
