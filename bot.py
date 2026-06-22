@@ -178,10 +178,10 @@ def get_optimal_timeframe(exchange, symbol, config):
         ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=48)
         trades = exchange.fetch_trades(symbol, limit=1000)
 
-        # 1. Volume 24h
-        volume_24h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
-        vol_low = thresholds.get('volume_24h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_24h', {}).get('high', 10000)
+        # 1. Volume 48h
+        volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
+        vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 10000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -212,8 +212,8 @@ def get_optimal_timeframe(exchange, symbol, config):
         # Scoring logic: higher score = faster timeframe
         score = 0
         reasons = []
-        if volume_24h > vol_high: score += 1; reasons.append("High Vol")
-        elif volume_24h < vol_low: score -= 1; reasons.append("Low Vol")
+        if volume_48h > vol_high: score += 1; reasons.append("High Vol")
+        elif volume_48h < vol_low: score -= 1; reasons.append("Low Vol")
 
         if spread_pct < spr_low: score += 1; reasons.append("Tight Spread")
         elif spread_pct > spr_high: score -= 1; reasons.append("Wide Spread")
