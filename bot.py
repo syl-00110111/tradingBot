@@ -179,7 +179,7 @@ def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 40000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 10000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -223,9 +223,8 @@ def get_optimal_timeframe(exchange, symbol, config):
         elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
 
         if score >= 1: tf = '1m'
-        elif score == 0: tf = '3m'
-        elif score == -1: tf = '5m'
-        elif score == -2: tf = '15m'
+        elif score == 0: tf = '5m'
+        elif score == -1: tf = '15m'
         else: tf = '30m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
@@ -1288,7 +1287,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
-    logging.info("Syncing positions from Binance API")
+    logging.info("Syncing positions from Binance API...")
     balance = exchange.fetch_balances()
     # Robustly handle different balance structures
     if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
@@ -1512,8 +1511,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
         if timeframe == '1m': eval_window_base = 60
         elif timeframe == '3m': eval_window_base = 60
         elif timeframe == '5m': eval_window_base = 60
-        elif timeframe == '15m': eval_window_base = 96
-        elif timeframe == '30m': eval_window_base = 48
+        elif timeframe == '15m': eval_window_base = 24
+        elif timeframe == '30m': eval_window_base = 12
         else: eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
@@ -1649,14 +1648,14 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
-    if df_in is None or len(df_in) < 24: return symbol, []
+    if df_in is None or len(df_in) < 12: return symbol, []
 
     # Default based on timeframe
     if timeframe == '1m': eval_window_base = 60
     elif timeframe == '3m': eval_window_base = 60
     elif timeframe == '5m': eval_window_base = 60
-    elif timeframe == '15m': eval_window_base = 96
-    elif timeframe == '30m': eval_window_base = 48
+    elif timeframe == '15m': eval_window_base = 24
+    elif timeframe == '30m': eval_window_base = 12
     else: eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
