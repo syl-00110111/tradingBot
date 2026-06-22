@@ -1790,28 +1790,24 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
 
     for p in patterns:
         if len(unique_patterns) >= 4: break
-        is_overlap = False
-        for st in seen_times:
-            if abs(p['start_ts'] - st) < (eval_window * 60):
-                is_overlap = True
-                break
-        if not is_overlap:
-            # NOW apply Monte Carlo validation to the top patterns only (for speed)
-            # Find the window in df_in
-            # Use searchsorted for O(log N) instead of O(N)
-            p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
-            p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
 
-            if p_start_idx != -1:
-                window_df = df_in.iloc[max(0, p_start_idx-250):p_start_idx+eval_window]
-                mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
-                mc.set_device(device if device is not None else torch.device("cpu"))
-                mc_score = mc.validate_strategy(window_df)
-                p['profit'] *= mc_score
-                p['score'] *= mc_score
+        # Since all patterns now use the same 120-candle window, overlap check is redundant
+        # but we still want to apply Monte Carlo validation to the chosen ones.
 
-            unique_patterns.append(p)
-            seen_times.append(p.get('start_ts', 0))
+        # Find the window in df_in
+        p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
+        p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
+
+        if p_start_idx != -1:
+            # Validate the full 120 candle block (plus some buffer for indicators)
+            window_df = df_in.iloc[max(0, p_start_idx-250):]
+            mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
+            mc.set_device(device if device is not None else torch.device("cpu"))
+            mc_score = mc.validate_strategy(window_df)
+            p['profit'] *= mc_score
+            p['score'] *= mc_score
+
+        unique_patterns.append(p)
 
     return symbol, unique_patterns
 
