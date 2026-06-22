@@ -222,10 +222,11 @@ def get_optimal_timeframe(exchange, symbol, config):
         if trades_per_min > tpm_high: score += 1; reasons.append("Active")
         elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
 
-        if score >= 2: tf = '1m'
-        elif score >= 1: tf = '3m'
-        elif score >= 0: tf = '5m'
-        else: tf = '15m'
+        if score >= 1: tf = '1m'
+        elif score == 0: tf = '3m'
+        elif score == -1: tf = '5m'
+        elif score == -2: tf = '15m'
+        else: tf = '30m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
         return tf, score, reasons
@@ -773,7 +774,7 @@ def main():
     parser.add_argument('--strategy', help=strat_help)
     parser.add_argument('--aggr', help='Agressivity for backtest')
     parser.add_argument('--backtest-positions', type=int, default=1, help='Max simultaneous positions in backtest (1-4)')
-    parser.add_argument('--timeframe', choices=['1m', '3m', '5m', '15m'], help='Manual timeframe override')
+    parser.add_argument('--timeframe', choices=['1m', '3m', '5m', '15m', '30m'], help='Manual timeframe override')
     parser.add_argument('--since', help='Start date for backtest/benchmark (YYYY-MM-DD HH:MM)')
     parser.add_argument('--until', help='End date for backtest/benchmark (YYYY-MM-DD HH:MM)')
 
@@ -1512,6 +1513,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
         elif timeframe == '3m': eval_window_base = 60
         elif timeframe == '5m': eval_window_base = 60
         elif timeframe == '15m': eval_window_base = 96
+        elif timeframe == '30m': eval_window_base = 48
         else: eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
@@ -1647,13 +1649,14 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
-    if df_in is None or len(df_in) < 32: return symbol, []
+    if df_in is None or len(df_in) < 24: return symbol, []
 
     # Default based on timeframe
     if timeframe == '1m': eval_window_base = 60
     elif timeframe == '3m': eval_window_base = 60
     elif timeframe == '5m': eval_window_base = 60
     elif timeframe == '15m': eval_window_base = 96
+    elif timeframe == '30m': eval_window_base = 48
     else: eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
@@ -1718,7 +1721,7 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
                  if age_hours > 24: recency_score = 0.8
                  if age_hours > 168: recency_score = 0.5
                  if age_hours > 720: recency_score = 0.2
-            elif timeframe == '15m':
+            elif timeframe in ['15m', '30m']:
                  if age_hours > 168: recency_score = 0.8
                  if age_hours > 720: recency_score = 0.5
 
