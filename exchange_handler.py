@@ -9,7 +9,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 class ThrottledExchange:
-    def __init__(self, exchange, delay_ms=2):
+    def __init__(self, exchange, delay_ms=50):
         self.exchange = exchange
         self.delay_s = delay_ms / 1000.0
         self.lock = threading.Lock()
@@ -45,6 +45,7 @@ class ExchangeInterface:
     def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
     def fetch_balances(self): raise NotImplementedError
     def fetch_ticker(self, symbol): raise NotImplementedError
+    def fetch_tickers(self, symbols): raise NotImplementedError
     def fetch_trades(self, symbol, limit=100): raise NotImplementedError
     def fetch_trading_fee(self, symbol): raise NotImplementedError
 
@@ -91,6 +92,12 @@ class BinanceExchange(ExchangeInterface):
             ohlcv = self.fetch_ohlcv(symbol, '1m', limit=1)
             if ohlcv: return {'last': ohlcv[0][4]}
             return None
+
+    def fetch_tickers(self, symbols):
+        try: return self.exchange.fetch_tickers(symbols)
+        except Exception as e:
+            logging.error(f"Error fetching multiple tickers: {e}")
+            return {}
 
     def fetch_balances(self):
         try:
@@ -236,6 +243,15 @@ class MockExchange(ExchangeInterface):
             data = self.ohlcv_data.get(symbol, [])
             if data: return {'last': data[-1][4]}
             return {'last': 0.0, 'quoteVolume': 0.0, 'baseVolume': 0.0}
+
+    def fetch_tickers(self, symbols):
+        if self.real_exchange:
+             return self.real_exchange.fetch_tickers(symbols)
+        try:
+            public_ex = ccxt.binance({'session': create_ccxt_session()})
+            return public_ex.fetch_tickers(symbols)
+        except Exception:
+            return {s: self.fetch_ticker(s) for s in symbols}
 
     def fetch_balances(self):
         self._init_balance()

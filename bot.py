@@ -643,23 +643,26 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     if future.done():
                         try:
                             sym_result, patterns = future.result()
+                            if not patterns:
+                                msg_target = status.console if status else console
+                                msg_target.print(f"[dim][{sym}] No profitable strategy found after search.")
                             if patterns:
                                 best = patterns[0]
-                                config['pairs'][sym]['aggr'] = best['aggr']
-                                config['pairs'][sym]['strategy'] = best['strategy']
-                                config['pairs'][sym]['expected_profit'] = best['profit']
+                                config["pairs"][sym]["aggr"] = best["aggr"]
+                                config["pairs"][sym]["strategy"] = best["strategy"]
+                                config["pairs"][sym]["expected_profit"] = best["profit"]
                                 pattern_manager.set_patterns(sym, patterns)
                                 with bot_lock:
-                                    bot_state[sym]['aggr'] = best['aggr']
-                                    bot_state[sym]['strategy'] = best['strategy']
-                                    bot_state[sym]['expected_profit'] = best['profit']
-                                # logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+                                    bot_state[sym]["aggr"] = best["aggr"]
+                                    bot_state[sym]["strategy"] = best["strategy"]
+                                    bot_state[sym]["expected_profit"] = best["profit"]
+                                # logging.info(f"[{sym}] Re-benchmarked to {best["strategy"]} ({best["aggr"]})")
 
                                 # Re-evaluate timeframe after re-benchmarking (background)
                                 new_tf, _, _ = get_optimal_timeframe(exchange, sym, config)
-                                if new_tf != config['pairs'][sym].get('timeframe'):
+                                if new_tf != config["pairs"][sym].get("timeframe"):
                                     # logging.info(f"[{sym}] Updating timeframe to {new_tf}")
-                                    config['pairs'][sym]['timeframe'] = new_tf
+                                    config["pairs"][sym]["timeframe"] = new_tf
 
                         except Exception as e:
                             logging.error(f"Error in background re-benchmark for {sym}: {e}")
@@ -1345,6 +1348,9 @@ def sync_live_positions(exchange, data_manager, config):
     data_manager.data['open_positions'] = {}
     sellable_found = False
 
+    assets_to_sync = []
+    asset_to_symbol = {}
+
     for asset, amount in free_balances.items():
         if asset in base_currencies or amount <= 0: continue
 
@@ -1357,35 +1363,38 @@ def sync_live_positions(exchange, data_manager, config):
                 break
         if not symbol: continue
 
-        # Check if it's dust
-        is_dust = False
-        try:
-            markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
-            if symbol in markets:
-                m = markets[symbol]
-                min_amt = m['limits']['amount']['min']
-                min_cost = m['limits']['cost']['min'] or 10
-                ticker = exchange.fetch_ticker(symbol)
-                if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
-                    is_dust = True
-            elif amount <= 0.000001: is_dust = True
-        except: pass
+        assets_to_sync.append(symbol)
+        asset_to_symbol[symbol] = (asset, amount)
 
-        if is_dust: continue
-        sellable_found = True
+    if assets_to_sync:
+        tickers = exchange.fetch_tickers(assets_to_sync)
+        markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
 
-        # Fetch current price for placeholder entry
-        curr_price = 0
-        try:
-             ticker = exchange.fetch_ticker(symbol)
-             if ticker: curr_price = ticker['last']
-        except: pass
+        for symbol in assets_to_sync:
+            asset, amount = asset_to_symbol[symbol]
+            ticker = tickers.get(symbol)
+            if not ticker: continue
 
-        if curr_price > 0:
-             # logging.info(f"[{symbol}] Auto-populating position from wallet ({amount:.6f} units).")
-             data_manager.add_position(symbol, curr_price, amount, 0, {"info": "auto_populated"}, time.time(), total_base=amount*curr_price)
-        else:
-             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. Please manage manually.")
+            curr_price = ticker['last']
+            is_dust = False
+
+            try:
+                if symbol in markets:
+                    m = markets[symbol]
+                    min_amt = m['limits']['amount']['min']
+                    min_cost = m['limits']['cost']['min'] or 10
+                    if amount < min_amt or (amount * curr_price) < min_cost:
+                        is_dust = True
+                elif amount <= 0.000001: is_dust = True
+            except: pass
+
+            if is_dust: continue
+            sellable_found = True
+
+            if curr_price > 0:
+                 data_manager.add_position(symbol, curr_price, amount, 0, {"info": "auto_populated"}, time.time(), total_base=amount*curr_price)
+            else:
+                 logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. Please manage manually.")
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
         logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits) or maybe adjust you pairs.txt file.")
