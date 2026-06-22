@@ -84,11 +84,13 @@ class BinanceExchange(ExchangeInterface):
         except Exception as e: logging.error(f"Error fetching OHLCV for {symbol}: {e}"); return None
 
     def fetch_ticker(self, symbol):
-        # We prefer using fetch_ohlcv for latest price to stay within allowed methods where possible
-        ohlcv = self.fetch_ohlcv(symbol, '1m', limit=1)
-        if ohlcv: return {'last': ohlcv[0][4]}
         try: return self.exchange.fetch_ticker(symbol)
-        except Exception as e: logging.error(f"Error fetching ticker for {symbol}: {e}"); return None
+        except Exception as e:
+            logging.error(f"Error fetching ticker for {symbol}: {e}")
+            # Fallback to fetch_ohlcv for latest price if real fetch_ticker fails
+            ohlcv = self.fetch_ohlcv(symbol, '1m', limit=1)
+            if ohlcv: return {'last': ohlcv[0][4]}
+            return None
 
     def fetch_balances(self):
         try:
@@ -227,14 +229,13 @@ class MockExchange(ExchangeInterface):
     def fetch_ticker(self, symbol):
         if self.real_exchange:
              return self.real_exchange.fetch_ticker(symbol)
-        data = self.ohlcv_data.get(symbol, [])
-        if data: return {'last': data[-1][4]}
         try:
             public_ex = ccxt.binance({'session': create_ccxt_session()})
-            ohlcv = public_ex.fetch_ohlcv(symbol, '1m', limit=1)
-            if ohlcv: return {'last': ohlcv[0][4]}
             return public_ex.fetch_ticker(symbol)
-        except Exception: return {'last': 0.0}
+        except Exception:
+            data = self.ohlcv_data.get(symbol, [])
+            if data: return {'last': data[-1][4]}
+            return {'last': 0.0, 'quoteVolume': 0.0, 'baseVolume': 0.0}
 
     def fetch_balances(self):
         self._init_balance()

@@ -1647,7 +1647,7 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
-    if df_in is None or len(df_in) < 100: return symbol, []
+    if df_in is None or len(df_in) < 32: return symbol, []
 
     # Default based on timeframe
     if timeframe == '1m': eval_window_base = 60
