@@ -194,8 +194,8 @@ def get_optimal_timeframe(exchange, symbol, config):
         if ohlcv and len(ohlcv) > 0:
             closes = [candle[4] for candle in ohlcv]
             volatility = (max(closes) - min(closes)) / min(closes)
-        vlt_low = thresholds.get('volatility_pct', {}).get('low', 0.02)
-        vlt_high = thresholds.get('volatility_pct', {}).get('high', 0.05)
+        vlt_low = thresholds.get('volatility_pct', {}).get('low', 0.01)
+        vlt_high = thresholds.get('volatility_pct', {}).get('high', 0.1)
 
         # 4. Trades per minute
         if trades:
@@ -569,7 +569,7 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
     # logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
     try:
         # Pre-fill cache with historical data for indicator stability
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=max(500, config.get('rebenchmark_window', 60)))
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
         if ohlcv:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -1134,7 +1134,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
     # High volatility adds an additional confirmation signal
     volatility = latest_row.get('volatility', 0)
-    if volatility > 0.05: # High volatility
+    if volatility > 0.1: # High volatility
         buy_threshold += 1
         sell_threshold += 1
 
@@ -1644,12 +1644,12 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
-    if df_in is None or len(df_in) < 80: return symbol, []
+    if df_in is None or len(df_in) < 480: return symbol, []
 
-    # Lookback proportional to timeframe (120 candles = 2h for 1m, 60h for 30m)
-    df_in = df_in.tail(120)
+    # Lookback proportional to timeframe (480 candles)
+    df_in = df_in.tail(480)
 
-    eval_window_base = 60
+    eval_window_base = 240
 
     max_rand = max(1, int(eval_window_base * 0.1))
     eval_window = eval_window_base + random.randint(-max_rand, max_rand)
@@ -1823,14 +1823,14 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         symbol_data_map = {}
 
         # Date filtering logic
-        # Durations: 1m(2h), 3m(6h), 5m(10h), 15m(30h), 30m(60h)
+        # Durations (480 candles): 1m(8h), 3m(24h), 5m(40h), 15m(120h), 30m(240h)
         now_ts = time.time()
         since_map = {
-            '1m': int((now_ts - 2 * 3600) * 1000),
-            '3m': int((now_ts - 6 * 3600) * 1000),
-            '5m': int((now_ts - 10 * 3600) * 1000),
-            '15m': int((now_ts - 30 * 3600) * 1000),
-            '30m': int((now_ts - 60 * 3600) * 1000)
+            '1m': int((now_ts - 8 * 3600) * 1000),
+            '3m': int((now_ts - 24 * 3600) * 1000),
+            '5m': int((now_ts - 40 * 3600) * 1000),
+            '15m': int((now_ts - 120 * 3600) * 1000),
+            '30m': int((now_ts - 240 * 3600) * 1000)
         }
         if args.since:
              try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
@@ -1838,7 +1838,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_limit = max(1000, config.get('rebenchmark_window', 240))
+            target_limit = 2000
             timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
 
             current_since = since_map.get(timeframe, since_map['1m'])
@@ -1880,8 +1880,8 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
 
                     # Enforce timeframe-specific limits (Using UTC for consistency with exchange data)
                     duration_hours = {
-                        '1m': 2, '3m': 6, '5m': 10, '15m': 30, '30m': 60
-                    }.get(timeframe, 2)
+                        '1m': 8, '3m': 24, '5m': 40, '15m': 120, '30m': 240
+                    }.get(timeframe, 8)
                     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=duration_hours)
                     df = df[df['timestamp'] >= cutoff]
 

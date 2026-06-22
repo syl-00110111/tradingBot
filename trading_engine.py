@@ -27,7 +27,7 @@ class TradingEngine:
             })
 
         # High volatility adds an additional confirmation signal
-        if volatility > 0.05:
+        if volatility > 0.1:
             settings["confirmation_window"] = 2
 
         return settings
