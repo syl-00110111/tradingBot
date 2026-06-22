@@ -179,7 +179,7 @@ def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 10000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 40000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -1288,7 +1288,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
-    logging.info("Syncing positions from Binance API...")
+    logging.info("Syncing positions from Binance API")
     balance = exchange.fetch_balances()
     # Robustly handle different balance structures
     if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
