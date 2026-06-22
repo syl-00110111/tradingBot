@@ -726,9 +726,16 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
                             if data.get('sell_triggered'):
                                  pos = data.get('position')
-                                 if pos and not engine.is_profitable(data['price'], pos['entry_price']):
-                                      # Profit check failed, reverse sell and trigger immediate re-benchmark
-                                      logging.warning(f"[{symbol}] Sell aborted: Potential loss detected. Re-benchmarking pair...")
+                                 # Use real fee rate for profit check if available
+                                 fee_rate = 0.001
+                                 try:
+                                      fee_rate = exchange.fetch_trading_fee(symbol)
+                                 except: pass
+
+                                 if pos and not engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate):
+                                      # Profit check failed, report details, reverse sell and trigger immediate re-benchmark
+                                      min_exit = engine.get_min_exit_price(pos['entry_price'], fee_rate=fee_rate)
+                                      logging.warning(f"[{symbol}] Sell aborted: Potential loss. Price: {data['price']:.7f} < Min Exit: {min_exit:.7f} (Entry: {pos['entry_price']:.7f}, Fee: {fee_rate*100:.2f}%). Re-benchmarking...")
 
                                       # Clear signal to "reverse" it
                                       data['sell'] = False
