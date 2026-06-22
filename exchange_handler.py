@@ -127,8 +127,24 @@ class BinanceExchange(ExchangeInterface):
                         return None
             if side == 'buy': order = self.exchange.create_market_buy_order(symbol, amount)
             else: order = self.exchange.create_market_sell_order(symbol, amount)
-            if order and 'fee' in order and order['fee']: order['calculated_fee'] = order['fee'].get('cost', 0)
-            else:
+            if order and 'fee' in order and order['fee']:
+                fee_cost = order['fee'].get('cost', 0)
+                fee_currency = order['fee'].get('currency')
+                _, quote = symbol.split('/')
+
+                if fee_currency and fee_currency != quote:
+                    # Convert fee to quote currency
+                    try:
+                        ticker = self.fetch_ticker(f"{fee_currency}/{quote}")
+                        if ticker:
+                            fee_cost *= ticker['last']
+                    except:
+                        # Fallback to estimation if conversion pair not found
+                        price = price or self.fetch_ticker(symbol).get('last', 0)
+                        fee_rate = self.fetch_trading_fee(symbol)
+                        fee_cost = amount * price * fee_rate
+                order['calculated_fee'] = fee_cost
+            elif isinstance(order, dict):
                  price = price or self.fetch_ticker(symbol).get('last', 0)
                  fee_rate = self.fetch_trading_fee(symbol)
                  order['calculated_fee'] = amount * price * fee_rate

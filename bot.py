@@ -82,10 +82,8 @@ bot_lock = threading.Lock()
 def format_price(price):
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
-    if price == 0: return "0.00"
-    if abs(price) < 0.01:
-        return f"{price:.3e}"
-    return f"{price:.2f}"
+    if price == 0: return "0.0000000"
+    return f"{price:.7f}"
 
 class DashboardHandler(logging.Handler):
     def __init__(self, duration=5):
@@ -405,9 +403,9 @@ def make_dashboard(global_mode, config):
             fee_str = "-"
             if has_position:
                  p = data['position']
-                 amt_str = f"{p['amount']:.6f}"
+                 amt_str = f"{p['amount']:.8f}"
                  entry_str = format_price(p['entry_price'])
-                 fee_str = f"{p.get('entry_fee', 0):.6f}"
+                 fee_str = f"{p.get('entry_fee', 0):.7f}"
 
             tendency = data.get('tendency', 'N/A')
             tend_style = "bold green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "bold yellow" if tendency == "Range" else "white"
@@ -427,7 +425,7 @@ def make_dashboard(global_mode, config):
                       f"{data.get('volatility', 0):.4f}/{data.get('adx', 0):.1f}",
                       f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
                       f"{data.get('score', 0)}",
-                      format_price(data.get('expected_profit', 0)) if has_position else '0.00',
+                      format_price(data.get('expected_profit', 0)) if has_position else '0.0000000',
                       data.get('aggr', 'N/A'),
                       data.get('strategy', 'N/A')
                  ]
@@ -436,7 +434,7 @@ def make_dashboard(global_mode, config):
                       symbol,
                       format_price(data.get('price', 0)),
                       amt_str, entry_str, fee_str,
-                      format_price(data.get('expected_profit', 0)) if has_position else '0.00',
+                      format_price(data.get('expected_profit', 0)) if has_position else '0.0000000',
                       f"[{tend_style}]{tendency}[/]",
                       f"[{last_order_style}]{last_order}[/]",
                       f"[{signal_style}]{current_signal}[/]",
@@ -1069,7 +1067,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         # Fallback to balanced defaults if no engine
         mode_settings = {
             "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-            "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
+            "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
         }
 
     mode_settings['strategy'] = strategy_name
@@ -1203,7 +1201,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             if order:
                 fee = order.get('calculated_fee', 0)
                 total_paid = (amount * current_price) + fee
-                logging.info(f"[{symbol}] Executing buy of amount {amount:.6f} at {current_price}, final price paid: {total_paid:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                logging.info(f"[{symbol}] Executing buy of amount {amount:.8f} at {current_price:.7f}, final price paid: {total_paid:.7f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
                 data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
                 return True
             else:
@@ -1242,7 +1240,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                 fee = order.get('calculated_fee', 0)
                 amount = position['amount']
                 total_received = (amount * data['price']) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.6f} at {data['price']}, final price received: {total_received:.2f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                logging.info(f"[{symbol}] Executing sell of amount {amount:.8f} at {data['price']:.7f}, final price received: {total_received:.7f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
                 profit = total_received - position.get('entry_total_base', 0)
                 data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
                 return True
@@ -1460,7 +1458,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     else:
          aggr_settings = {
              "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
+             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
          }
 
     mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
@@ -1672,7 +1670,7 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
         else:
             mode_settings = {
                 "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 3
+                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
             }
         mode_settings['strategy'] = strategy
         mode_settings['device'] = device if device is not None else torch.device("cpu")
@@ -1827,7 +1825,8 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         symbol_data_map = {}
 
         # Date filtering logic
-        since_ts = None
+        # Default to last 12 hours as requested
+        since_ts = int((time.time() - 12 * 3600) * 1000)
         if args.since:
              try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
              except Exception: console.print(f"[red]Invalid --since format. Use YYYY-MM-DD HH:MM[/]")
@@ -1872,6 +1871,10 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                               until_dt = datetime.strptime(args.until, "%Y-%m-%d %H:%M")
                               df = df[df['timestamp'] <= until_dt]
                          except Exception: pass
+
+                    # Enforce 12h limit in all cases
+                    cutoff = datetime.now() - timedelta(hours=12)
+                    df = df[df['timestamp'] >= cutoff]
 
                     symbol_data_map[symbol] = df
                     with ohlcv_cache_lock:
