@@ -709,8 +709,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                     strategies = [global_strat] if global_strat else STRATEGIES
 
                                     # Submit re-benchmark task to ProcessPoolExecutor
+                                    # Determine current technique to exclude (rotation rule)
+                                    exclude = None
+                                    with bot_lock:
+                                         if symbol in bot_state:
+                                              exclude = (bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
+
                                     active_benchmarks[symbol] = bench_executor.submit(
-                                        run_benchmark_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device
+                                        run_benchmark_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device, exclude_technique=exclude
                                     )
 
                             with bot_lock:
@@ -719,7 +725,29 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                 bot_state[symbol]['candles_since_last_signal'] = candles_since
 
                             if data.get('sell_triggered'):
-                                 if execute_sell(exchange, data_manager, engine, symbol, data):
+                                 pos = data.get('position')
+                                 if pos and not engine.is_profitable(data['price'], pos['entry_price']):
+                                      # Profit check failed, reverse sell and trigger immediate re-benchmark
+                                      logging.warning(f"[{symbol}] Sell aborted: Potential loss detected. Re-benchmarking pair...")
+
+                                      # Clear signal to "reverse" it
+                                      data['sell'] = False
+                                      data['sell_triggered'] = False
+
+                                      # Trigger re-benchmark
+                                      if symbol not in active_benchmarks:
+                                           timeframe = config['pairs'][symbol].get('timeframe', '1m')
+                                           cache_key = f"{symbol}_{timeframe}"
+                                           df_bench = None
+                                           with ohlcv_cache_lock:
+                                                if cache_key in ohlcv_cache:
+                                                     df_bench = ohlcv_cache[cache_key].copy()
+                                           if df_bench is not None and not df_bench.empty:
+                                                active_benchmarks[symbol] = bench_executor.submit(
+                                                     run_benchmark_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
+                                                     exclude_technique=(bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
+                                                )
+                                 elif execute_sell(exchange, data_manager, engine, symbol, data):
                                       with bot_lock:
                                           bot_state[symbol]['last_action'] = 'SELL'
                                           bot_state[symbol]['position'] = None
@@ -1640,87 +1668,92 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None):
+def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
     """
-    Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
+    Scans historical data for the top 4 success patterns using expanding time slices (tenths).
+    Enforces a mandatory change in technique if exclude_technique is provided.
     """
     if df_in is None or len(df_in) < 480: return symbol, []
 
-    # Lookback proportional to timeframe (480 candles)
+    # 480 k-lines lookback
     df_in = df_in.tail(480)
-
-    eval_window_base = 240
-
-    max_rand = max(1, int(eval_window_base * 0.1))
-    eval_window = eval_window_base + random.randint(-max_rand, max_rand)
     patterns = []
     now_ts = time.time()
-
     from indicators import get_signals
 
-    # We use 'dynamic' as the default aggr for benchmarking
-    aggr = aggrs[0] if aggrs else 'dynamic'
+    # Filter out current technique if rotating
+    if exclude_technique:
+        ex_strat, ex_aggr = exclude_technique
+    else:
+        ex_strat, ex_aggr = None, None
 
-    for strategy in strategies:
-        # Prepare settings
-        if engine:
-            mode_settings = engine.get_dynamic_settings(25.0, 0.001)
-        else:
-            mode_settings = {
-                "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-                "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
-            }
-        mode_settings['strategy'] = strategy
-        mode_settings['device'] = device if device is not None else torch.device("cpu")
-
-        # 1. Calculate signals once for the entire dataset
-        try:
-            full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
-        except Exception:
-            continue
-
-        # 2. Run a single backtest for the entire dataset
-        # We set eval_candles to the whole length to get a continuous equity curve
-        res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
-                                     timeframe=timeframe, df_in=full_df, engine=engine,
-                                     device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
-
-        if not res_full or not res_full.get('equity_curve'):
-            continue
-
-        equity = res_full['equity_curve']
-
-        # 3. Slide window over the equity curve to find profitable periods
-        # Complexity is now O(N) instead of O(N*W) backtest runs
-        max_offset = len(full_df) - eval_window
-        step = 5
-
-        for offset in range(0, max_offset, step):
-            start_idx = offset
-            end_idx = offset + eval_window
-
-            # Profit in this window
-            win_profit = equity[end_idx-1] - equity[start_idx]
-
-            if win_profit < 0.015:
+    for aggr in aggrs:
+        for strategy in strategies:
+            if strategy == ex_strat and aggr == ex_aggr:
                 continue
 
-            # Score with Recency Pondering
-            window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
-            age_hours = (now_ts - window_ts) / 3600
-            recency_score = 1.0
-            if timeframe in ['1m', '3m', '5m']:
-                 if age_hours > 24: recency_score = 0.8
-                 if age_hours > 168: recency_score = 0.5
-                 if age_hours > 720: recency_score = 0.2
-            elif timeframe in ['15m', '30m']:
-                 if age_hours > 168: recency_score = 0.8
-                 if age_hours > 720: recency_score = 0.5
+            # Prepare settings
+            if engine:
+                mode_settings = engine.get_dynamic_settings(25.0, 0.001)
+            else:
+                mode_settings = {
+                    "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+                    "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
+                }
+            mode_settings['strategy'] = strategy
+            mode_settings['device'] = device if device is not None else torch.device("cpu")
 
-            final_score = win_profit * recency_score
+            # 1. Calculate signals once for the 480 candles
+            try:
+                full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
+            except Exception:
+                continue
 
-            # For technical state, we take the values at the end of the window
-            latest_row = full_df.iloc[end_idx-1]
+            # 2. Run backtest for the entire 480-candle block
+            res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
+                                         timeframe=timeframe, df_in=full_df, engine=engine,
+                                         device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
+
+            if not res_full or not res_full.get('equity_curve'):
+                continue
+
+            equity = res_full['equity_curve']
+
+            # 3. Expanding Time Slices (Tenths)
+            # We work backward in increments of 1/10 (48 candles)
+            # Segments: Last 48, Last 96, ..., Full 480
+            segment_profits = []
+            segment_scores = []
+
+            tenth = 48
+            for i in range(1, 11):
+                segment_len = i * tenth
+                start_idx = len(full_df) - segment_len
+                end_idx = len(full_df)
+
+                win_profit = equity[end_idx-1] - equity[start_idx]
+
+                # Recency Pondering for this segment
+                window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
+                age_hours = (now_ts - window_ts) / 3600
+                recency_score = 1.0
+                if timeframe in ['1m', '3m', '5m']:
+                     if age_hours > 24: recency_score = 0.8
+                     if age_hours > 168: recency_score = 0.5
+                elif timeframe in ['15m', '30m']:
+                     if age_hours > 168: recency_score = 0.8
+
+                segment_profits.append(win_profit)
+                segment_scores.append(win_profit * recency_score)
+
+            # Combined score: mean of all segments (penalizes inconsistent performance)
+            avg_score = sum(segment_scores) / len(segment_scores)
+            avg_profit = sum(segment_profits) / len(segment_profits)
+
+            if avg_profit < 0.01:
+                continue
+
+            latest_row = full_df.iloc[-1]
             tech_state = {
                 'rsi': float(latest_row.get('rsi', 50)),
                 'adx': float(latest_row.get('adx', 0)),
@@ -1729,20 +1762,22 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
             }
 
             patterns.append({
-                'profit': win_profit,
-                'score': final_score,
+                'profit': avg_profit,
+                'score': avg_score,
                 'strategy': strategy,
                 'aggr': aggr,
                 'symbol': symbol,
-                'start_time': full_df['timestamp'].iloc[start_idx].strftime("%Y-%m-%d %H:%M"),
-                'end_time': full_df['timestamp'].iloc[end_idx-1].strftime("%Y-%m-%d %H:%M"),
-                'start_ts': window_ts,
-                'prices': full_df['close'].iloc[start_idx:end_idx].tolist(),
+                'start_time': full_df['timestamp'].iloc[0].strftime("%Y-%m-%d %H:%M"),
+                'end_time': full_df['timestamp'].iloc[-1].strftime("%Y-%m-%d %H:%M"),
+                'start_ts': full_df['timestamp'].iloc[0].timestamp(),
+                'prices': full_df['close'].tolist(), # Store full history for correlation
                 'tech_state': tech_state
             })
 
-    # Keep top 4 non-overlapping (by time) patterns
-    patterns.sort(key=lambda x: x['score'], reverse=True)
+    # Keep top 4 patterns
+    # Rule: "Last for" - we no longer look for the best, but the very last profitable one
+    # Note: patterns are added sequentially by strategy, we sort by start_ts (recency)
+    patterns.sort(key=lambda x: x['start_ts'], reverse=True)
     unique_patterns = []
     seen_times = []
 
@@ -1907,32 +1942,47 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
             # Register signal handler during optimization
             original_handler = signal.signal(signal.SIGINT, handle_bench_shutdown)
             try:
-                futures = [executor.submit(run_benchmark_for_symbol, sym, config, config['pairs'][sym].get('timeframe', '1m'), aggrs, strategies, symbol_data_map[sym], engine, device)
-                           for sym in symbol_data_map]
+                futures = []
+                for sym in symbol_data_map:
+                    # Determine if we should exclude current technique (for re-benchmarking rotation)
+                    exclude = None
+                    if sym in bot_state:
+                         exclude = (bot_state[sym].get('strategy'), bot_state[sym].get('aggr'))
+
+                    futures.append(executor.submit(
+                        run_benchmark_for_symbol, sym, config, config['pairs'][sym].get('timeframe', '1m'),
+                        aggrs, strategies, symbol_data_map[sym], engine, device, exclude_technique=exclude
+                    ))
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
                     if patterns:
-                        # For now, the 'best' is the first pattern in the list (highest score)
-                        best_for_symbol = patterns[0]
-                        best_per_symbol[sym] = best_for_symbol
+                        # "Last for": pick the most recent profitable pattern
+                        last_for_symbol = patterns[0]
+                        best_per_symbol[sym] = last_for_symbol
 
                         # Store patterns in DataManager for real-time matching
                         if data_manager:
                              pattern_manager.set_patterns(sym, patterns)
 
-                        period_str = f" [dim](From {best_for_symbol.get('start_time')} to {best_for_symbol.get('end_time')})[/]"
+                        # Update current technique in bot_state immediately
+                        if sym in bot_state:
+                             with bot_lock:
+                                  bot_state[sym]['strategy'] = last_for_symbol['strategy']
+                                  bot_state[sym]['aggr'] = last_for_symbol['aggr']
+
+                        period_str = f" [dim](From {last_for_symbol.get('start_time')} to {last_for_symbol.get('end_time')})[/]"
                         # Always save patterns to cache
                         timeframe = config['pairs'][sym].get('timeframe', '1m')
                         cache_mgr.set(sym, timeframe, patterns)
 
                         msg_target = status.console if status else console
-                        optimization_map[sym] = best_for_symbol
-                        msg_target.print(f"\n[bold green]🏆 BEST FOR {sym}:[/] [bold]{best_for_symbol['strategy']} ({best_for_symbol['aggr']})[/] | Profit: {format_price(best_for_symbol['profit'])} EUR{period_str}")
+                        optimization_map[sym] = last_for_symbol
+                        msg_target.print(f"\n[bold green]🏆 LAST FOR {sym}:[/] [bold]{last_for_symbol['strategy']} ({last_for_symbol['aggr']})[/] | Profit: {format_price(last_for_symbol['profit'])} EUR{period_str}")
 
                         # Use a generic 'total' score for recommendations
-                        if best_for_symbol['profit'] > best_overall['total']['profit']:
-                             best_overall['total'] = {'profit': best_for_symbol['profit'], 'params': (best_for_symbol['strategy'], best_for_symbol['aggr'], sym)}
+                        if last_for_symbol['profit'] > best_overall['total']['profit']:
+                             best_overall['total'] = {'profit': last_for_symbol['profit'], 'params': (last_for_symbol['strategy'], last_for_symbol['aggr'], sym)}
             finally:
                 signal.signal(signal.SIGINT, original_handler)
 
