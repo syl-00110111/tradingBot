@@ -1287,7 +1287,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
-    logging.info("Syncing positions from Binance API...")
+    logging.info("Syncing positions from Binance API")
     balance = exchange.fetch_balances()
     # Robustly handle different balance structures
     if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
