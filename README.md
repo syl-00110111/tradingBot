@@ -87,7 +87,7 @@ Main bot settings.
     *   **`volume_48h`**: (low/high) thresholds for 48h trading volume (default: `1000`/`40000`).
     *   **`spread_pct`**: (low/high) thresholds for the bid/ask spread percentage (default: `0.01`/`0.05`).
     *   **`volatility_pct`**: (low/high) thresholds for price volatility percentage (default: `0.02`/`0.05`).
-    *   **`trades_per_minute`**: (low/high) thresholds for trading frequency (default: `5`/`20`).
+    *   **`trades_per_minute`**: (low/high) thresholds for trading frequency (default: `2`/`20`).
 
 #### Advanced Overrides (Optional)
 *   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy (e.g., `double_ema_macd_rsi`) for every pair, bypassing benchmarking.

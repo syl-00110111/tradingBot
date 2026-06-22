@@ -23,7 +23,7 @@
             "high": 0.05
         },
         "trades_per_minute": {
-            "low": 5,
+            "low": 2,
             "high": 20
         }
     }

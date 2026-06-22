@@ -173,7 +173,7 @@ def get_optimal_timeframe(exchange, symbol, config):
 
     try:
         ticker = exchange.fetch_ticker(symbol)
-        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=48)
+        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=60)
         trades = exchange.fetch_trades(symbol, limit=1000)
 
         # 1. Volume 48h
@@ -204,7 +204,7 @@ def get_optimal_timeframe(exchange, symbol, config):
             trades_per_min = len(trades) / duration_mins if duration_mins > 0 else 0
         else:
             trades_per_min = 0
-        tpm_low = thresholds.get('trades_per_minute', {}).get('low', 5)
+        tpm_low = thresholds.get('trades_per_minute', {}).get('low', 2)
         tpm_high = thresholds.get('trades_per_minute', {}).get('high', 20)
 
         # Scoring logic: higher score = faster timeframe
