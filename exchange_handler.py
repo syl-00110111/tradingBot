@@ -9,7 +9,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 class ThrottledExchange:
-    def __init__(self, exchange, delay_ms=42):
+    def __init__(self, exchange, delay_ms=2):
         self.exchange = exchange
         self.delay_s = delay_ms / 1000.0
         self.lock = threading.Lock()
@@ -34,7 +34,7 @@ class ThrottledExchange:
 
 def create_ccxt_session():
     session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+    adapter = HTTPAdapter(pool_connections=150, pool_maxsize=200)
     session.mount('https://', adapter)
     session.mount('http://', adapter)
     return session
@@ -76,7 +76,7 @@ class BinanceExchange(ExchangeInterface):
                             last_ts = candle[0]
             except Exception as e:
                 logging.error(f"Error in watch_ohlcv loop for {symbol}: {e}")
-            time.sleep(10)
+            time.sleep(2)
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
         try: return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)

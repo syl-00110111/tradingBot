@@ -655,7 +655,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             # Re-evaluate timeframe after re-benchmarking (background)
                             new_tf = get_optimal_timeframe(exchange, sym, config)
                             if new_tf != config['pairs'][sym].get('timeframe'):
-                                logging.info(f"[{sym}] Updating timeframe to {new_tf}")
+                                # logging.info(f"[{sym}] Updating timeframe to {new_tf}")
                                 config['pairs'][sym]['timeframe'] = new_tf
 
                     except Exception as e:
@@ -1334,7 +1334,7 @@ def sync_live_positions(exchange, data_manager, config):
         except: pass
 
         if curr_price > 0:
-             logging.info(f"[{symbol}] Auto-populating position from wallet ({amount:.6f} units).")
+             # logging.info(f"[{symbol}] Auto-populating position from wallet ({amount:.6f} units).")
              data_manager.add_position(symbol, curr_price, amount, 0, {"info": "auto_populated"}, time.time(), total_base=amount*curr_price)
         else:
              logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. Please manage manually.")
