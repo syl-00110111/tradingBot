@@ -30,7 +30,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 ### 🛡 Risk Management
 - **Confirmation Logic**: Requires consecutive identical signals (Buy or Sell) for execution:
   - **Standard**: 1 signal
-  - **High Volatility**: 2 signals
+  - **High Volatility (> 0.1)**: 2 signals
   - *Volatility is the sole property determining the confirmation window.*
 - **Automatic Suspension**: Automatically suspends trading for symbols where orders fail (e.g. insufficient balance or exchange limits) to prevent logic loops.
 - **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 9.0 = 9%).
@@ -82,11 +82,10 @@ Main bot settings.
 
 #### Dynamic Logic Settings
 *   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-benchmark of the symbol (default: `48`).
-*   **`rebenchmark_window`**: (int) Number of historical candles used during a re-benchmark to find the optimal strategy (default: `240`).
-*   **`timeframe_thresholds`**: (Object) Criteria for dynamic timeframe selection (1m, 3m, 5m, 15m).
+*   **`timeframe_thresholds`**: (Object) Criteria for dynamic timeframe selection (1m, 3m, 5m, 15m, 30m).
     *   **`volume_48h`**: (low/high) thresholds for 48h trading volume (default: `1000`/`40000`).
     *   **`spread_pct`**: (low/high) thresholds for the bid/ask spread percentage (default: `0.01`/`0.05`).
-    *   **`volatility_pct`**: (low/high) thresholds for price volatility percentage (default: `0.02`/`0.05`).
+    *   **`volatility_pct`**: (low/high) thresholds for price volatility percentage (default: `0.01`/`0.1`).
     *   **`trades_per_minute`**: (low/high) thresholds for trading frequency (default: `2`/`20`).
 
 #### Advanced Overrides (Optional)
