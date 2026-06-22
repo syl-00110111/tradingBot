@@ -342,7 +342,7 @@ def make_dashboard(global_mode, config):
             table.add_column("Flags", style="bold white", no_wrap=True)
             table.add_column("Scr", style="bold white", no_wrap=True)
             table.add_column("B.Prof", style="bold green", no_wrap=True)
-            table.add_column("Agressivity", style="white", no_wrap=True)
+            table.add_column("Aggress", style="white", no_wrap=True)
             table.add_column("Strategy", style="bold cyan", no_wrap=True)
         else:
             table.add_column("Pair", style="cyan", no_wrap=True)
@@ -354,7 +354,7 @@ def make_dashboard(global_mode, config):
             table.add_column("Tendency", style="bold white", no_wrap=True)
             table.add_column("Last Order", style="bold", no_wrap=True)
             table.add_column("Signal", style="bold", no_wrap=True)
-            table.add_column("Agressivity", style="white", no_wrap=True)
+            table.add_column("Aggress", style="white", no_wrap=True)
             table.add_column("Strategy", style="bold cyan", no_wrap=True)
 
         sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
@@ -426,7 +426,7 @@ def make_dashboard(global_mode, config):
                       f"{data.get('volatility', 0):.4f}/{data.get('adx', 0):.1f}",
                       f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
                       f"{data.get('score', 0)}",
-                      format_price(data.get('expected_profit', 0)) if has_position else '0.0000000',
+                      f"{data.get('expected_profit', 0):.5f}" if has_position else '0.00000',
                       data.get('aggr', 'N/A'),
                       data.get('strategy', 'N/A')
                  ]
@@ -435,7 +435,7 @@ def make_dashboard(global_mode, config):
                       symbol,
                       format_price(data.get('price', 0)),
                       amt_str, entry_str, fee_str,
-                      format_price(data.get('expected_profit', 0)) if has_position else '0.0000000',
+                      f"{data.get('expected_profit', 0):.5f}" if has_position else '0.00000',
                       f"[{tend_style}]{tendency}[/]",
                       f"[{last_order_style}]{last_order}[/]",
                       f"[{signal_style}]{current_signal}[/]",
@@ -1509,12 +1509,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
         eval_window_base = eval_candles
     else:
         # Default based on timeframe
-        if timeframe == '1m': eval_window_base = 60
-        elif timeframe == '3m': eval_window_base = 60
-        elif timeframe == '5m': eval_window_base = 60
-        elif timeframe == '15m': eval_window_base = 24
-        elif timeframe == '30m': eval_window_base = 48
-        else: eval_window_base = 60
+        eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
     eval_window = eval_window_base + random.randint(-max_rand, max_rand)
@@ -1649,17 +1644,12 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
-    # Use 24h/48 candles for 30m, 12h/48 candles for 15m
-    min_len = 24 if timeframe == '30m' else 12
-    if df_in is None or len(df_in) < min_len: return symbol, []
+    if df_in is None or len(df_in) < 80: return symbol, []
 
-    # Default based on timeframe
-    if timeframe == '1m': eval_window_base = 60
-    elif timeframe == '3m': eval_window_base = 60
-    elif timeframe == '5m': eval_window_base = 60
-    elif timeframe == '15m': eval_window_base = 24
-    elif timeframe == '30m': eval_window_base = 48
-    else: eval_window_base = 60
+    # Lookback proportional to timeframe (120 candles = 2h for 1m, 60h for 30m)
+    df_in = df_in.tail(120)
+
+    eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
     eval_window = eval_window_base + random.randint(-max_rand, max_rand)
@@ -1833,10 +1823,15 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         symbol_data_map = {}
 
         # Date filtering logic
-        # Default to last 12 hours as requested.
-        # Note: run_benchmark_for_symbol might extend this to 24h if timeframe >= 30m.
-        since_ts_12h = int((time.time() - 12 * 3600) * 1000)
-        since_ts_24h = int((time.time() - 24 * 3600) * 1000)
+        # Durations: 1m(2h), 3m(6h), 5m(10h), 15m(30h), 30m(60h)
+        now_ts = time.time()
+        since_map = {
+            '1m': int((now_ts - 2 * 3600) * 1000),
+            '3m': int((now_ts - 6 * 3600) * 1000),
+            '5m': int((now_ts - 10 * 3600) * 1000),
+            '15m': int((now_ts - 30 * 3600) * 1000),
+            '30m': int((now_ts - 60 * 3600) * 1000)
+        }
         if args.since:
              try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
              except Exception: console.print(f"[red]Invalid --since format. Use YYYY-MM-DD HH:MM[/]")
@@ -1846,9 +1841,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
             target_limit = max(1000, config.get('rebenchmark_window', 240))
             timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
 
-            # Use 24h for 30m or higher timeframes
-            is_long_tf = timeframe == '30m' # Expand list if more timeframes added later
-            current_since = since_ts_24h if is_long_tf else since_ts_12h
+            current_since = since_map.get(timeframe, since_map['1m'])
 
             if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching up to {target_limit} candles for {symbol} ({timeframe})...")
 
@@ -1885,9 +1878,11 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                               df = df[df['timestamp'] <= until_dt]
                          except Exception: pass
 
-                    # Enforce 12h limit (or 24h for long timeframes) (Using UTC for consistency with exchange data)
-                    hours_limit = 24 if is_long_tf else 12
-                    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours_limit)
+                    # Enforce timeframe-specific limits (Using UTC for consistency with exchange data)
+                    duration_hours = {
+                        '1m': 2, '3m': 6, '5m': 10, '15m': 30, '30m': 60
+                    }.get(timeframe, 2)
+                    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=duration_hours)
                     df = df[df['timestamp'] >= cutoff]
 
                     symbol_data_map[symbol] = df
