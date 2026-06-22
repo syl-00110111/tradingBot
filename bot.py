@@ -65,7 +65,7 @@ all_logs = []
 status_scroll_index = 0
 expert_mode = False
 show_help = False
-marquee_enabled = True
+marquee_enabled = False
 shutdown_event = threading.Event()
 suspended_pairs = set()
 
@@ -179,7 +179,7 @@ def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 10000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 40000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -222,9 +222,10 @@ def get_optimal_timeframe(exchange, symbol, config):
         if trades_per_min > tpm_high: score += 1; reasons.append("Active")
         elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
 
-        if score >= 1: tf = '1m'
-        elif score == 0: tf = '5m'
-        elif score == -1: tf = '15m'
+        if score >= 2: tf = '1m'
+        elif score == 1: tf = '3m'
+        elif score <= 0 and score >= -1: tf = '5m'
+        elif score == -2: tf = '15m'
         else: tf = '30m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
@@ -1287,7 +1288,7 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
-    logging.info("Syncing positions from Binance API...")
+    logging.info("Syncing positions from Binance API")
     balance = exchange.fetch_balances()
     # Robustly handle different balance structures
     if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
@@ -1512,7 +1513,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
         elif timeframe == '3m': eval_window_base = 60
         elif timeframe == '5m': eval_window_base = 60
         elif timeframe == '15m': eval_window_base = 24
-        elif timeframe == '30m': eval_window_base = 12
+        elif timeframe == '30m': eval_window_base = 48
         else: eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
@@ -1648,14 +1649,16 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     """
     Scans historical data for the top 4 success patterns using a high-performance single-pass approach.
     """
-    if df_in is None or len(df_in) < 12: return symbol, []
+    # Use 24h/48 candles for 30m, 12h/48 candles for 15m
+    min_len = 24 if timeframe == '30m' else 12
+    if df_in is None or len(df_in) < min_len: return symbol, []
 
     # Default based on timeframe
     if timeframe == '1m': eval_window_base = 60
     elif timeframe == '3m': eval_window_base = 60
     elif timeframe == '5m': eval_window_base = 60
     elif timeframe == '15m': eval_window_base = 24
-    elif timeframe == '30m': eval_window_base = 12
+    elif timeframe == '30m': eval_window_base = 48
     else: eval_window_base = 60
 
     max_rand = max(1, int(eval_window_base * 0.1))
@@ -1830,23 +1833,28 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         symbol_data_map = {}
 
         # Date filtering logic
-        # Default to last 12 hours as requested
-        since_ts = int((time.time() - 12 * 3600) * 1000)
+        # Default to last 12 hours as requested.
+        # Note: run_benchmark_for_symbol might extend this to 24h if timeframe >= 30m.
+        since_ts_12h = int((time.time() - 12 * 3600) * 1000)
+        since_ts_24h = int((time.time() - 24 * 3600) * 1000)
         if args.since:
              try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
              except Exception: console.print(f"[red]Invalid --since format. Use YYYY-MM-DD HH:MM[/]")
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_limit = max(1000, config.get('rebenchmark_window', 60))
-            current_since = since_ts
+            target_limit = max(1000, config.get('rebenchmark_window', 240))
             timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+
+            # Use 24h for 30m or higher timeframes
+            is_long_tf = timeframe == '30m' # Expand list if more timeframes added later
+            current_since = since_ts_24h if is_long_tf else since_ts_12h
 
             if status: status.update(f"[bold cyan][{i+1}/{len(symbols_to_bench)}] Fetching up to {target_limit} candles for {symbol} ({timeframe})...")
 
             try:
                 # Check cache first
-                cache_key = f"{symbol}_{timeframe}_{target_limit}"
+                cache_key = f"{symbol}_{timeframe}_{target_limit}_12-24h"
                 with ohlcv_cache_lock:
                     if cache_key in ohlcv_cache:
                         df = ohlcv_cache[cache_key]
@@ -1877,8 +1885,9 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                               df = df[df['timestamp'] <= until_dt]
                          except Exception: pass
 
-                    # Enforce 12h limit in all cases (Using UTC for consistency with exchange data)
-                    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=12)
+                    # Enforce 12h limit (or 24h for long timeframes) (Using UTC for consistency with exchange data)
+                    hours_limit = 24 if is_long_tf else 12
+                    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours_limit)
                     df = df[df['timestamp'] >= cutoff]
 
                     symbol_data_map[symbol] = df
