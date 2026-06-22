@@ -179,7 +179,7 @@ def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 10000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 40000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -222,9 +222,9 @@ def get_optimal_timeframe(exchange, symbol, config):
         if trades_per_min > tpm_high: score += 1; reasons.append("Active")
         elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
 
-        if score >= 0: tf = '1m'
-        elif score >= -1: tf = '3m'
-        elif score >= -2: tf = '5m'
+        if score >= 2: tf = '1m'
+        elif score >= 1: tf = '3m'
+        elif score >= 0: tf = '5m'
         else: tf = '15m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
