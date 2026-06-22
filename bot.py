@@ -733,11 +733,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                  except: pass
 
                                  if pos and not engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate):
-                                      # Profit check failed, report details, reverse sell and trigger immediate re-benchmark
+                                      # Profit check failed, report details, flag to avoid repeating, and trigger immediate re-benchmark
                                       min_exit = engine.get_min_exit_price(pos['entry_price'], fee_rate=fee_rate)
-                                      logging.warning(f"[{symbol}] Sell aborted: Potential loss. Price: {data['price']:.7f} < Min Exit: {min_exit:.7f} (Entry: {pos['entry_price']:.7f}, Fee: {fee_rate*100:.2f}%). Re-benchmarking...")
+                                      logging.warning(f"[{symbol}] Sell aborted: Potential loss. Price: {data['price']:.7f} < Min Exit: {min_exit:.7f} (Entry: {pos['entry_price']:.7f}, Fee: {fee_rate*100:.2f}%). Flagging pair and re-benchmarking...")
 
-                                      # Clear signal to "reverse" it
+                                      # Flag to avoid repeating this failed operation for the current position
+                                      data_manager.flag_ignore_sell(symbol)
+
+                                      # Clear signal to "reverse" it for current cycle
                                       data['sell'] = False
                                       data['sell_triggered'] = False
 
@@ -1272,7 +1275,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
         if is_simulation or free_balance >= position['amount']:
             order = exchange.create_order(symbol, 'sell', position['amount'])
             if isinstance(order, dict) and order.get('error') == 'dust_limit':
-                logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
+                logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Flagging pair to avoid repeat sell attempts.")
                 data_manager.flag_ignore_sell(symbol)
                 return False
             if order:
@@ -1675,15 +1678,16 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
+def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None, double_lookback=False):
     """
     Scans historical data for the top 4 success patterns using expanding time slices (tenths).
     Enforces a mandatory change in technique if exclude_technique is provided.
     """
-    if df_in is None or len(df_in) < 120: return symbol, []
+    lookback = 240 if double_lookback else 120
+    if df_in is None or len(df_in) < lookback: return symbol, []
 
-    # 120 k-lines lookback (matching hour durations)
-    df_in = df_in.tail(120)
+    # Standard lookback (120) or doubled (240) if previous failed
+    df_in = df_in.tail(lookback)
     patterns = []
     now_ts = time.time()
     from indicators import get_signals
@@ -1710,13 +1714,13 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
             mode_settings['strategy'] = strategy
             mode_settings['device'] = device if device is not None else torch.device("cpu")
 
-            # 1. Calculate signals once for the 120 candles
+            # 1. Calculate signals once for the current lookback
             try:
                 full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
             except Exception:
                 continue
 
-            # 2. Run backtest for the entire 120-candle block
+            # 2. Run backtest for the entire lookback block
             res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
                                          timeframe=timeframe, df_in=full_df, engine=engine,
                                          device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
@@ -1727,12 +1731,11 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
             equity = res_full['equity_curve']
 
             # 3. Expanding Time Slices (Tenths)
-            # We work backward in increments of 1/10 (12 candles)
-            # Segments: Last 12, Last 24, ..., Full 120
+            # We work backward in increments of 1/10
             segment_profits = []
             segment_scores = []
 
-            tenth = 12
+            tenth = lookback // 10
             for i in range(1, 11):
                 segment_len = i * tenth
                 start_idx = len(full_df) - segment_len
@@ -1876,7 +1879,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
 
         for i, symbol in enumerate(symbols_to_bench):
             all_ohlcv = []
-            target_limit = 2000
+            target_limit = 2000 # Increased to ensure enough data for double lookback
             timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
 
             current_since = since_map.get(timeframe, since_map['1m'])
@@ -1959,6 +1962,20 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                 for future in concurrent.futures.as_completed(futures):
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
+
+                    # If no profitable strategy found, try doubling lookback
+                    if not patterns:
+                         # We need to re-fetch more data to support 240 candles
+                         # This is complex in a future loop, but we can do a synchronous retry
+                         # for just this symbol if it's high priority.
+                         # For now, we assume pre-fetched data in symbol_data_map might have enough candles.
+                         if sym in symbol_data_map and len(symbol_data_map[sym]) >= 240:
+                              _, patterns = run_benchmark_for_symbol(
+                                   sym, config, config['pairs'][sym].get('timeframe', '1m'),
+                                   aggrs, strategies, symbol_data_map[sym], engine, device,
+                                   exclude_technique=exclude, double_lookback=True
+                              )
+
                     if patterns:
                         # "Last for": pick the most recent profitable pattern
                         last_for_symbol = patterns[0]
