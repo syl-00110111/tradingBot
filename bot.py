@@ -230,11 +230,11 @@ def get_optimal_timeframe(exchange, symbol, config):
         else: tf = '15m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
-        return tf
+        return tf, score, reasons
 
     except Exception as e:
         logging.warning(f"Error determining timeframe for {symbol}: {e}. Defaulting to 1m.")
-        return '1m'
+        return '1m', 0, ["Error"]
 
 def render_ascii_chart(symbol, config):
     global chart_cache
@@ -653,7 +653,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             # logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
 
                             # Re-evaluate timeframe after re-benchmarking (background)
-                            new_tf = get_optimal_timeframe(exchange, sym, config)
+                            new_tf, _, _ = get_optimal_timeframe(exchange, sym, config)
                             if new_tf != config['pairs'][sym].get('timeframe'):
                                 # logging.info(f"[{sym}] Updating timeframe to {new_tf}")
                                 config['pairs'][sym]['timeframe'] = new_tf
@@ -918,10 +918,12 @@ def main():
             for symbol in config['pairs']:
                 if args.timeframe:
                     tf = args.timeframe
+                    score = "N/A"
+                    reasons = ["Manual Override"]
                 else:
-                    tf = get_optimal_timeframe(exchange, symbol, config)
+                    tf, score, reasons = get_optimal_timeframe(exchange, symbol, config)
                 config['pairs'][symbol]['timeframe'] = tf
-                console.print(f"[dim][{symbol}] Optimal timeframe: {tf}")
+                console.print(f"[dim][{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
 
             status.update(f"[bold blue]Optimizing strategies for all pairs...")
             opt_map = run_benchmark_mode(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
@@ -1123,16 +1125,16 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             consecutive_buys = 0
             consecutive_sells = 0
 
-    # Dynamic confirmation window based on timeframe and volatility
-    # 1m -> 1, 3m/5m -> 2, 15m -> 3
-    if timeframe == '1m': buy_threshold = 1
-    elif timeframe in ['3m', '5m']: buy_threshold = 2
-    else: buy_threshold = 3
+    # Dynamic confirmation window based on volatility
+    # Default is 1 signal for both buy and sell.
+    buy_threshold = 1
+    sell_threshold = 1
 
-    # Temper with volatility
+    # High volatility adds an additional confirmation signal
     volatility = latest_row.get('volatility', 0)
     if volatility > 0.05: # High volatility
         buy_threshold += 1
+        sell_threshold += 1
 
     return {
         'price': latest_row['close'],
@@ -1149,11 +1151,11 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'strategy': strategy_name,
         'tendency': latest_row.get('tendency', 'Neutral'),
         'buy': consecutive_buys >= buy_threshold,
-        'sell': consecutive_sells >= 3, # Keep 3 for sells as it's for risk reduction
+        'sell': consecutive_sells >= sell_threshold,
         'consecutive_buys': consecutive_buys,
         'consecutive_sells': consecutive_sells,
         '_last_candle_ts': candle_ts,
-        'sell_triggered': consecutive_sells >= 3 and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
+        'sell_triggered': consecutive_sells >= sell_threshold and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
         'position': data_manager.get_position(symbol),
         'expected_profit': float(pair_config.get('expected_profit', 0)),
         'trigger_data': trigger_data

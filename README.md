@@ -28,11 +28,10 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **Signal-Based Re-benchmarking**: If a pair fails to generate signals for a set period (default 32 candles), the bot re-evaluates the market to find a better-fitting strategy or update the timeframe using the latest 160 candles.
 
 ### 🛡 Risk Management
-- **Confirmation Logic**: Requires consecutive identical signals dynamically adjusted by timeframe and volatility:
-  - **1m**: 1 signal
-  - **3m / 5m**: 2 signals
-  - **15m**: 3 signals
-  - *High volatility adds an additional confirmation signal.*
+- **Confirmation Logic**: Requires consecutive identical signals (Buy or Sell) for execution:
+  - **Standard**: 1 signal
+  - **High Volatility**: 2 signals
+  - *Volatility is the sole property determining the confirmation window.*
 - **Automatic Suspension**: Automatically suspends trading for symbols where orders fail (e.g. insufficient balance or exchange limits) to prevent logic loops.
 - **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 9.0 = 9%).
 
