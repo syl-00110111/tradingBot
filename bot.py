@@ -1680,10 +1680,10 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     Scans historical data for the top 4 success patterns using expanding time slices (tenths).
     Enforces a mandatory change in technique if exclude_technique is provided.
     """
-    if df_in is None or len(df_in) < 480: return symbol, []
+    if df_in is None or len(df_in) < 120: return symbol, []
 
-    # 480 k-lines lookback
-    df_in = df_in.tail(480)
+    # 120 k-lines lookback (matching hour durations)
+    df_in = df_in.tail(120)
     patterns = []
     now_ts = time.time()
     from indicators import get_signals
@@ -1710,13 +1710,13 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
             mode_settings['strategy'] = strategy
             mode_settings['device'] = device if device is not None else torch.device("cpu")
 
-            # 1. Calculate signals once for the 480 candles
+            # 1. Calculate signals once for the 120 candles
             try:
                 full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
             except Exception:
                 continue
 
-            # 2. Run backtest for the entire 480-candle block
+            # 2. Run backtest for the entire 120-candle block
             res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
                                          timeframe=timeframe, df_in=full_df, engine=engine,
                                          device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
@@ -1727,12 +1727,12 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
             equity = res_full['equity_curve']
 
             # 3. Expanding Time Slices (Tenths)
-            # We work backward in increments of 1/10 (48 candles)
-            # Segments: Last 48, Last 96, ..., Full 480
+            # We work backward in increments of 1/10 (12 candles)
+            # Segments: Last 12, Last 24, ..., Full 120
             segment_profits = []
             segment_scores = []
 
-            tenth = 48
+            tenth = 12
             for i in range(1, 11):
                 segment_len = i * tenth
                 start_idx = len(full_df) - segment_len
@@ -1865,14 +1865,14 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         symbol_data_map = {}
 
         # Date filtering logic
-        # Durations (480 candles): 1m(8h), 3m(24h), 5m(40h), 15m(120h), 30m(240h)
+        # Durations (120 candles): 1m(2h), 3m(6h), 5m(10h), 15m(30h), 30m(60h)
         now_ts = time.time()
         since_map = {
-            '1m': int((now_ts - 8 * 3600) * 1000),
-            '3m': int((now_ts - 24 * 3600) * 1000),
-            '5m': int((now_ts - 40 * 3600) * 1000),
-            '15m': int((now_ts - 120 * 3600) * 1000),
-            '30m': int((now_ts - 240 * 3600) * 1000)
+            '1m': int((now_ts - 2 * 3600) * 1000),
+            '3m': int((now_ts - 6 * 3600) * 1000),
+            '5m': int((now_ts - 10 * 3600) * 1000),
+            '15m': int((now_ts - 30 * 3600) * 1000),
+            '30m': int((now_ts - 60 * 3600) * 1000)
         }
         if args.since:
              try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)

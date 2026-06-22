@@ -24,14 +24,16 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **Interactive Dashboard**: Navigate through trading pairs with arrow keys and visualize real-time ASCII candlestick charts by pressing **ENTER**.
 - **Auto-Position Discovery**: Automatically identifies existing assets in your wallet and populates them as managed positions for strategy-based exits.
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
-- **Dynamic Timeframe Selection**: Automatically determines the optimal timeframe (1m, 3m, 5m, 15m) for each pair based on 24h volume, spread, volatility, and trading activity.
-- **Signal-Based Re-benchmarking**: If a pair fails to generate signals for a set period (default 32 candles), the bot re-evaluates the market to find a better-fitting strategy or update the timeframe using the latest 160 candles.
+- **Dynamic Timeframe Selection**: Automatically determines the optimal timeframe (1m, 3m, 5m, 15m, 30m) for each pair based on 48h volume, spread, volatility, and trading activity.
+- **Advanced Re-benchmarking**: Continuous strategy optimization using a timeframe-tailored horizon (120 candles). Performance is evaluated using time-slice segmentation (tenths) to ensure consistency across chronological windows.
 
 ### 🛡 Risk Management
 - **Confirmation Logic**: Requires consecutive identical signals (Buy or Sell) for execution:
   - **Standard**: 1 signal
   - **High Volatility (> 0.1)**: 2 signals
   - *Volatility is the sole property determining the confirmation window.*
+- **Loss Prevention**: Integrated break-even verification. If a sell order would result in a loss (including fees), it is automatically aborted, and the symbol is scheduled for an immediate re-benchmark with a mandatory change in trading technique.
+- **Technique Rotation**: To ensure adaptability, the bot enforces a mandatory change of strategy/aggressiveness after every performance test ('Last for' selection strategy).
 - **Automatic Suspension**: Automatically suspends trading for symbols where orders fail (e.g. insufficient balance or exchange limits) to prevent logic loops.
 - **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 9.0 = 9%).
 
