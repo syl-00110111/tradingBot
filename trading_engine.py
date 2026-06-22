@@ -13,21 +13,23 @@ class TradingEngine:
             "ema_fast": 20, "ema_slow": 50,
             "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
-            "confirmation_window": 3
+            "confirmation_window": 1
         }
         if adx > 25:
             settings.update({
                 "ema_fast": 10, "ema_slow": 30,
-                "rsi_buy": 40, "rsi_sell": 60,
-                "confirmation_window": 2
+                "rsi_buy": 40, "rsi_sell": 60
             })
         elif volatility > 0.015:
             settings.update({
                 "ema_fast": 30, "ema_slow": 100,
-                "rsi_buy": 20, "rsi_sell": 80,
-                "confirmation_window": 4
+                "rsi_buy": 20, "rsi_sell": 80
             })
-        settings["confirmation_window"] = max(1, int(settings["confirmation_window"] / self.risk_multiplier))
+
+        # High volatility adds an additional confirmation signal
+        if volatility > 0.05:
+            settings["confirmation_window"] = 2
+
         return settings
 
     def is_profitable(self, current_price, entry_price, fee_rate=0.001):
