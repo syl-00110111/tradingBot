@@ -11,19 +11,19 @@
     "timeframe_thresholds": {
         "volume_48h": {
             "low": 1000,
-            "high": 40000
+            "high": 80000
         },
         "spread_pct": {
-            "low": 0.01,
-            "high": 0.05
+            "low": 0.001,
+            "high": 0.02
         },
         "volatility_pct": {
-            "low": 0.02,
-            "high": 0.05
+            "low": 0.01,
+            "high": 0.1
         },
         "trades_per_minute": {
-            "low": 2,
-            "high": 20
+            "low": 1,
+            "high": 40
         }
     }
 }

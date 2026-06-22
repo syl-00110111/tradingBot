@@ -179,15 +179,15 @@ def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 40000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 80000)
 
         # 2. Spread
         spread_pct = 0.5
         if ticker.get('ask') and ticker.get('bid') and ticker['bid'] > 0:
             spread = ticker['ask'] - ticker['bid']
             spread_pct = (spread / ticker['bid']) * 100
-        spr_low = thresholds.get('spread_pct', {}).get('low', 0.01)
-        spr_high = thresholds.get('spread_pct', {}).get('high', 0.05)
+        spr_low = thresholds.get('spread_pct', {}).get('low', 0.001)
+        spr_high = thresholds.get('spread_pct', {}).get('high', 0.02)
 
         # 3. Volatility
         volatility = 0.05
@@ -204,8 +204,8 @@ def get_optimal_timeframe(exchange, symbol, config):
             trades_per_min = len(trades) / duration_mins if duration_mins > 0 else 0
         else:
             trades_per_min = 0
-        tpm_low = thresholds.get('trades_per_minute', {}).get('low', 2)
-        tpm_high = thresholds.get('trades_per_minute', {}).get('high', 20)
+        tpm_low = thresholds.get('trades_per_minute', {}).get('low', 1)
+        tpm_high = thresholds.get('trades_per_minute', {}).get('high', 40)
 
         # Scoring logic: higher score = faster timeframe
         score = 0
