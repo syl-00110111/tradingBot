@@ -717,7 +717,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                               exclude = (bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
 
                                     active_benchmarks[symbol] = bench_executor.submit(
-                                        run_benchmark_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device, exclude_technique=exclude
+                                        run_discovery_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device, exclude_technique=exclude
                                     )
 
                             with bot_lock:
@@ -738,6 +738,9 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                       min_exit = engine.get_min_exit_price(pos['entry_price'], fee_rate=fee_rate)
                                       logging.warning(f"[{symbol}] Sell aborted: Potential loss. Price: {data['price']:.7f} < Min Exit: {min_exit:.7f} (Entry: {pos['entry_price']:.7f}, Fee: {fee_rate*100:.2f}%). Re-benchmarking...")
 
+                                      # Flag to ignore sell until signal resets
+                                      data_manager.flag_ignore_sell(symbol, value=True)
+
                                       # Clear signal to "reverse" it
                                       data['sell'] = False
                                       data['sell_triggered'] = False
@@ -752,7 +755,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                                      df_bench = ohlcv_cache[cache_key].copy()
                                            if df_bench is not None and not df_bench.empty:
                                                 active_benchmarks[symbol] = bench_executor.submit(
-                                                     run_benchmark_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
+                                                     run_discovery_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
                                                      exclude_technique=(bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
                                                 )
                                  elif execute_sell(exchange, data_manager, engine, symbol, data):
@@ -942,7 +945,7 @@ def main():
                 return
             exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
             # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
-            run_benchmark_mode(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
+            run_discovery_mode(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
             return
 
         pairs = config.get('pairs', {})
@@ -968,8 +971,8 @@ def main():
                 console.print("[bold red]Timeframe discovery interrupted by user.[/]")
                 return
 
-            status.update(f"[bold blue]Optimizing strategies for all pairs...")
-            opt_map = run_benchmark_mode(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
+            status.update(f"[bold blue]Scanning for suitable strategies for all pairs...")
+            opt_map = run_discovery_mode(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             # Store profits for prioritization
             pair_priorities = []
             for sym, data in opt_map.items():
@@ -988,7 +991,7 @@ def main():
                         config['pairs'][sym]['expected_profit'] = priority_score
                         pair_priorities.append((sym, priority_score))
                         if best.get('is_cached'):
-                             console.print(f"[bold green][{sym}][/] Optimized from [cyan]cached results[/] to [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Predicted Profit: {format_price(priority_score)} EUR")
+                             console.print(f"[bold green][{sym}][/] Strategy discovered from [cyan]cached results[/]: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Predicted Profit: {format_price(priority_score)} EUR")
 
                 time.sleep(1) # Brief pause after bench
 
@@ -1162,11 +1165,16 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         else:
             consecutive_buys = 0
             consecutive_sells = 0
+            # Reset ignore_sell if we are back in neutral/no signal zone
+            if data_manager.get_position(symbol):
+                data_manager.flag_ignore_sell(symbol, value=False)
     else:
         # If it's the same candle, keep existing counts unless signal lost
         if not latest_row['buy_signal'] and not latest_row['sell_signal']:
             consecutive_buys = 0
             consecutive_sells = 0
+            if data_manager.get_position(symbol):
+                data_manager.flag_ignore_sell(symbol, value=False)
 
     # Dynamic confirmation window based on volatility
     # Default is 1 signal for both buy and sell.
@@ -1570,6 +1578,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     position = None
     trades = []
     equity_curve = []
+    sell_occurred = False
+    sell_buy_sequence = False
 
     # We loop through the whole DF for indicators, but only execute trades in the eval window
     for i in range(len(df)):
@@ -1581,21 +1591,26 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
         price = row['close']
 
         # Sell logic
-        if position and row['sell_signal']:
-            revenue = price * position['amount']
-            fee = revenue * fee_rate
-            revenue_net = revenue - fee
+        if row['sell_signal']:
+            sell_occurred = True
+            if position:
+                revenue = price * position['amount']
+                fee = revenue * fee_rate
+                revenue_net = revenue - fee
 
-            profit = revenue_net - position['entry_cost']
-            balance += revenue_net
-            trades.append({'profit': profit})
-            position = None
+                profit = revenue_net - position['entry_cost']
+                balance += revenue_net
+                trades.append({'profit': profit})
+                position = None
 
         # Buy logic
         raw_val = float(config.get('base_trade_amount', 9.0))
         base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
         trade_amount = balance * base_percentage
         if not position and row['buy_signal'] and balance >= trade_amount:
+            if sell_occurred:
+                sell_buy_sequence = True
+
             fee = trade_amount * fee_rate
             cost_total = trade_amount + fee
 
@@ -1646,6 +1661,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
         'win_rate': win_rate,
         'max_dd': max_dd,
         'trades_count': len(trades),
+        'sell_buy_sequence': sell_buy_sequence,
         'start_time': start_time_dt.strftime("%Y-%m-%d %H:%M"),
         'end_time': end_time_dt.strftime("%Y-%m-%d %H:%M"),
         'start_ts': start_time_dt.timestamp(),
@@ -1682,13 +1698,16 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
         console.print(f"Win Rate: {results['win_rate']:.1%}")
         console.print(f"Max Drawdown: {results['max_dd']:.1%}")
         console.print(f"Total Trades: {results['trades_count']}")
+        if results.get('sell_buy_sequence'):
+             console.print(f"[bold green]Signal Sequence Detected: SELL followed by BUY[/]")
     else:
         console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
+def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
     """
-    Scans historical data for the top 4 success patterns using expanding time slices (tenths).
-    Doubles the lookback window if no profitable patterns are found.
+    Scans historical data for success patterns using expanding time slices (tenths).
+    Doubles the lookback window if no patterns are found.
+    Accepts patterns that show a SELL followed by BUY sequence even if profit is low.
     """
     if df_in is None or len(df_in) < 120: return symbol, []
 
@@ -1768,7 +1787,8 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
                 avg_score = sum(segment_scores) / len(segment_scores)
                 avg_profit = sum(segment_profits) / len(segment_profits)
 
-                if avg_profit < 0.01:
+                # Acceptance criteria: either profitable OR a clear SELL -> BUY sequence
+                if avg_profit < 0.01 and not res_full.get('sell_buy_sequence'):
                     continue
 
                 latest_row = full_df.iloc[-1]
@@ -1821,7 +1841,7 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
 
     return symbol, []
 
-def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
+def run_discovery_mode(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
 
     # Respect global overrides if they exist
     global_aggr = config.get('force_agressivity_to_all_pairs')
@@ -1863,7 +1883,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         symbols_to_bench.append(symbol)
 
     if symbols_to_bench:
-        msg = f"Benchmarking all strategies for {len(symbols_to_bench)} symbol(s) using multi-processing..."
+        msg = f"Scanning strategies for {len(symbols_to_bench)} symbol(s) using multi-processing..."
         if status: status.update(f"[bold blue]{msg}")
         else: console.print(f"[bold blue]{msg}")
 
@@ -1947,7 +1967,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
              executor.shutdown(wait=False, cancel_futures=True)
              sys.exit(0)
 
-        if status: status.update('[bold yellow]Analyzing patterns and optimizing strategies...')
+        if status: status.update('[bold yellow]Analyzing patterns and discovering strategies...')
         # On CPU with oneDNN, ThreadPoolExecutor might be more efficient for many small torch tasks
         # than ProcessPoolExecutor which has pickling overhead.
         executor_class = concurrent.futures.ProcessPoolExecutor
@@ -1963,7 +1983,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                          exclude = (bot_state[sym].get('strategy'), bot_state[sym].get('aggr'))
 
                     futures.append(executor.submit(
-                        run_benchmark_for_symbol, sym, config, config['pairs'][sym].get('timeframe', '1m'),
+                        run_discovery_for_symbol, sym, config, config['pairs'][sym].get('timeframe', '1m'),
                         aggrs, strategies, symbol_data_map[sym], engine, device, exclude_technique=exclude
                     ))
                 for future in concurrent.futures.as_completed(futures):
@@ -1991,7 +2011,7 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
 
                         msg_target = status.console if status else console
                         optimization_map[sym] = last_for_symbol
-                        msg_target.print(f"\n[bold green]🏆 LAST FOR {sym}:[/] [bold]{last_for_symbol['strategy']} ({last_for_symbol['aggr']})[/] | Profit: {format_price(last_for_symbol['profit'])} EUR{period_str}")
+                        msg_target.print(f"\n[bold green]🏆 DISCOVERY FOR {sym}:[/] [bold]{last_for_symbol['strategy']} ({last_for_symbol['aggr']})[/] | Profit: {format_price(last_for_symbol['profit'])} EUR{period_str}")
 
                         # Use a generic 'total' score for recommendations
                         if last_for_symbol['profit'] > best_overall['total']['profit']:
@@ -2000,14 +2020,14 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                 signal.signal(signal.SIGINT, original_handler)
 
     # If we are in optimization mode for live/sim, return the map
-    if status: status.update('[bold green]Optimization complete.')
+    if status: status.update('[bold green]Discovery complete.')
     if best_per_symbol:
         time.sleep(3)
 
     if args.mode in ['live', 'simulation']:
         return optimization_map
 
-    console.print("\n[bold magenta]=== BENCHMARK RECOMMENDATIONS ===[/]")
+    console.print("\n[bold magenta]=== DISCOVERY RECOMMENDATIONS ===[/]")
     found_any = False
     for key in ['total']:
         label = "Recommended"
@@ -2022,12 +2042,12 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
             console.print(f"  > [bold green]Estimated Gain:[/] {format_price(data['profit'])} EUR\n")
 
     if not found_any:
-        console.print("[yellow]No successful patterns (> 0.022 profit) were found in the scanned historical data.[/]")
+        console.print("[yellow]No suitable strategies found in the scanned historical data.[/]")
     else:
         # Final check: if some symbols returned nothing, let the user know
         for sym in symbols_to_bench:
             if sym not in best_per_symbol:
-                 console.print(f"[dim][{sym}] No profitable patterns found in current scan.[/]")
+                 console.print(f"[dim][{sym}] No suitable patterns found in current scan.[/]")
 
 if __name__ == "__main__":
     main()

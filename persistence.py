@@ -39,9 +39,9 @@ class DataManager:
                 return True
         return False
 
-    def flag_ignore_sell(self, symbol):
+    def flag_ignore_sell(self, symbol, value=True):
         if symbol in self.data["open_positions"]:
-            self.data["open_positions"][symbol]["ignore_sell"] = True
+            self.data["open_positions"][symbol]["ignore_sell"] = value
 
     def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0):
         if symbol in self.data["open_positions"]:
