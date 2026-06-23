@@ -232,8 +232,9 @@ def get_optimal_timeframe(exchange, symbol, config):
         return tf, score, reasons
 
     except Exception as e:
-        logging.warning(f"Error determining timeframe for {symbol}: {e}. Defaulting to 1m.")
-        return '1m', 0, ["Error"]
+        err_msg = str(e)
+        logging.warning(f"Error determining timeframe for {symbol}: {err_msg}. Defaulting to 1m.")
+        return '1m', 0, [f"Error: {err_msg}"]
 
 def render_ascii_chart(symbol, config):
     global chart_cache
@@ -952,15 +953,20 @@ def main():
         if args.mode in ['live', 'simulation']:
             # Determine optimal timeframe for each pair first
             status.update("[bold blue]Determining optimal timeframes for all pairs...")
-            for symbol in config['pairs']:
-                if args.timeframe:
-                    tf = args.timeframe
-                    score = "N/A"
-                    reasons = ["Manual Override"]
-                else:
-                    tf, score, reasons = get_optimal_timeframe(exchange, symbol, config)
-                config['pairs'][symbol]['timeframe'] = tf
-                console.print(f"[dim][{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
+            try:
+                for symbol in config['pairs']:
+                    if shutdown_event.is_set(): break
+                    if args.timeframe:
+                        tf = args.timeframe
+                        score = "N/A"
+                        reasons = ["Manual Override"]
+                    else:
+                        tf, score, reasons = get_optimal_timeframe(exchange, symbol, config)
+                    config['pairs'][symbol]['timeframe'] = tf
+                    console.print(f"[dim][{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
+            except KeyboardInterrupt:
+                console.print("[bold red]Timeframe discovery interrupted by user.[/]")
+                return
 
             status.update(f"[bold blue]Optimizing strategies for all pairs...")
             opt_map = run_benchmark_mode(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
