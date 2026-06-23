@@ -1,4 +1,4 @@
-# Binance Trading Bot
+# CCXT Pro Trading Bot
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 #
 # This program is free software: you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-Main entry point and dashboard logic for the Binance Trading Bot.
+Main entry point and dashboard logic for the CCXT Pro Trading Bot.
 
 This module coordinates the dashboard UI, user input, background OHLCV fetching,
 and the core trading loop across multiple pairs and strategies.
@@ -52,7 +52,7 @@ from rich.text import Text
 
 import readchar
 
-from exchange_handler import BinanceExchange, MockExchange, KrakenExchange, BitvavoExchange
+from exchange_handler import CCXTExchange, MockExchange
 from indicators import get_signals, calculate_similarity, STRATEGIES
 from persistence import DataManager, CacheManager, PatternManager
 from trading_engine import TradingEngine
@@ -126,8 +126,8 @@ class DashboardHandler(logging.Handler):
         expiry = datetime.now() + timedelta(seconds=self.duration)
 
         with bot_lock:
-            # Connection pool log filtering
-            pool_msg = "Connection pool is full, discarding connection: api.binance.com"
+            # Connection pool log filtering (generic)
+            pool_msg = "Connection pool is full, discarding connection"
             if pool_msg in msg:
                  for log in all_logs:
                       if pool_msg in log['msg']:
@@ -618,7 +618,7 @@ def make_dashboard(global_mode, config):
 
     layout = Layout()
     layout.split(
-        Layout(Panel(Text("Binance Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
+        Layout(Panel(Text("CCXT Pro Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
         Layout(log_panel, size=log_height+2),
         Layout(pairs_panel, name="main"),
         Layout(Panel(status_display, title="Status", border_style="cyan"), size=3)
@@ -963,14 +963,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
 def main():
     """
-    Entry point for the Binance Trading Bot.
+    Entry point for the CCXT Pro Trading Bot.
 
     Parses command-line arguments, detects hardware acceleration (GPU/SIMD),
     initializes the exchange, and starts the dashboard and trading threads.
     """
-    parser = argparse.ArgumentParser(description='Binance Trading Bot')
+    parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
-    parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
+    parser.add_argument('--exchange', help='CCXT Exchange ID to use (e.g., binance, kraken, bitvavo)')
     parser.add_argument('--mode', choices=['live', 'simulation', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
     parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/EUR)')
@@ -1049,7 +1049,7 @@ def main():
         except Exception as e:
             console.print(f"[bold red]Error parsing api.json: {e}[/]")
 
-    with console.status("[bold green]Initializing Binance Trading Bot...", spinner="dots") as status:
+    with console.status("[bold green]Initializing CCXT Pro Trading Bot...", spinner="dots") as status:
 
         # MMX, SSE, AVX Gradation Check (Instruction 6)
         try:
@@ -1077,25 +1077,21 @@ def main():
         pattern_manager = PatternManager()
         engine = TradingEngine(config)
 
+        # Prioritize exchange_id: api.json > CLI argument > config > default 'binance'
+        exchange_id = api_creds.get('exchange_id') or args.exchange or config.get('exchange') or 'binance'
+
         # Use credentials from api.json if available, otherwise config.default.json
         api_key = api_creds.get('api_key') or config.get('api_key')
         api_secret = api_creds.get('api_secret') or config.get('api_secret')
 
         if args.mode == 'live':
-            if args.exchange == 'binance':
-                exchange = BinanceExchange(api_key, api_secret)
-            elif args.exchange == 'kraken':
-
-                exchange = KrakenExchange(api_key, api_secret)
-            elif args.exchange == 'bitvavo':
-
-                exchange = BitvavoExchange(api_key, api_secret)
-            logging.info(f"Starting bot in LIVE mode on {args.exchange}")
+            exchange = CCXTExchange(exchange_id, api_key, api_secret)
+            logging.info(f"Starting bot in LIVE mode on {exchange_id}")
         elif args.mode == 'simulation':
-            exchange = MockExchange(api_key, api_secret, exchange_type=args.exchange)
-            logging.info(f"Starting bot in SIMULATION mode ({args.exchange} discovery)")
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id)
+            logging.info(f"Starting bot in SIMULATION mode ({exchange_id} discovery)")
         elif args.mode == 'balance':
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret)
             exchange.load_markets()
             show_balances(exchange)
             return
@@ -1103,14 +1099,14 @@ def main():
             if not args.symbol:
                 console.print("[red]Error: --symbol required for backtest[/]")
                 return
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret)
             run_backtest_mode(exchange, config, args, engine=engine, device=device)
             return
         elif args.mode == 'benchmark':
             if not args.symbol and not args.every_symbol:
                 console.print("[red]Error: --symbol or --every-symbol required for benchmark[/]")
                 return
-            exchange = MockExchange(api_key, api_secret) if api_key in [None, "YOUR_API_KEY"] else BinanceExchange(api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret)
             # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
             run_discovery_mode(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
             return
@@ -1653,7 +1649,8 @@ def sync_live_positions(exchange, data_manager, config):
     config : dict
         Bot configuration for identifying base currencies and pairs.
     """
-    logging.info("Syncing positions from Binance API")
+    exchange_id = getattr(exchange, 'exchange_id', 'Exchange')
+    logging.info(f"Syncing positions from {exchange_id} API")
     balance = exchange.fetch_balances()
     if balance is None:
         logging.error("Failed to sync live positions: balances are unavailable. Check API credentials or if your computer's clock is synchronized.")

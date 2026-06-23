@@ -1,10 +1,10 @@
-# Binance Trading Bot - Exchange Interface
+# CCXT Pro Trading Bot - Exchange Interface
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 """
 Interfaces and handlers for communicating with cryptocurrency exchanges.
 
-This module provides a unified interface for different exchanges (Binance, Kraken, Bitvavo)
+This module provides a unified interface for any exchange supported by CCXT
 and includes a Mock handler for simulations and testing.
 """
 
@@ -82,28 +82,40 @@ class ExchangeInterface:
     def fetch_trades(self, symbol, limit=100): raise NotImplementedError
     def fetch_trading_fee(self, symbol): raise NotImplementedError
 
-class BinanceExchange(ExchangeInterface):
+class CCXTExchange(ExchangeInterface):
     """
-    Exchange handler for Binance using CCXT.
+    Generic exchange handler using CCXT.
 
     Parameters
     ----------
+    exchange_id : str
+        The CCXT exchange ID (e.g., 'binance', 'kraken').
     api_key : str
-        Binance API key.
+        Exchange API key.
     api_secret : str
-        Binance API secret.
+        Exchange API secret.
     """
-    def __init__(self, api_key, api_secret):
+    def __init__(self, exchange_id, api_key, api_secret):
+        if not hasattr(ccxt, exchange_id):
+            raise ValueError(f"Exchange '{exchange_id}' is not supported by CCXT.")
+
+        exchange_class = getattr(ccxt, exchange_id)
         config = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'options': {'defaultType': 'spot', 'poolSize': 50, 'adjustForTimeDifference': True},
+            'options': {'poolSize': 50, 'adjustForTimeDifference': True},
             'session': create_ccxt_session()
         }
-        self.exchange = ThrottledExchange(ccxt.binance(config))
+
+        # Specific options for Binance
+        if exchange_id == 'binance':
+            config['options']['defaultType'] = 'spot'
+
+        self.exchange = ThrottledExchange(exchange_class(config))
+        self.exchange_id = exchange_id
 
     def load_markets(self):
         try: return self.exchange.load_markets()
-        except Exception as e: logging.error(f"Failed to load markets: {e}"); return {}
+        except Exception as e: logging.error(f"Failed to load markets for {self.exchange_id}: {e}"); return {}
 
     def watch_ohlcv(self, symbol, timeframe):
         """
@@ -125,9 +137,6 @@ class BinanceExchange(ExchangeInterface):
         list
             A single OHLCV candle [timestamp, open, high, low, close, volume].
         """
-        # Implementation of watch_ohlcv as a generator
-        # Fallback to polling for sync CCXT
-        # logging.info(f"Starting watch_ohlcv for {symbol} ({timeframe}) via polling fallback")
         last_candle = None
         while True:
             try:
@@ -139,17 +148,17 @@ class BinanceExchange(ExchangeInterface):
                             yield candle
                             last_candle = candle
             except Exception as e:
-                logging.error(f"Error in watch_ohlcv loop for {symbol}: {e}")
+                logging.error(f"Error in watch_ohlcv loop for {symbol} on {self.exchange_id}: {e}")
             time.sleep(2)
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
         try: return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-        except Exception as e: logging.error(f"Error fetching OHLCV for {symbol}: {e}"); return None
+        except Exception as e: logging.error(f"Error fetching OHLCV for {symbol} on {self.exchange_id}: {e}"); return None
 
     def fetch_ticker(self, symbol):
         try: return self.exchange.fetch_ticker(symbol)
         except Exception as e:
-            logging.error(f"Error fetching ticker for {symbol}: {e}")
+            logging.error(f"Error fetching ticker for {symbol} on {self.exchange_id}: {e}")
             # Fallback to fetch_ohlcv for latest price if real fetch_ticker fails
             ohlcv = self.fetch_ohlcv(symbol, '1m', limit=1)
             if ohlcv: return {'last': ohlcv[0][4]}
@@ -158,22 +167,22 @@ class BinanceExchange(ExchangeInterface):
     def fetch_balances(self):
         try:
             return self.exchange.fetch_balance()
-        except Exception as e: logging.error(f"Error fetching balances: {e}"); return None
+        except Exception as e: logging.error(f"Error fetching balances on {self.exchange_id}: {e}"); return None
 
     def fetch_trades(self, symbol, limit=100):
         try: return self.exchange.fetch_trades(symbol, limit=limit)
-        except Exception as e: logging.error(f"Error fetching trades for {symbol}: {e}"); return []
+        except Exception as e: logging.error(f"Error fetching trades for {symbol} on {self.exchange_id}: {e}"); return []
 
     def fetch_my_trades(self, symbol, limit=10):
         try: return self.exchange.fetch_my_trades(symbol, limit=limit)
-        except Exception as e: logging.error(f"Error fetching trades for {symbol}: {e}"); return []
+        except Exception as e: logging.error(f"Error fetching my trades for {symbol} on {self.exchange_id}: {e}"); return []
 
     def fetch_trading_fee(self, symbol):
         try:
             fees = self.exchange.fetch_trading_fee(symbol)
             return fees.get('taker', 0.001)
         except Exception as e:
-            logging.warning(f"Error fetching trading fee for {symbol}: {e}. Falling back to 0.1%")
+            logging.warning(f"Error fetching trading fee for {symbol} on {self.exchange_id}: {e}. Falling back to 0.1%")
             return 0.001
 
     def create_order(self, symbol, side, amount, price=None):
@@ -189,7 +198,7 @@ class BinanceExchange(ExchangeInterface):
                     if free_balance > 0 and (amount - free_balance) / amount < 0.01:
                         amount = float(self.exchange.amount_to_precision(symbol, free_balance))
                     else:
-                        logging.warning(f"Aborting sell of {symbol}: Insufficient {base} balance ({free_balance} < {amount})")
+                        logging.warning(f"Aborting sell of {symbol} on {self.exchange_id}: Insufficient {base} balance ({free_balance} < {amount})")
                         return None
             if side == 'buy': order = self.exchange.create_market_buy_order(symbol, amount)
             else: order = self.exchange.create_market_sell_order(symbol, amount)
@@ -219,7 +228,7 @@ class BinanceExchange(ExchangeInterface):
             err_msg = str(e)
             if 'minimum amount precision' in err_msg or 'dust' in err_msg.lower():
                 return {'error': 'dust_limit', 'message': err_msg}
-            logging.error(f"Error during {side} order on {symbol}: {e}"); return None
+            logging.error(f"Error during {side} order on {symbol} via {self.exchange_id}: {e}"); return None
 
 class MockExchange(ExchangeInterface):
     """
@@ -234,26 +243,22 @@ class MockExchange(ExchangeInterface):
         API key for real balance discovery.
     api_secret : str, optional
         API secret for real balance discovery.
-    exchange_type : str, optional
-        The type of exchange to simulate ('binance', 'kraken', 'bitvavo').
+    exchange_id : str, optional
+        The type of exchange to simulate ('binance', 'kraken', etc.).
     """
-    def __init__(self, api_key=None, api_secret=None, exchange_type='binance'):
+    def __init__(self, api_key=None, api_secret=None, exchange_id='binance'):
         self.balance = {'EUR': 1000.0, 'USDC': 1000.0, 'USDT': 1000.0}
         self.ohlcv_data = {}
         self.real_exchange = None
         self.fee_rate = 0.001
         self.markets = {}
+        self.exchange_id = exchange_id
         self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                if exchange_type == 'binance':
-                    self.real_exchange = BinanceExchange(api_key, api_secret)
-                elif exchange_type == 'kraken':
-                    self.real_exchange = KrakenExchange(api_key, api_secret)
-                elif exchange_type == 'bitvavo':
-                    self.real_exchange = BitvavoExchange(api_key, api_secret)
-                logging.info("Mock initialized with real API balance discovery (deferred)")
-            except Exception as e: logging.error(f"Failed to initialize real exchange for Mock: {e}")
+                self.real_exchange = CCXTExchange(exchange_id, api_key, api_secret)
+                logging.info(f"Mock initialized with real {exchange_id} API balance discovery (deferred)")
+            except Exception as e: logging.error(f"Failed to initialize real exchange {exchange_id} for Mock: {e}")
 
     def _init_balance(self):
         if self._balance_initialized: return
@@ -274,9 +279,9 @@ class MockExchange(ExchangeInterface):
                         except: pass
                     if not is_dust:
                         self.balance[asset] = amt
-                logging.info("Mock virtual balance initialized from real wallet (dust ignored).")
+                logging.info(f"Mock virtual balance initialized from real {self.exchange_id} wallet (dust ignored).")
             except Exception as e:
-                logging.error(f"Failed to sync virtual balance from real API: {e}")
+                logging.error(f"Failed to sync virtual balance from real {self.exchange_id} API: {e}")
         self._balance_initialized = True
 
     def load_markets(self):
@@ -299,7 +304,8 @@ class MockExchange(ExchangeInterface):
              except Exception: pass
         if symbol not in self.ohlcv_data:
             try:
-                public_ex = ccxt.binance({'session': create_ccxt_session()})
+                exchange_class = getattr(ccxt, self.exchange_id)
+                public_ex = exchange_class({'session': create_ccxt_session()})
                 return public_ex.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             except Exception: return []
         return self.ohlcv_data.get(symbol, [])[:limit]
@@ -308,7 +314,8 @@ class MockExchange(ExchangeInterface):
         if self.real_exchange:
              return self.real_exchange.fetch_ticker(symbol)
         try:
-            public_ex = ccxt.binance({'session': create_ccxt_session()})
+            exchange_class = getattr(ccxt, self.exchange_id)
+            public_ex = exchange_class({'session': create_ccxt_session()})
             return public_ex.fetch_ticker(symbol)
         except Exception:
             data = self.ohlcv_data.get(symbol, [])
@@ -323,7 +330,8 @@ class MockExchange(ExchangeInterface):
         if self.real_exchange:
             return self.real_exchange.fetch_trades(symbol, limit=limit)
         try:
-            public_ex = ccxt.binance({'session': create_ccxt_session()})
+            exchange_class = getattr(ccxt, self.exchange_id)
+            public_ex = exchange_class({'session': create_ccxt_session()})
             return public_ex.fetch_trades(symbol, limit=limit)
         except Exception: return []
 
@@ -362,25 +370,3 @@ class MockExchange(ExchangeInterface):
                 self.balance[quote] = free_quote + cost - fee
                 return {'id': 'mock_sell_' + str(time.time()), 'status': 'closed', 'price': price, 'amount': amount, 'calculated_fee': fee}
         return None
-
-class KrakenExchange(BinanceExchange):
-    """
-    Exchange handler for Kraken. Inherits from BinanceExchange for shared logic.
-    """
-    def __init__(self, api_key, api_secret):
-        config = {
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'session': create_ccxt_session()
-        }
-        self.exchange = ThrottledExchange(ccxt.kraken(config))
-
-class BitvavoExchange(BinanceExchange):
-    """
-    Exchange handler for Bitvavo. Inherits from BinanceExchange for shared logic.
-    """
-    def __init__(self, api_key, api_secret):
-        config = {
-            'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'session': create_ccxt_session()
-        }
-        self.exchange = ThrottledExchange(ccxt.bitvavo(config))
