@@ -1,5 +1,5 @@
 {
-    "max_open_positions": 18,
+    "max_open_positions": 24,
     "base_trade_amount": 9.0,
     "global_risk_multiplier": 1.1,
     "win_streak_bonus": {
