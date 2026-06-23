@@ -1,6 +1,6 @@
-# 🛸 Cryptocurrencies Trading Bot
+# 🛸 CCXT Pro Trading Bot
 
-A trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **Binance**, **Kraken**, and **Bitvavo** (MICA-compliant European exchanges) via the CCXT library. Other markets could be added easily.
+A universal cryptocurrency trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **any exchange** provided by the CCXT library (Binance, Kraken, OKX, Coinbase, etc.) across every continent.
 
 ---
 
@@ -73,10 +73,10 @@ Store your API credentials and preferred exchange.
 {
   "api_key": "YOUR_KEY",
   "api_secret": "YOUR_SECRET",
-  "exchange": "binance"
+  "exchange_id": "binance"
 }
 ```
-*   **`exchange`**: Options are `binance`, `kraken`, or `bitvavo`.
+*   **`exchange_id`**: The CCXT ID of the exchange (e.g., `binance`, `kraken`, `okx`, `coinbase`, `gateio`).
 
 ### 🛠 `config.json`
 Main bot settings.
@@ -135,8 +135,8 @@ To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` o
 Also, ensure that your computer's clock is synchronized.
 
 ### Execution Modes
-- **Simulation**: `python bot.py --mode simulation`
-- **Live**: `python bot.py --mode live`
+- **Simulation**: `python bot.py --mode simulation --exchange kraken`
+- **Live**: `python bot.py --mode live --exchange binance`
 - **Benchmark**: `python bot.py --mode benchmark --every-symbol`
 - **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
