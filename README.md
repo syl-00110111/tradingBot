@@ -132,6 +132,7 @@ Main bot settings.
 **Regular maintenance:**
 
 To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to trigger the entire dependency upgrade process.
+Also, ensure that your computer's clock is synchronized.
 
 ### Execution Modes
 - **Simulation**: `python bot.py --mode simulation`
