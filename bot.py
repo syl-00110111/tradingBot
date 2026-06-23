@@ -14,6 +14,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+"""
+Main entry point and dashboard logic for the Binance Trading Bot.
+
+This module coordinates the dashboard UI, user input, background OHLCV fetching,
+and the core trading loop across multiple pairs and strategies.
+"""
+
 import json
 import time
 import logging
@@ -80,12 +87,35 @@ bot_state = {}
 bot_lock = threading.Lock()
 
 def format_price(price):
+    """
+    Formats a numeric price into a string with 7 decimal places.
+
+    Parameters
+    ----------
+    price : float or int or None
+        The price value to format.
+
+    Returns
+    -------
+    str
+        The formatted price string, or "-" if price is None.
+    """
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
     if price == 0: return "0.0000000"
     return f"{price:.7f}"
 
 class DashboardHandler(logging.Handler):
+    """
+    Custom logging handler for the bot dashboard.
+
+    Manages log entry expiration and deduplication of specific trading-related messages.
+
+    Parameters
+    ----------
+    duration : int, optional
+        Duration in seconds for which a log entry is considered "fresh" (highlighted).
+    """
     def __init__(self, duration=5):
         super().__init__()
         self.duration = duration
@@ -142,6 +172,24 @@ for handler in root_logger.handlers[:]:
 root_logger.addHandler(db_handler)
 
 def load_config_from_path(path):
+    """
+    Loads configuration from a specific JSON file path.
+
+    Parameters
+    ----------
+    path : str
+        The file path to the JSON configuration.
+
+    Returns
+    -------
+    dict
+        The parsed configuration dictionary.
+
+    Raises
+    ------
+    SystemExit
+        If the file is not found or parsing fails.
+    """
     if not os.path.exists(path):
         console.print(f"[bold red]Error: Configuration file '{path}' not found.[/]")
         sys.exit(1)
@@ -153,6 +201,21 @@ def load_config_from_path(path):
         sys.exit(1)
 
 def load_config():
+    """
+    Locates and loads the bot configuration file.
+
+    Checks for 'config.json' and 'config.default.json' in the current directory.
+
+    Returns
+    -------
+    dict
+        The parsed configuration dictionary.
+
+    Raises
+    ------
+    SystemExit
+        If no configuration file is found.
+    """
     path = None
     for p in ['config.json', 'config.default.json']:
         if os.path.exists(p):
@@ -167,7 +230,28 @@ def load_config():
 
 def get_optimal_timeframe(exchange, symbol, config):
     """
-    Dynamically determines the optimal timeframe for a pair based on volume, spread, volatility, and trades/min.
+    Dynamically determines the optimal timeframe for a pair.
+
+    The decision is based on 48h volume, spread, volatility, and trades per minute,
+    comparing them against thresholds defined in the configuration.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance to fetch market data from.
+    symbol : str
+        The trading pair symbol.
+    config : dict
+        The bot configuration containing timeframe thresholds.
+
+    Returns
+    -------
+    tf : str
+        The suggested timeframe (e.g., '1m', '5m', '30m').
+    score : int
+        The calculated score based on market conditions.
+    reasons : list of str
+        List of reasons contributing to the chosen timeframe.
     """
     thresholds = config.get('timeframe_thresholds', {})
 
@@ -237,6 +321,21 @@ def get_optimal_timeframe(exchange, symbol, config):
         return '1m', 0, [f"Error: {err_msg}"]
 
 def render_ascii_chart(symbol, config):
+    """
+    Renders an ASCII candlestick chart for a specific symbol using plotext.
+
+    Parameters
+    ----------
+    symbol : str
+        The trading pair symbol to chart.
+    config : dict
+        The bot configuration to retrieve timeframe information.
+
+    Returns
+    -------
+    rich.text.Text
+        A Rich Text object containing the rendered ASCII chart.
+    """
     global chart_cache
     timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
     cache_key = f"{symbol}_{timeframe}"
@@ -291,6 +390,25 @@ def render_ascii_chart(symbol, config):
     return content
 
 def make_dashboard(global_mode, config):
+    """
+    Constructs the bot's Rich dashboard layout.
+
+    The dashboard includes a header, log panel, pairs status panel, and a status bar.
+    It handles marquee effects for scrolling text and toggles between standard
+    and expert modes.
+
+    Parameters
+    ----------
+    global_mode : str
+        The current bot mode ('live', 'simulation', etc.).
+    config : dict
+        The bot configuration.
+
+    Returns
+    -------
+    rich.layout.Layout
+        The complete Rich layout for the dashboard.
+    """
     now = datetime.now()
     now_ts = time.time()
     global status_scroll_index, pairs_scroll_offset, logs_scroll_offset
@@ -508,6 +626,12 @@ def make_dashboard(global_mode, config):
     return layout
 
 def input_thread_func():
+    """
+    Background thread to handle user keyboard input.
+
+    Listens for keys to switch panels, scroll through logs or pairs,
+    toggle chart view, and toggle expert/marquee modes.
+    """
     global pairs_scroll_offset, selected_pair_index, show_chart, chart_symbol, logs_scroll_offset, focused_panel
     global pairs_pause_until, logs_pause_until, expert_mode, show_help, marquee_enabled
     while not shutdown_event.is_set():
@@ -566,7 +690,23 @@ def input_thread_func():
         except Exception: pass
 
 def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
-    """Background thread to watch OHLCV and update cache."""
+    """
+    Background thread to watch OHLCV updates and update the local cache.
+
+    Initializes the cache with historical data and then listens for real-time
+    candle updates from the exchange.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance to watch.
+    symbol : str
+        The trading pair symbol.
+    timeframe : str
+        The timeframe to watch (e.g., '1m').
+    config : dict
+        The bot configuration.
+    """
     # logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
     try:
         # Pre-fill cache with historical data for indicator stability
@@ -608,6 +748,27 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
         logging.error(f"Error in OHLCV watcher for {symbol}: {e}")
 
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
+    """
+    Main background thread for the trading loop.
+
+    Starts OHLCV watchers, periodically analyzes all pairs, handles
+    re-benchmarking triggers, and executes buy/sell orders based on signals.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance for data and orders.
+    data_manager : DataManager
+        Manager for trade persistence.
+    pattern_manager : PatternManager
+        Manager for historical success patterns.
+    engine : TradingEngine
+        Engine for risk and position sizing.
+    config : dict
+        The bot configuration.
+    mode : str
+        Bot operation mode ('live', 'simulation', etc.).
+    """
     # Start watchers for all pairs
     for symbol in config.get('pairs', {}):
         timeframe = config['pairs'][symbol].get('timeframe', '1m')
@@ -801,6 +962,12 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
 
 def main():
+    """
+    Entry point for the Binance Trading Bot.
+
+    Parses command-line arguments, detects hardware acceleration (GPU/SIMD),
+    initializes the exchange, and starts the dashboard and trading threads.
+    """
     parser = argparse.ArgumentParser(description='Binance Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', choices=['binance', 'kraken', 'bitvavo'], default='binance', help='Exchange to use')
@@ -1035,6 +1202,16 @@ def main():
     logging.info("Bot stopped gracefully.")
 
 def play_sound(action, config=None):
+    """
+    Plays a system sound based on the bot's action.
+
+    Parameters
+    ----------
+    action : str
+        The action that triggered the sound ('startup', 'buy', 'sell').
+    config : dict, optional
+        Bot configuration, used for randomized startup sounds.
+    """
     system = platform.system().lower()
     try:
         if system == "windows":
@@ -1059,6 +1236,41 @@ def play_sound(action, config=None):
     except Exception: pass
 
 def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, global_config, engine=None):
+    """
+    Analyzes a trading pair to determine buy/sell signals based on technical indicators and patterns.
+
+    This function fetches OHLCV data, calculates technical indicators, performs pattern matching
+    against historical success patterns, and evaluates signals using a dynamic risk engine.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance to fetch data from if not in cache.
+    data_manager : DataManager
+        Manager for persistent trade data and position tracking.
+    pattern_manager : PatternManager
+        Manager for historical success patterns used in similarity matching.
+    symbol : str
+        The trading pair symbol (e.g., 'BTC/USDT').
+    pair_config : dict
+        Configuration specific to the trading pair (e.g., timeframe, strategy).
+    global_config : dict
+        Global bot configuration settings.
+    engine : TradingEngine, optional
+        The trading engine for dynamic risk and setting adjustments.
+
+    Returns
+    -------
+    dict or None
+        A dictionary containing signal data, price, indicators, and state transitions
+        (e.g., 'buy', 'sell', 'sell_triggered'). Returns None if data is unavailable.
+
+    Notes
+    -----
+    The function maintains state transitions for consecutive signals to avoid false positives
+    and applies volatility-based confirmation windows. It also handles re-initialization
+    of signal counts on first run by looking at historical data.
+    """
     # Retrieve patterns for matching
     patterns = pattern_manager.get_patterns(symbol)
 
@@ -1213,6 +1425,44 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     }
 
 def execute_buy(exchange, data_manager, engine, symbol, data, global_config, balance=None):
+    """
+    Executes a buy order for a specific trading pair.
+
+    Calculates the position size based on balance and win streak, checks for sufficient
+    funds, and places a market buy order.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance where the order will be placed.
+    data_manager : DataManager
+        Manager to record the new position if the order is successful.
+    engine : TradingEngine
+        Engine used to calculate the optimal position size.
+    symbol : str
+        The trading pair symbol to buy.
+    data : dict
+        Current market and signal data for the pair, including the current price.
+    global_config : dict
+        Global configuration for pair-specific settings like timeframe.
+    balance : dict, optional
+        Current wallet balance. If None, it will be fetched from the exchange.
+
+    Returns
+    -------
+    bool
+        True if the buy order was successfully executed and recorded, False otherwise.
+
+    Raises
+    ------
+    Exception
+        Any exception during order creation is logged, and the pair is added to `suspended_pairs`.
+
+    Notes
+    -----
+    If the order fails due to insufficient balance or exchange filters, the symbol
+    is added to `suspended_pairs` to prevent further attempts.
+    """
     if balance is None:
         balance = exchange.fetch_balances()
     win_streak = data_manager.get_win_streak(symbol)
@@ -1269,6 +1519,36 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
     return False
 
 def execute_sell(exchange, data_manager, engine, symbol, data):
+    """
+    Executes a sell order to close an existing position.
+
+    Determines if the position should be closed based on signals, checks for sufficient
+    asset balance (in live mode), and places a market sell order.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance where the order will be placed.
+    data_manager : DataManager
+        Manager to record the closing of the position.
+    engine : TradingEngine
+        Engine used for profit/loss calculations.
+    symbol : str
+        The trading pair symbol to sell.
+    data : dict
+        Current market data and the position details to be closed.
+
+    Returns
+    -------
+    bool
+        True if the sell order was successfully executed and recorded, False otherwise.
+
+    Notes
+    -----
+    In simulation mode, the balance check is bypassed. If the sell fails because
+    the amount is below the dust limit, the position is flagged to ignore future
+    sell signals until manually addressed.
+    """
     position = data['position']
     should_execute = True
 
@@ -1300,6 +1580,27 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
     return False
 
 def initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state):
+    """
+    Initializes simulation mode by discovering potential entry positions.
+
+    Syncs live positions first, then scans all configured pairs for buy signals
+    to populate the initial simulation state.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance.
+    data_manager : DataManager
+        Manager for trade history.
+    pattern_manager : PatternManager
+        Manager for historical success patterns.
+    engine : TradingEngine
+        Engine for risk and position sizing.
+    config : dict
+        Bot configuration.
+    bot_state : dict
+        Shared state for the UI dashboard.
+    """
     logging.info("Initializing Simulation positions (Discovery phase)...")
     sync_live_positions(exchange, data_manager, config)
     # Then proceed with virtual buy signals...
@@ -1337,6 +1638,21 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     logging.info(f"Initialization of the simulation positions completed.")
 
 def sync_live_positions(exchange, data_manager, config):
+    """
+    Synchronizes local position tracking with real wallet balances from the exchange.
+
+    Identifies sellable assets (non-dust) and adds them to the `DataManager`
+    as open positions.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance to fetch balances from.
+    data_manager : DataManager
+        Manager to update with discovered positions.
+    config : dict
+        Bot configuration for identifying base currencies and pairs.
+    """
     logging.info("Syncing positions from Binance API")
     balance = exchange.fetch_balances()
     if balance is None:
@@ -1402,6 +1718,16 @@ def sync_live_positions(exchange, data_manager, config):
 
 
 def show_balances(exchange):
+    """
+    Fetches and displays the real wallet balance in a formatted table.
+
+    Includes asset amounts and their estimated value in EUR.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance to fetch balances from.
+    """
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
     balance = exchange.fetch_balances()
 
@@ -1465,7 +1791,24 @@ def show_balances(exchange):
     console.print(f"\n[bold yellow]Estimated Total Wallet Value: {total_eur_value:.2f} EUR[/]\n")
 
 def plot_backtest(df, symbol, strategy_name, aggr_name, results):
-    """Generates a matplotlib plot for backtesting results."""
+    """
+    Generates and saves a matplotlib plot for backtesting results.
+
+    The plot shows price action, buy/sell signals, and key performance statistics.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Dataframe containing OHLCV and signal data.
+    symbol : str
+        The trading pair symbol.
+    strategy_name : str
+        Name of the strategy tested.
+    aggr_name : str
+        Name of the aggressivity mode tested.
+    results : dict
+        Backtest results including profit, win rate, and drawdown.
+    """
     plt.figure(figsize=(12, 7))
     plt.plot(df['timestamp'], df['close'], label='Price', color='blue', alpha=0.6)
 
@@ -1496,7 +1839,47 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     plt.close()
 
 def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe='1m', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False, eval_candles=None):
-    """Core backtesting simulation logic."""
+    """
+    Core logic for simulating a trading strategy over historical data.
+
+    Calculates signals, simulates trades including fees, and computes performance
+    metrics like total profit, win rate, and drawdown. Optionally applies
+    Monte Carlo validation.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange to fetch data from if `df_in` is None.
+    symbol : str
+        The trading pair symbol.
+    strategy : str
+        Strategy name to test.
+    aggr_name : str
+        Agressivity mode name.
+    config : dict
+        Bot configuration.
+    timeframe : str, optional
+        Timeframe for OHLCV data.
+    df_in : pandas.DataFrame, optional
+        Pre-loaded data. If None, data is fetched.
+    limit : int, optional
+        Number of candles to fetch if `df_in` is None.
+    engine : TradingEngine, optional
+        Engine for dynamic settings.
+    device : torch.device, optional
+        Computation device (CPU/GPU).
+    skip_mc : bool, optional
+        Whether to skip Monte Carlo validation.
+    return_full_df : bool, optional
+        Whether to return the equity curve in the results.
+    eval_candles : int, optional
+        Number of candles to use for the evaluation window.
+
+    Returns
+    -------
+    dict or None
+        Summary of backtest results, or None if calculation fails.
+    """
     from indicators import get_signals
 
     fee_rate = 0.001 # Default 0.1%
@@ -1671,6 +2054,22 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     }
 
 def run_backtest_mode(exchange, config, args, engine=None, device=None):
+    """
+    Executes the bot in backtest mode based on command-line arguments.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance.
+    config : dict
+        Bot configuration.
+    args : argparse.Namespace
+        Parsed command-line arguments.
+    engine : TradingEngine, optional
+        The trading engine.
+    device : torch.device, optional
+        Computation device.
+    """
     # Default strategy for backtest
     default_strategy = "double_ema_macd_rsi"
 
@@ -1705,9 +2104,39 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
 
 def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
     """
-    Scans historical data for success patterns using expanding time slices (tenths).
-    Doubles the lookback window if no patterns are found.
-    Accepts patterns that show a SELL followed by BUY sequence even if profit is low.
+    Scans historical data for success patterns using expanding time slices.
+
+    Iterates through multiple strategies and aggressivity levels over expanding
+    lookback windows to find profitable patterns or specific signal sequences
+    (e.g., SELL followed by BUY).
+
+    Parameters
+    ----------
+    symbol : str
+        The trading pair symbol.
+    config : dict
+        Bot configuration.
+    timeframe : str
+        Timeframe for analysis.
+    aggrs : list of str
+        Agressivity levels to test.
+    strategies : list of str
+        Strategies to test.
+    df_in : pandas.DataFrame
+        Historical OHLCV data.
+    engine : TradingEngine, optional
+        The trading engine.
+    device : torch.device, optional
+        Computation device.
+    exclude_technique : tuple, optional
+        A (strategy, aggr) pair to exclude from discovery (e.g., for rotation).
+
+    Returns
+    -------
+    symbol : str
+        The symbol analyzed.
+    unique_patterns : list of dict
+        List of profitable patterns found, validated via Monte Carlo.
     """
     if df_in is None or len(df_in) < 120: return symbol, []
 
@@ -1842,6 +2271,36 @@ def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     return symbol, []
 
 def run_discovery_mode(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
+    """
+    Orchestrates the strategy discovery/optimization process for multiple symbols.
+
+    Checks for cached results first, then parallelizes the analysis of historical
+    data across all configured pairs to find optimal strategies.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance.
+    config : dict
+        Bot configuration.
+    args : argparse.Namespace
+        Parsed command-line arguments.
+    status : rich.status.Status, optional
+        Rich status object for UI updates.
+    data_manager : DataManager, optional
+        Manager for persistent trade data.
+    pattern_manager : PatternManager, optional
+        Manager for historical success patterns.
+    engine : TradingEngine, optional
+        The trading engine.
+    device : torch.device, optional
+        Computation device.
+
+    Returns
+    -------
+    dict
+        A map of symbol to the best discovered pattern/strategy.
+    """
 
     # Respect global overrides if they exist
     global_aggr = config.get('force_agressivity_to_all_pairs')

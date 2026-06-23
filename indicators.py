@@ -14,6 +14,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+"""
+Technical analysis indicators and trading strategies for the bot.
+
+This module provides both standard technical indicators (accelerated via PyTorch)
+and a diverse catalog of trading strategies, including scientific proxies
+and Monte Carlo-based approaches.
+"""
+
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -22,6 +30,21 @@ from monte_carlo import MonteCarloEngine
 
 @torch.jit.script
 def torch_ema_kernel(series: torch.Tensor, alpha: float):
+    """
+    Core JIT-compiled kernel for Exponential Moving Average (EMA).
+
+    Parameters
+    ----------
+    series : torch.Tensor
+        The input price series tensor.
+    alpha : float
+        The smoothing factor (0 < alpha <= 1).
+
+    Returns
+    -------
+    torch.Tensor
+        The calculated EMA series tensor.
+    """
     n = series.size(0)
     ema = torch.empty_like(series)
     if n == 0: return ema
@@ -32,12 +55,42 @@ def torch_ema_kernel(series: torch.Tensor, alpha: float):
     return ema
 
 def torch_ema(series, length):
-    """High-performance EMA implementation in PyTorch using JIT compilation."""
+    """
+    High-performance EMA implementation in PyTorch using JIT compilation.
+
+    Parameters
+    ----------
+    series : torch.Tensor
+        The input price series tensor.
+    length : int
+        The period length for the EMA.
+
+    Returns
+    -------
+    torch.Tensor
+        The calculated EMA series tensor.
+    """
     alpha = 2.0 / (length + 1)
     return torch_ema_kernel(series, float(alpha))
 
 def torch_rsi(series, length):
-    """Vectorized RSI implementation in PyTorch."""
+    """
+    Vectorized Relative Strength Index (RSI) implementation in PyTorch.
+
+    Calculates RSI using the Wilder's smoothing method.
+
+    Parameters
+    ----------
+    series : torch.Tensor
+        The input price series tensor.
+    length : int
+        The period length for the RSI.
+
+    Returns
+    -------
+    torch.Tensor
+        The calculated RSI series tensor.
+    """
     if series.size(0) <= length:
         return torch.full_like(series, 50.0)
     delta = series[1:] - series[:-1]
@@ -53,6 +106,29 @@ def torch_rsi(series, length):
     return rsi
 
 def torch_macd(series, fast=12, slow=26, signal=9):
+    """
+    Vectorized MACD implementation in PyTorch.
+
+    Parameters
+    ----------
+    series : torch.Tensor
+        The input price series tensor.
+    fast : int, optional
+        The fast EMA period (default is 12).
+    slow : int, optional
+        The slow EMA period (default is 26).
+    signal : int, optional
+        The signal line EMA period (default is 9).
+
+    Returns
+    -------
+    macd : torch.Tensor
+        The MACD line.
+    signal_line : torch.Tensor
+        The MACD signal line.
+    hist : torch.Tensor
+        The MACD histogram (macd - signal_line).
+    """
     ema_f = torch_ema(series, fast)
     ema_s = torch_ema(series, slow)
     macd = ema_f - ema_s
@@ -61,7 +137,25 @@ def torch_macd(series, fast=12, slow=26, signal=9):
     return macd, signal_line, hist
 
 def torch_adx(high, low, close, length=14):
-    """High-performance ADX implementation in PyTorch."""
+    """
+    High-performance Average Directional Index (ADX) implementation in PyTorch.
+
+    Parameters
+    ----------
+    high : torch.Tensor
+        High prices tensor.
+    low : torch.Tensor
+        Low prices tensor.
+    close : torch.Tensor
+        Close prices tensor.
+    length : int, optional
+        The period length for ADX (default is 14).
+
+    Returns
+    -------
+    torch.Tensor
+        The calculated ADX series tensor.
+    """
     if close.size(0) <= length:
         return torch.zeros_like(close)
     up = high[1:] - high[:-1]
@@ -100,7 +194,23 @@ _mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
 def get_signals(df, mode_config, is_backtest=False):
     """
     Dispatcher for multiple trading strategies.
-    Selected strategy is defined in mode_config['strategy'].
+
+    Calculates common indicators (EMA, MACD, RSI, ADX) and then executes
+    the specific strategy defined in `mode_config['strategy']`.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    mode_config : dict
+        Configuration for the strategy (strategy name, indicators parameters, device).
+    is_backtest : bool, optional
+        Whether the call is for a backtest (affects some MC strategies).
+
+    Returns
+    -------
+    pandas.DataFrame
+        The input dataframe updated with signals and indicators.
     """
     strategy = mode_config.get('strategy', 'double_ema_macd_rsi')
     device = mode_config.get('device', torch.device('cpu'))
@@ -244,22 +354,66 @@ def get_signals(df, mode_config, is_backtest=False):
     return df
 
 def apply_confirmation(df, window):
-    """Applies rolling max to signals within a confirmation window."""
+    """
+    Applies a rolling confirmation window to buy and sell candidates.
+
+    A signal is confirmed if it persists or appears within the specified
+    rolling window.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Dataframe containing 'buy_candidate' and 'sell_candidate' columns.
+    window : int
+        The size of the rolling window.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Dataframe with 'buy_signal' and 'sell_signal' boolean columns.
+    """
     df['buy_signal'] = df['buy_candidate'].rolling(window=window).max() > 0
     df['sell_signal'] = df['sell_candidate'].rolling(window=window).max() > 0
     return df
 
 def normalize_series(series):
-    """Min-max normalization to [0, 1]."""
+    """
+    Min-max normalization of a series to the [0, 1] range.
+
+    Parameters
+    ----------
+    series : pandas.Series
+        The series to normalize.
+
+    Returns
+    -------
+    pandas.Series
+        The normalized series.
+    """
     if series.empty or series.max() == series.min():
         return series * 0
     return (series - series.min()) / (series.max() - series.min())
 
 def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     """
-    Calculates similarity between current buffer and a success pattern.
-    Combines shape correlation (price) and technical state distance.
-    Uses GPU acceleration via PyTorch if available.
+    Calculates similarity between current price buffer and a success pattern.
+
+    Combines shape correlation (Pearson correlation of prices) and
+    technical state distance (Euclidean distance of RSI and ADX).
+
+    Parameters
+    ----------
+    buffer_df : pandas.DataFrame
+        The current market data buffer.
+    pattern : dict
+        The success pattern to compare against, containing 'prices' and 'tech_state'.
+    device : torch.device, optional
+        The device to use for computation (CPU or GPU).
+
+    Returns
+    -------
+    float
+        A combined similarity score between 0 and 1.
     """
     if len(buffer_df) != len(pattern['prices']):
         return 0.0
@@ -309,7 +463,26 @@ def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     return combined
 
 def handle_mc_strategies(df, strategy, config, is_backtest):
-    """Helper to run MC strategies only on necessary rows."""
+    """
+    Helper function to execute Monte Carlo-based trading strategies.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    strategy : str
+        The specific MC strategy name (e.g., 'mc_mean_reversion').
+    config : dict
+        Strategy configuration.
+    is_backtest : bool
+        Whether the call is for a backtest (processes all rows if True,
+        only the last row if False).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['buy_candidate'] = False
     df['sell_candidate'] = False
 
@@ -386,6 +559,24 @@ def handle_mc_strategies(df, strategy, config, is_backtest):
 # --- 1. TREND FOLLOWING ---
 
 def strategy_moving_averages(df, config):
+    """
+    Moving Averages strategy.
+
+    Uses EMA crossovers of periods 9 and 21, filtered by the 200 EMA trend.
+    Exits when price crosses below the 50 EMA.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['ma_9'] = ta.ema(df['close'], length=9)
     df['ma_21'] = ta.ema(df['close'], length=21)
     df['ma_50'] = ta.ema(df['close'], length=50)
@@ -403,6 +594,24 @@ def strategy_moving_averages(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_ichimoku(df, config):
+    """
+    Ichimoku Cloud strategy.
+
+    Buy signal when Tenkan-sen crosses above Kijun-sen and price is above
+    the Kumo (Cloud). Sell signal when Tenkan-sen crosses below Kijun-sen.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     ichi_result = ta.ichimoku(df['high'], df['low'], df['close'])
     if ichi_result is not None and len(ichi_result) > 0:
         ichimoku = ichi_result[0]
@@ -419,6 +628,24 @@ def strategy_ichimoku(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_psar(df, config):
+    """
+    Parabolic SAR strategy.
+
+    Buy signal when the Parabolic SAR flips from above to below the price.
+    Sell signal when it flips from below to above the price.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     psar = ta.psar(df['high'], df['low'], df['close'])
     if psar is not None and not psar.empty:
         l_col = [c for c in psar.columns if 'PSARl' in c]
@@ -436,6 +663,24 @@ def strategy_psar(df, config):
 # --- 2. RANGE ---
 
 def strategy_rsi_sr(df, config):
+    """
+    RSI Support and Resistance strategy.
+
+    Buy signal when RSI is oversold (< 30) and price is near a 50-period support.
+    Sell signal when RSI is overbought (> 70) and price is near a 50-period resistance.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['rsi'] = ta.rsi(df['close'], length=14)
     df['support'] = df['low'].rolling(window=50).min()
     df['resistance'] = df['high'].rolling(window=50).max()
@@ -451,6 +696,24 @@ def strategy_rsi_sr(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_bollinger(df, config):
+    """
+    Bollinger Bands strategy.
+
+    Buy signal when price touches or exceeds the lower band and RSI is oversold.
+    Sell signal when price touches the middle band (SMA).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     bb = ta.bbands(df['close'], length=20, std=2)
     if bb is not None and not bb.empty:
         df['bb_low'] = bb.iloc[:, 0].fillna(df['close'])
@@ -468,6 +731,24 @@ def strategy_bollinger(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_macd_range(df, config):
+    """
+    MACD Range strategy.
+
+    Buy signal when in a range-bound market (calculated by `get_signals`) and
+    a bullish MACD crossover occurs.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     if macd is not None:
         df['macd_val'] = macd.iloc[:, 0]
@@ -483,6 +764,24 @@ def strategy_macd_range(df, config):
 # --- 3. BREAKOUT ---
 
 def strategy_breakout_volume(df, config):
+    """
+    Breakout Volume strategy.
+
+    Buy signal when price breaks a 20-period resistance with high volume
+    (2x average). Exit when price crosses below the 20-period SMA.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['resistance'] = df['high'].rolling(window=20).max().shift(1)
     df['vol_ma'] = ta.sma(df['volume'], length=20)
 
@@ -493,6 +792,24 @@ def strategy_breakout_volume(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_donchian(df, config):
+    """
+    Donchian Channels strategy.
+
+    Buy signal when price touches the upper Donchian channel.
+    Sell signal when price touches the lower Donchian channel.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     dc = ta.donchian(df['high'], df['low'], length=20)
     if dc is not None:
         df['dc_upper'] = dc.iloc[:, 0]
@@ -507,6 +824,24 @@ def strategy_donchian(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_atr_breakout(df, config):
+    """
+    ATR Breakout strategy.
+
+    Buy signal when price breaks a 30-period resistance and ATR is increasing.
+    Sell signal based on a trailing stop of 2x ATR.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     df['resistance'] = df['high'].rolling(window=30).max().shift(1)
 
@@ -518,6 +853,24 @@ def strategy_atr_breakout(df, config):
 # --- 4. MOMENTUM ---
 
 def strategy_stoch_rsi(df, config):
+    """
+    Stochastic RSI strategy.
+
+    Buy signal when Stochastic RSI %K is oversold (< 20) and rising.
+    Sell signal when %K is overbought (> 80) and falling.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
     if stoch is not None:
         df['stoch_k'] = stoch.iloc[:, 0]
@@ -530,6 +883,24 @@ def strategy_stoch_rsi(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_williams_r(df, config):
+    """
+    Williams %R strategy.
+
+    Buy signal when Williams %R is oversold (< -80) and rising.
+    Sell signal when overbought (> -20) and falling.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['willr'] = ta.willr(df['high'], df['low'], df['close'], length=14)
 
     df['buy_candidate'] = (df['willr'] < -80) & (df['willr'] > df['willr'].shift(1))
@@ -538,6 +909,24 @@ def strategy_williams_r(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_vwap_momentum(df, config):
+    """
+    VWAP Momentum strategy.
+
+    Buy signal when price is above VWAP and volume is increasing.
+    Sell signal when price crosses below VWAP.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
 
     df['buy_candidate'] = (df['close'] > df['vwap']) & (df['volume'] > df['volume'].shift(1))
@@ -548,6 +937,24 @@ def strategy_vwap_momentum(df, config):
 # --- 5. SCALPING (Proxies) ---
 
 def strategy_order_flow_proxy(df, config):
+    """
+    Order Flow Proxy strategy.
+
+    Simulates order flow by calculating volume delta (proxied by price action
+    within candles). Buy signal on high relative volume delta.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['vol_delta'] = df['volume'] * (df['close'] - df['open']) / (df['high'] - df['low'] + 0.000001)
     df['vol_delta_ma'] = df['vol_delta'].rolling(window=10).mean()
 
@@ -557,6 +964,23 @@ def strategy_order_flow_proxy(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 2))
 
 def strategy_renko_proxy(df, config):
+    """
+    Renko Proxy strategy.
+
+    Simulates Renko charts by detecting candles with bodies larger than ATR.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['body'] = (df['close'] - df['open']).abs()
     df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
@@ -566,6 +990,23 @@ def strategy_renko_proxy(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 2))
 
 def strategy_tick_proxy(df, config):
+    """
+    Tick Proxy strategy.
+
+    Buy signal based on rapid price velocity spikes.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['velocity'] = (df['close'] - df['close'].shift(5)) / 5
 
     df['buy_candidate'] = (df['velocity'] > df['velocity'].rolling(window=20).std() * 2)
@@ -576,6 +1017,23 @@ def strategy_tick_proxy(df, config):
 # --- 6. HYBRIDS ---
 
 def strategy_ema_rsi_volume(df, config):
+    """
+    EMA, RSI, and Volume Hybrid strategy.
+
+    Buy signal when 9 EMA > 21 EMA, RSI > 50, and volume is above average.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     df['ema_9'] = ta.ema(df['close'], length=9).fillna(df['close'])
     df['ema_21'] = ta.ema(df['close'], length=21).fillna(df['close'])
     df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
@@ -587,6 +1045,23 @@ def strategy_ema_rsi_volume(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_macd_bollinger(df, config):
+    """
+    MACD and Bollinger Hybrid strategy.
+
+    Buy signal on bullish MACD crossover when price is near the lower Bollinger Band.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     if macd is not None:
         df['macd_val'] = macd.iloc[:, 0]
@@ -609,9 +1084,27 @@ def strategy_macd_bollinger(df, config):
 
 def strategy_whale_detection(df, config):
     """
-    Proxy for On-Chain metrics (Bartoletti et al., 2017).
-    Detects unusual volume spikes accompanied by price stability/movement
-    to infer big player activity.
+    Whale Detection strategy (Proxy for On-Chain metrics).
+
+    Detects unusual volume spikes (3 standard deviations above mean) accompanied
+    by price movement to infer large player activity.
+
+    References
+    ----------
+    Bartoletti et al. (2017). "General-purpose smart contracts: architectures,
+    vulnerabilities and future challenges."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['vol_ma'] = ta.sma(df['volume'], length=20)
     df['vol_std'] = df['volume'].rolling(window=20).std()
@@ -627,8 +1120,27 @@ def strategy_whale_detection(df, config):
 
 def strategy_pump_dump(df, config):
     """
-    Proxy for Pump and Dump detection (Kamps et Kleinberg, 2018).
-    Detects extreme price-volume divergence.
+    Pump and Dump Detection strategy.
+
+    Detects extreme price-volume divergence where both price and volume
+    surge suddenly. Sells when price begins to drop after a surge.
+
+    References
+    ----------
+    Kamps, J., & Kleinberg, B. (2018). "To the moon: defining and detecting
+    cryptocurrency pump-and-dumps."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['vol_change'] = df['volume'].pct_change()
     df['price_change'] = df['close'].pct_change()
@@ -644,7 +1156,27 @@ def strategy_pump_dump(df, config):
 
 def strategy_market_regime(df, config):
     """
-    Mean-reversion vs Trend detection based on volatility (Baur et Dimpfl, 2021).
+    Market Regime strategy.
+
+    Switches between Mean-Reversion (Bollinger) and Trend-Following (EMA)
+    based on historical volatility.
+
+    References
+    ----------
+    Baur, D. G., & Dimpfl, T. (2021). "The volatility of Bitcoin and its role
+    as a medium of exchange and a store of value."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=20).std()
@@ -671,8 +1203,28 @@ def strategy_market_regime(df, config):
 
 def strategy_scientific_ensemble(df, config):
     """
-    LSTM/Machine Learning Ensemble Proxy (Makarov et al., 2019; Zhang et al., 2020).
-    Weights MACD, RSI, and Bollinger.
+    Scientific Ensemble strategy (Proxy for ML models).
+
+    Combines signals from MACD, RSI, and Bollinger Bands using a weighted
+    scoring approach.
+
+    References
+    ----------
+    Makarov, I., & Schoar, A. (2019). "Trading and arbitrage in cryptocurrency markets."
+    Zhang, Z., et al. (2020). "DeepLOB: Deep convolutional neural networks for
+    limit order books."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     # Use existing macd/rsi from get_signals
     bb = ta.bbands(df['close'], length=20, std=2)
@@ -695,8 +1247,27 @@ def strategy_scientific_ensemble(df, config):
 
 def strategy_sentiment_momentum(df, config):
     """
-    Social Media Sentiment Proxy (Abraham et al., 2018).
-    Uses price acceleration and RSI divergence as a proxy for "FOMO" or "Fear".
+    Sentiment Momentum strategy (Social Media Sentiment Proxy).
+
+    Uses price acceleration and RSI as a proxy for market FOMO (Fear Of Missing Out)
+    or Panic.
+
+    References
+    ----------
+    Abraham, J., et al. (2018). "Cryptocurrency price prediction using tweet
+    volumes and sentiment analysis."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
     df['roc'] = ta.roc(df['close'], length=10).fillna(0)
@@ -711,9 +1282,26 @@ def strategy_sentiment_momentum(df, config):
 
 def strategy_liquidation_cascade(df, config):
     """
-    Liquidation Cascade Proxy (Makarov et Schoar, 2020).
-    Detects high-volume sharp price drops (long liquidations) as buying opportunities,
-    or sharp rises as selling opportunities.
+    Liquidation Cascade strategy.
+
+    Detects sharp price drops (>2%) on very high volume as long liquidation
+    cascades (buying opportunity) or sharp rises as short liquidations.
+
+    References
+    ----------
+    Makarov, I., & Schoar, A. (2020). "Price discovery in cryptocurrency markets."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['pct_change'] = df['close'].pct_change().fillna(0)
     df['vol_ma'] = ta.sma(df['volume'], length=20).fillna(df['volume'])
@@ -731,8 +1319,26 @@ def strategy_liquidation_cascade(df, config):
 
 def strategy_mvrv_proxy(df, config):
     """
-    MVRV Ratio Proxy (Ciaian et al., 2018).
-    Proxy: Price / 200-day Moving Average (Market Value to 'Realized' Value proxy).
+    MVRV Ratio Proxy strategy.
+
+    Proxies the Market Value to Realized Value ratio using price vs 200-day SMA.
+
+    References
+    ----------
+    Ciaian, P., et al. (2018). "The economics of BitCoin price formation and
+    electrum wallet transactions."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['realized_proxy'] = ta.sma(df['close'], length=200).fillna(df['close'])
     df['mvrv_proxy'] = df['close'] / df['realized_proxy']
@@ -745,8 +1351,26 @@ def strategy_mvrv_proxy(df, config):
 
 def strategy_adx_trend(df, config):
     """
-    ADX Trend Strength (Zhang et al., 2020).
-    Only trade when trend is strong (ADX > 25).
+    ADX Trend Strength strategy.
+
+    Filters signals based on ADX trend strength (> 25).
+
+    References
+    ----------
+    Zhang, Z., et al. (2020). "DeepLOB: Deep convolutional neural networks for
+    limit order books."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     adx = ta.adx(df['high'], df['low'], df['close'])
     if adx is not None:
@@ -763,8 +1387,26 @@ def strategy_adx_trend(df, config):
 
 def strategy_pairs_trading(df, config):
     """
-    Statistical Arbitrage Proxy (Grobys et al., 2020).
-    Proxy: Asset vs moving average of its own price (Self-pairs trading/Mean reversion).
+    Pairs Trading strategy (Statistical Arbitrage Proxy).
+
+    Simulates pairs trading by comparing price to its 50-period SMA using Z-Score.
+
+    References
+    ----------
+    Grobys, K., et al. (2020). "On the predictability of cryptocurrency returns
+    and the role of market timing."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['ma_50'] = ta.sma(df['close'], length=50).fillna(df['close'])
     df['z_score'] = (df['close'] - df['ma_50']) / df['close'].rolling(window=50).std()
@@ -776,8 +1418,26 @@ def strategy_pairs_trading(df, config):
 
 def strategy_halving_cycle(df, config):
     """
-    Bitcoin Halving Cycle Proxy (Bouoiyour & Selmi, 2020).
-    Uses very long term EMA (200) to ensure alignment with major market cycles.
+    Bitcoin Halving Cycle strategy.
+
+    Aligns with major market cycles by only buying when price is above 200 EMA.
+
+    References
+    ----------
+    Bouoiyour, J., & Selmi, R. (2020). "What Bitcoin is? Store of value or a
+    speculative asset? A semi-parametric approach."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['ema_200'] = ta.ema(df['close'], length=200).fillna(df['close'])
     df['ema_50'] = ta.ema(df['close'], length=50).fillna(df['close'])
@@ -790,8 +1450,27 @@ def strategy_halving_cycle(df, config):
 
 def strategy_listing_surge(df, config):
     """
-    Exchange Listing Surge Proxy (Hau et al., 2021).
-    Detects extreme volume increase on relatively "flat" price history.
+    Exchange Listing Surge strategy.
+
+    Detects extreme volume increases on relatively flat price history to
+    front-run listing pumps.
+
+    References
+    ----------
+    Hau, H., et al. (2021). "The market for cryptocurrencies: an analysis of
+    liquidity and listing effects."
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
     """
     df['vol_ma'] = ta.sma(df['volume'], length=50).fillna(df['volume'])
     df['price_std'] = df['close'].rolling(window=50).std().fillna(0)
@@ -807,6 +1486,23 @@ def strategy_listing_surge(df, config):
 # --- LEGACY / ORIGINAL ---
 
 def strategy_double_ema(df, config):
+    """
+    Double EMA Crossover strategy.
+
+    Basic crossover of fast and slow EMAs.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration (ema_fast, ema_slow).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     ema_fast = config.get('ema_fast', 8)
     ema_slow = config.get('ema_slow', 18)
     device = config.get('device', torch.device('cpu'))
@@ -822,6 +1518,25 @@ def strategy_double_ema(df, config):
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_double_ema_macd_rsi(df, config):
+    """
+    Double EMA, MACD, and RSI Hybrid strategy.
+
+    Complex strategy requiring confirmation from EMA crossover, MACD crossover,
+    and RSI trend within a rolling window.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration (ema_fast, ema_slow, macd_fast, macd_slow,
+        macd_signal, rsi_period, rsi_buy, rsi_sell).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
     ema_fast = config.get('ema_fast', 8)
     ema_slow = config.get('ema_slow', 18)
     macd_f = config.get('macd_fast', 12)
