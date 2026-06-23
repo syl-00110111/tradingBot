@@ -1325,6 +1325,10 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
 def sync_live_positions(exchange, data_manager, config):
     logging.info("Syncing positions from Binance API")
     balance = exchange.fetch_balances()
+    if balance is None:
+        logging.error("Failed to sync live positions: balances are unavailable. Check API credentials or if your computer's clock is synchronized.")
+        return
+
     # Robustly handle different balance structures
     if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
         free_balances = balance['free']
@@ -1678,15 +1682,12 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
 def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
     """
     Scans historical data for the top 4 success patterns using expanding time slices (tenths).
-    Enforces a mandatory change in technique if exclude_technique is provided.
+    Doubles the lookback window if no profitable patterns are found.
     """
     if df_in is None or len(df_in) < 120: return symbol, []
 
-    # 120 k-lines lookback (matching hour durations)
-    df_in = df_in.tail(120)
-    patterns = []
-    now_ts = time.time()
     from indicators import get_signals
+    now_ts = time.time()
 
     # Filter out current technique if rotating
     if exclude_technique:
@@ -1694,122 +1695,125 @@ def run_benchmark_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
     else:
         ex_strat, ex_aggr = None, None
 
-    for aggr in aggrs:
-        for strategy in strategies:
-            if strategy == ex_strat and aggr == ex_aggr:
-                continue
+    lookback = 120
+    max_available = len(df_in)
 
-            # Prepare settings
-            if engine:
-                mode_settings = engine.get_dynamic_settings(25.0, 0.001)
-            else:
-                mode_settings = {
-                    "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-                    "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
+    while lookback <= max_available:
+        current_df = df_in.tail(lookback)
+        patterns = []
+
+        for aggr in aggrs:
+            for strategy in strategies:
+                if strategy == ex_strat and aggr == ex_aggr:
+                    continue
+
+                # Prepare settings
+                if engine:
+                    mode_settings = engine.get_dynamic_settings(25.0, 0.001)
+                else:
+                    mode_settings = {
+                        "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+                        "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
+                    }
+                mode_settings['strategy'] = strategy
+                mode_settings['device'] = device if device is not None else torch.device("cpu")
+
+                # 1. Calculate signals
+                try:
+                    full_df = get_signals(current_df.copy(), mode_settings, is_backtest=True)
+                except Exception:
+                    continue
+
+                # 2. Run backtest
+                res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
+                                             timeframe=timeframe, df_in=full_df, engine=engine,
+                                             device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
+
+                if not res_full or not res_full.get('equity_curve'):
+                    continue
+
+                equity = res_full['equity_curve']
+
+                # 3. Expanding Time Slices (Tenths)
+                segment_profits = []
+                segment_scores = []
+
+                tenth = max(1, lookback // 10)
+                for i in range(1, 11):
+                    segment_len = i * tenth
+                    start_idx = len(full_df) - segment_len
+                    end_idx = len(full_df)
+
+                    win_profit = equity[end_idx-1] - equity[start_idx]
+
+                    # Recency Pondering
+                    window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
+                    age_hours = (now_ts - window_ts) / 3600
+                    recency_score = 1.0
+                    if timeframe in ['1m', '3m', '5m']:
+                         if age_hours > 24: recency_score = 0.8
+                         if age_hours > 168: recency_score = 0.5
+                    elif timeframe in ['15m', '30m']:
+                         if age_hours > 168: recency_score = 0.8
+
+                    segment_profits.append(win_profit)
+                    segment_scores.append(win_profit * recency_score)
+
+                avg_score = sum(segment_scores) / len(segment_scores)
+                avg_profit = sum(segment_profits) / len(segment_profits)
+
+                if avg_profit < 0.01:
+                    continue
+
+                latest_row = full_df.iloc[-1]
+                tech_state = {
+                    'rsi': float(latest_row.get('rsi', 50)),
+                    'adx': float(latest_row.get('adx', 0)),
+                    'ema_f': float(latest_row.get('ema_f', 0)),
+                    'ema_s': float(latest_row.get('ema_s', 0))
                 }
-            mode_settings['strategy'] = strategy
-            mode_settings['device'] = device if device is not None else torch.device("cpu")
 
-            # 1. Calculate signals once for the 120 candles
-            try:
-                full_df = get_signals(df_in.copy(), mode_settings, is_backtest=True)
-            except Exception:
-                continue
+                patterns.append({
+                    'profit': avg_profit,
+                    'score': avg_score,
+                    'strategy': strategy,
+                    'aggr': aggr,
+                    'symbol': symbol,
+                    'start_time': full_df['timestamp'].iloc[0].strftime("%Y-%m-%d %H:%M"),
+                    'end_time': full_df['timestamp'].iloc[-1].strftime("%Y-%m-%d %H:%M"),
+                    'start_ts': full_df['timestamp'].iloc[0].timestamp(),
+                    'prices': full_df['close'].tolist(),
+                    'tech_state': tech_state
+                })
 
-            # 2. Run backtest for the entire 120-candle block
-            res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
-                                         timeframe=timeframe, df_in=full_df, engine=engine,
-                                         device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
+        if patterns:
+            # Found profitable patterns, perform final steps and return
+            patterns.sort(key=lambda x: x['start_ts'], reverse=True)
+            unique_patterns = []
+            for p in patterns:
+                if len(unique_patterns) >= 4: break
 
-            if not res_full or not res_full.get('equity_curve'):
-                continue
+                # Monte Carlo validation
+                p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
+                p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
+                if p_start_idx != -1:
+                    window_df = df_in.iloc[max(0, p_start_idx-250):]
+                    mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
+                    mc.set_device(device if device is not None else torch.device("cpu"))
+                    mc_score = mc.validate_strategy(window_df)
+                    p['profit'] *= mc_score
+                    p['score'] *= mc_score
+                unique_patterns.append(p)
+            return symbol, unique_patterns
 
-            equity = res_full['equity_curve']
+        # No patterns found, double lookback
+        if lookback == max_available:
+            break
+        lookback *= 2
+        if lookback > max_available:
+            lookback = max_available
 
-            # 3. Expanding Time Slices (Tenths)
-            # We work backward in increments of 1/10 (12 candles)
-            # Segments: Last 12, Last 24, ..., Full 120
-            segment_profits = []
-            segment_scores = []
-
-            tenth = 12
-            for i in range(1, 11):
-                segment_len = i * tenth
-                start_idx = len(full_df) - segment_len
-                end_idx = len(full_df)
-
-                win_profit = equity[end_idx-1] - equity[start_idx]
-
-                # Recency Pondering for this segment
-                window_ts = full_df['timestamp'].iloc[start_idx].timestamp()
-                age_hours = (now_ts - window_ts) / 3600
-                recency_score = 1.0
-                if timeframe in ['1m', '3m', '5m']:
-                     if age_hours > 24: recency_score = 0.8
-                     if age_hours > 168: recency_score = 0.5
-                elif timeframe in ['15m', '30m']:
-                     if age_hours > 168: recency_score = 0.8
-
-                segment_profits.append(win_profit)
-                segment_scores.append(win_profit * recency_score)
-
-            # Combined score: mean of all segments (penalizes inconsistent performance)
-            avg_score = sum(segment_scores) / len(segment_scores)
-            avg_profit = sum(segment_profits) / len(segment_profits)
-
-            if avg_profit < 0.01:
-                continue
-
-            latest_row = full_df.iloc[-1]
-            tech_state = {
-                'rsi': float(latest_row.get('rsi', 50)),
-                'adx': float(latest_row.get('adx', 0)),
-                'ema_f': float(latest_row.get('ema_f', 0)),
-                'ema_s': float(latest_row.get('ema_s', 0))
-            }
-
-            patterns.append({
-                'profit': avg_profit,
-                'score': avg_score,
-                'strategy': strategy,
-                'aggr': aggr,
-                'symbol': symbol,
-                'start_time': full_df['timestamp'].iloc[0].strftime("%Y-%m-%d %H:%M"),
-                'end_time': full_df['timestamp'].iloc[-1].strftime("%Y-%m-%d %H:%M"),
-                'start_ts': full_df['timestamp'].iloc[0].timestamp(),
-                'prices': full_df['close'].tolist(), # Store full history for correlation
-                'tech_state': tech_state
-            })
-
-    # Keep top 4 patterns
-    # Rule: "Last for" - we no longer look for the best, but the very last profitable one
-    # Note: patterns are added sequentially by strategy, we sort by start_ts (recency)
-    patterns.sort(key=lambda x: x['start_ts'], reverse=True)
-    unique_patterns = []
-    seen_times = []
-
-    for p in patterns:
-        if len(unique_patterns) >= 4: break
-
-        # Since all patterns now use the same 120-candle window, overlap check is redundant
-        # but we still want to apply Monte Carlo validation to the chosen ones.
-
-        # Find the window in df_in
-        p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
-        p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
-
-        if p_start_idx != -1:
-            # Validate the full 120 candle block (plus some buffer for indicators)
-            window_df = df_in.iloc[max(0, p_start_idx-250):]
-            mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
-            mc.set_device(device if device is not None else torch.device("cpu"))
-            mc_score = mc.validate_strategy(window_df)
-            p['profit'] *= mc_score
-            p['score'] *= mc_score
-
-        unique_patterns.append(p)
-
-    return symbol, unique_patterns
+    return symbol, []
 
 def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
 
@@ -1864,11 +1868,11 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
         # Durations (120 candles): 1m(2h), 3m(6h), 5m(10h), 15m(30h), 30m(60h)
         now_ts = time.time()
         since_map = {
-            '1m': int((now_ts - 2 * 3600) * 1000),
-            '3m': int((now_ts - 6 * 3600) * 1000),
-            '5m': int((now_ts - 10 * 3600) * 1000),
-            '15m': int((now_ts - 30 * 3600) * 1000),
-            '30m': int((now_ts - 60 * 3600) * 1000)
+            '1m': int((now_ts - 48 * 3600) * 1000),
+            '3m': int((now_ts - 144 * 3600) * 1000),
+            '5m': int((now_ts - 240 * 3600) * 1000),
+            '15m': int((now_ts - 720 * 3600) * 1000),
+            '30m': int((now_ts - 1440 * 3600) * 1000)
         }
         if args.since:
              try: since_ts = int(datetime.strptime(args.since, "%Y-%m-%d %H:%M").timestamp() * 1000)
@@ -1916,10 +1920,10 @@ def run_benchmark_mode(exchange, config, args, status=None, data_manager=None, p
                               df = df[df['timestamp'] <= until_dt]
                          except Exception: pass
 
-                    # Enforce timeframe-specific limits (Using UTC for consistency with exchange data)
+                    # Enforce timeframe-specific limits (allowing up to ~2880 candles)
                     duration_hours = {
-                        '1m': 8, '3m': 24, '5m': 40, '15m': 120, '30m': 240
-                    }.get(timeframe, 8)
+                        '1m': 48, '3m': 144, '5m': 240, '15m': 720, '30m': 1440
+                    }.get(timeframe, 48)
                     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=duration_hours)
                     df = df[df['timestamp'] >= cutoff]
 
