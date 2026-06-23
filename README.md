@@ -132,6 +132,8 @@ To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` o
 - **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
 
+- Make sure to synchronize your clock before usage.
+
 ---
 
 ## 📜 Data Persistence
