@@ -14,10 +14,29 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+"""
+Monte Carlo simulation engine for probability estimation and strategy validation.
+
+This module uses Geometric Brownian Motion and PyTorch-accelerated simulations
+ to assess the potential success of trading strategies.
+"""
+
 import numpy as np
 import torch
 
 class MonteCarloEngine:
+    """
+    Monte Carlo engine for simulating future price paths and estimating probabilities.
+
+    Uses Geometric Brownian Motion (GBM) for simulations, accelerated via PyTorch.
+
+    Parameters
+    ----------
+    num_simulations : int, optional
+        Number of paths to simulate (default is 5000).
+    timeframe_candles : int, optional
+        Number of steps (candles) to simulate in the future (default is 100).
+    """
     def __init__(self, num_simulations=5000, timeframe_candles=100):
         self.num_simulations = num_simulations
         self.timeframe_candles = timeframe_candles
@@ -25,12 +44,36 @@ class MonteCarloEngine:
         self.device = torch.device("cpu")
 
     def set_device(self, device):
+        """
+        Updates the computation device (CPU or GPU).
+
+        Parameters
+        ----------
+        device : torch.device
+            The device to use for tensor operations.
+        """
         self.device = device
 
     def simulate_paths(self, current_price, volatility, drift=0):
         """
         Simulate price paths using Geometric Brownian Motion.
-        Vectorized with PyTorch for GPU acceleration.
+
+        Vectorized with PyTorch for hardware acceleration.
+
+        Parameters
+        ----------
+        current_price : float
+            The starting price for simulation.
+        volatility : float
+            The standard deviation of log returns.
+        drift : float, optional
+            The mean of log returns (default is 0).
+
+        Returns
+        -------
+        torch.Tensor
+            A 2D tensor of shape (num_simulations, timeframe_candles + 1)
+            containing the simulated paths.
         """
         # Ensure inputs are tensors and moved to device
         curr_p = torch.tensor(current_price, device=self.device, dtype=torch.float64)
@@ -51,6 +94,24 @@ class MonteCarloEngine:
     def estimate_hit_probability(self, current_price, target_price, volatility, drift=0, mode="above"):
         """
         Estimate the probability of price hitting a target within the timeframe.
+
+        Parameters
+        ----------
+        current_price : float
+            Starting price.
+        target_price : float
+            The price target to hit.
+        volatility : float
+            Log returns volatility.
+        drift : float, optional
+            Log returns drift.
+        mode : str, optional
+            Whether to check if price hits "above" or "below" the target.
+
+        Returns
+        -------
+        float
+            The estimated probability (0.0 to 1.0).
         """
         if volatility == 0:
             return 1.0 if (mode == "above" and target_price <= current_price) or (mode == "below" and target_price >= current_price) else 0.0
@@ -66,8 +127,20 @@ class MonteCarloEngine:
 
     def validate_strategy(self, df):
         """
-        Validate a strategy by running it on simulated paths based on historical volatility.
-        Returns a score between 0.5 and 1.5.
+        Validates a strategy's potential by simulating future paths.
+
+        Calculates historical volatility and drift from the provided data,
+        then determines the probability of price exceeding a 0.15% profit threshold.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Historical OHLCV data.
+
+        Returns
+        -------
+        float
+            A scaling factor score between 0.5 and 1.5 based on profit probability.
         """
         if len(df) < 20: return 1.0
 
@@ -100,7 +173,25 @@ class MonteCarloEngine:
 
     def price_option(self, current_price, strike_price, volatility, drift=0, option_type="call"):
         """
-        Estimate option price using Monte Carlo.
+        Estimates an option price using Monte Carlo simulation.
+
+        Parameters
+        ----------
+        current_price : float
+            Current asset price.
+        strike_price : float
+            Option strike price.
+        volatility : float
+            Log returns volatility.
+        drift : float, optional
+            Log returns drift.
+        option_type : str, optional
+            Type of option ("call" or "put").
+
+        Returns
+        -------
+        float
+            The estimated fair price of the option.
         """
         paths = self.simulate_paths(current_price, volatility, drift)
         final_prices = paths[:, -1]

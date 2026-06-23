@@ -1,6 +1,13 @@
 # Binance Trading Bot - Exchange Interface
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
+"""
+Interfaces and handlers for communicating with cryptocurrency exchanges.
+
+This module provides a unified interface for different exchanges (Binance, Kraken, Bitvavo)
+and includes a Mock handler for simulations and testing.
+"""
+
 import ccxt
 import time
 import logging
@@ -9,6 +16,19 @@ import requests
 from requests.adapters import HTTPAdapter
 
 class ThrottledExchange:
+    """
+    Wrapper for CCXT exchange instances to provide rate-limiting/throttling.
+
+    Ensures that requests to the exchange are spaced out by at least a specified
+    delay to avoid triggering rate limits.
+
+    Parameters
+    ----------
+    exchange : ccxt.Exchange
+        The underlying CCXT exchange instance.
+    delay_ms : int, optional
+        Minimum delay between requests in milliseconds (default is 2ms).
+    """
     def __init__(self, exchange, delay_ms=2):
         self.exchange = exchange
         self.delay_s = delay_ms / 1000.0
@@ -33,6 +53,14 @@ class ThrottledExchange:
         return attr
 
 def create_ccxt_session():
+    """
+    Creates a requests Session with a connection pool optimized for frequent API calls.
+
+    Returns
+    -------
+    requests.Session
+        The configured session object.
+    """
     session = requests.Session()
     adapter = HTTPAdapter(pool_connections=150, pool_maxsize=200)
     session.mount('https://', adapter)
@@ -40,6 +68,12 @@ def create_ccxt_session():
     return session
 
 class ExchangeInterface:
+    """
+    Abstract base class defining the required interface for exchange handlers.
+
+    Developers adding new exchanges should inherit from this class and
+    implement all abstract methods.
+    """
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
     def watch_ohlcv(self, symbol, timeframe): raise NotImplementedError
     def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
@@ -49,6 +83,16 @@ class ExchangeInterface:
     def fetch_trading_fee(self, symbol): raise NotImplementedError
 
 class BinanceExchange(ExchangeInterface):
+    """
+    Exchange handler for Binance using CCXT.
+
+    Parameters
+    ----------
+    api_key : str
+        Binance API key.
+    api_secret : str
+        Binance API secret.
+    """
     def __init__(self, api_key, api_secret):
         config = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
@@ -62,6 +106,25 @@ class BinanceExchange(ExchangeInterface):
         except Exception as e: logging.error(f"Failed to load markets: {e}"); return {}
 
     def watch_ohlcv(self, symbol, timeframe):
+        """
+        Watches for OHLCV updates using a polling fallback mechanism.
+
+        Since the standard CCXT library is synchronous, this method simulates
+        a real-time stream by periodically fetching the latest candles and
+        yielding new or updated ones.
+
+        Parameters
+        ----------
+        symbol : str
+            The trading pair symbol.
+        timeframe : str
+            The timeframe to watch.
+
+        Yields
+        ------
+        list
+            A single OHLCV candle [timestamp, open, high, low, close, volume].
+        """
         # Implementation of watch_ohlcv as a generator
         # Fallback to polling for sync CCXT
         # logging.info(f"Starting watch_ohlcv for {symbol} ({timeframe}) via polling fallback")
@@ -159,6 +222,21 @@ class BinanceExchange(ExchangeInterface):
             logging.error(f"Error during {side} order on {symbol}: {e}"); return None
 
 class MockExchange(ExchangeInterface):
+    """
+    A simulated exchange for testing and simulation modes.
+
+    Can be initialized with real API credentials to sync initial balances,
+    but executes trades against a virtual local balance.
+
+    Parameters
+    ----------
+    api_key : str, optional
+        API key for real balance discovery.
+    api_secret : str, optional
+        API secret for real balance discovery.
+    exchange_type : str, optional
+        The type of exchange to simulate ('binance', 'kraken', 'bitvavo').
+    """
     def __init__(self, api_key=None, api_secret=None, exchange_type='binance'):
         self.balance = {'EUR': 1000.0, 'USDC': 1000.0, 'USDT': 1000.0}
         self.ohlcv_data = {}
@@ -286,6 +364,9 @@ class MockExchange(ExchangeInterface):
         return None
 
 class KrakenExchange(BinanceExchange):
+    """
+    Exchange handler for Kraken. Inherits from BinanceExchange for shared logic.
+    """
     def __init__(self, api_key, api_secret):
         config = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
@@ -294,6 +375,9 @@ class KrakenExchange(BinanceExchange):
         self.exchange = ThrottledExchange(ccxt.kraken(config))
 
 class BitvavoExchange(BinanceExchange):
+    """
+    Exchange handler for Bitvavo. Inherits from BinanceExchange for shared logic.
+    """
     def __init__(self, api_key, api_secret):
         config = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
