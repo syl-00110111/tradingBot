@@ -95,7 +95,7 @@ class CCXTExchange(ExchangeInterface):
     api_secret : str
         Exchange API secret.
     """
-    def __init__(self, exchange_id, api_key, api_secret):
+    def __init__(self, exchange_id, api_key, api_secret, options=None):
         if not hasattr(ccxt, exchange_id):
             raise ValueError(f"Exchange '{exchange_id}' is not supported by CCXT.")
 
@@ -106,9 +106,8 @@ class CCXTExchange(ExchangeInterface):
             'session': create_ccxt_session()
         }
 
-        # Specific options for Binance
-        if exchange_id == 'binance':
-            config['options']['defaultType'] = 'spot'
+        if options and isinstance(options, dict):
+            config['options'].update(options)
 
         self.exchange = ThrottledExchange(exchange_class(config))
         self.exchange_id = exchange_id
@@ -246,7 +245,7 @@ class MockExchange(ExchangeInterface):
     exchange_id : str, optional
         The type of exchange to simulate ('binance', 'kraken', etc.).
     """
-    def __init__(self, api_key=None, api_secret=None, exchange_id='binance'):
+    def __init__(self, api_key=None, api_secret=None, exchange_id='binance', options=None):
         self.balance = {'EUR': 1000.0, 'USDC': 1000.0, 'USDT': 1000.0}
         self.ohlcv_data = {}
         self.real_exchange = None
@@ -256,7 +255,7 @@ class MockExchange(ExchangeInterface):
         self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
             try:
-                self.real_exchange = CCXTExchange(exchange_id, api_key, api_secret)
+                self.real_exchange = CCXTExchange(exchange_id, api_key, api_secret, options=options)
                 logging.info(f"Mock initialized with real {exchange_id} API balance discovery (deferred)")
             except Exception as e: logging.error(f"Failed to initialize real exchange {exchange_id} for Mock: {e}")
 

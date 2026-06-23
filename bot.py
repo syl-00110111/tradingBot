@@ -1079,19 +1079,20 @@ def main():
 
         # Prioritize exchange_id: api.json > CLI argument > config > default 'binance'
         exchange_id = api_creds.get('exchange_id') or args.exchange or config.get('exchange') or 'binance'
+        exchange_options = api_creds.get('options')
 
         # Use credentials from api.json if available, otherwise config.default.json
         api_key = api_creds.get('api_key') or config.get('api_key')
         api_secret = api_creds.get('api_secret') or config.get('api_secret')
 
         if args.mode == 'live':
-            exchange = CCXTExchange(exchange_id, api_key, api_secret)
+            exchange = CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             logging.info(f"Starting bot in LIVE mode on {exchange_id}")
         elif args.mode == 'simulation':
-            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id)
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options)
             logging.info(f"Starting bot in SIMULATION mode ({exchange_id} discovery)")
         elif args.mode == 'balance':
-            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             exchange.load_markets()
             show_balances(exchange)
             return
@@ -1099,14 +1100,14 @@ def main():
             if not args.symbol:
                 console.print("[red]Error: --symbol required for backtest[/]")
                 return
-            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             run_backtest_mode(exchange, config, args, engine=engine, device=device)
             return
         elif args.mode == 'benchmark':
             if not args.symbol and not args.every_symbol:
                 console.print("[red]Error: --symbol or --every-symbol required for benchmark[/]")
                 return
-            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret)
+            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
             run_discovery_mode(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
             return
