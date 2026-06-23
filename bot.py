@@ -562,6 +562,14 @@ def make_dashboard(global_mode, config):
                       data.get('strategy', 'N/A')
                  ]
 
+            # Rolling effect for strategy display
+            if 'strategies' in data and len(data['strategies']) > 1:
+                # Alternate every 2 seconds
+                strat_idx = int(time.time() / 2) % len(data['strategies'])
+                strat_display = data['strategies'][strat_idx]
+                # Replace the strategy column (last one)
+                row_vals[-1] = f"[bold cyan]{strat_display}[/]"
+
             table.add_row(*row_vals, style=row_style)
 
         # Add a spacer row if we are at the end of the list to ensure the last line isn't cut off
@@ -895,9 +903,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                  except: pass
 
                                  if pos and not engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate):
-                                      # Profit check failed, report details, reverse sell and trigger immediate re-benchmark
-                                      min_exit = engine.get_min_exit_price(pos['entry_price'], fee_rate=fee_rate)
-                                      logging.warning(f"[{symbol}] Sell aborted: Potential loss. Price: {data['price']:.7f} < Min Exit: {min_exit:.7f} (Entry: {pos['entry_price']:.7f}, Fee: {fee_rate*100:.2f}%). Re-benchmarking...")
+                                      # Profit check failed, reverse sell and trigger immediate re-benchmark (silent)
 
                                       # Flag to ignore sell until signal resets
                                       data_manager.flag_ignore_sell(symbol, value=True)
@@ -1139,23 +1145,25 @@ def main():
             opt_map = run_discovery_mode(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             # Store profits for prioritization
             pair_priorities = []
-            for sym, data in opt_map.items():
-                # data can be a list (patterns) or a single pattern (legacy cache)
-                best = data[0] if isinstance(data, list) else data
+            for sym, techniques in opt_map.items():
+                # techniques is a list of top 1 or 2 patterns
+                if not isinstance(techniques, list):
+                    techniques = [techniques]
+
+                best = techniques[0]
                 if sym in config['pairs']:
-                        config['pairs'][sym]['aggr'] = best['aggr']
-                        config['pairs'][sym]['strategy'] = best['strategy']
+                    config['pairs'][sym]['techniques'] = techniques
+                    config['pairs'][sym]['aggr'] = best['aggr']
+                    config['pairs'][sym]['strategy'] = best['strategy']
 
-                        # Store patterns in DataManager if not already there (e.g. from cache)
-                        if isinstance(data, list):
-                             pattern_manager.set_patterns(sym, data)
+                    # Score for prioritization (the predicted profit)
+                    priority_score = best['profit']
+                    config['pairs'][sym]['expected_profit'] = priority_score
+                    pair_priorities.append((sym, priority_score))
 
-                        # Score for prioritization (the predicted profit)
-                        priority_score = best['profit']
-                        config['pairs'][sym]['expected_profit'] = priority_score
-                        pair_priorities.append((sym, priority_score))
-                        if best.get('is_cached'):
-                             console.print(f"[bold green][{sym}][/] Strategy discovered from [cyan]cached results[/]: [cyan]{best['strategy']}[/] ([dim]{best['aggr']}[/]) | Predicted Profit: {format_price(priority_score)} EUR")
+                    if best.get('is_cached'):
+                        tech_desc = " + ".join([f"{t['strategy']} ({t['aggr']})" for t in techniques])
+                        console.print(f"[bold green][{sym}][/] Strategies discovered from [cyan]cached results[/]: [cyan]{tech_desc}[/] | Predicted Profit: {format_price(priority_score)} EUR")
 
                 time.sleep(1) # Brief pause after bench
 
@@ -1172,13 +1180,21 @@ def main():
 
             # Retrieve optimized settings from config if available (after benchmark)
             pair_cfg = pairs[symbol]
-            aggr_val = pair_cfg.get('aggr', 'normal')
-            strat_val = pair_cfg.get('strategy', 'double_ema_macd_rsi')
+            techniques = pair_cfg.get('techniques', [])
+            if not techniques:
+                techniques = [{
+                    'strategy': pair_cfg.get('strategy', 'double_ema_macd_rsi'),
+                    'aggr': pair_cfg.get('aggr', 'normal')
+                }]
+
+            aggr_val = techniques[0].get('aggr', 'normal')
+            strat_val = techniques[0].get('strategy', 'double_ema_macd_rsi')
             exp_profit = float(pair_cfg.get('expected_profit', 0))
 
             bot_state[symbol] = {
                 'aggr': aggr_val,
                 'strategy': strat_val,
+                'strategies': [t['strategy'] for t in techniques],
                 'last_action': 'BUY' if pos else 'Waiting',
                 'position': pos,
                 'expected_profit': exp_profit
@@ -1308,14 +1324,21 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
                 best_sim = sim
                 active_pattern = p
 
-    # 2. Dynamic Activation
+    # 2. Dynamic Activation & Multi-strategy Evaluation
+    techniques = pair_config.get('techniques', [])
+    if not techniques:
+        techniques = [{
+            'strategy': pair_config.get('strategy', 'double_ema_macd_rsi'),
+            'aggr': pair_config.get('aggr', 'normal')
+        }]
+
+    # If a successful pattern is matched, it replaces the primary strategy
     if active_pattern:
-        strategy_name = active_pattern['strategy']
-        mode_name = active_pattern['aggr']
+        primary_strategy = active_pattern['strategy']
+        primary_aggr = active_pattern['aggr']
     else:
-        # Fallback to benchmarked strategy if no pattern matches
-        strategy_name = pair_config.get('strategy', 'double_ema_macd_rsi')
-        mode_name = pair_config.get('aggr', 'normal')
+        primary_strategy = techniques[0]['strategy']
+        primary_aggr = techniques[0]['aggr']
 
     # Use Dynamic Risk Engine if engine is available
     if engine:
@@ -1326,11 +1349,24 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             "ema_fast": 20, "ema_slow": 50, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70, "confirmation_window": 1
         }
-
-    mode_settings['strategy'] = strategy_name
     mode_settings['device'] = device
-    df = get_signals(df, mode_settings, is_backtest=False)
-    latest_row = df.iloc[-1]
+
+    # Evaluate signals for all techniques
+    tech_results = []
+    # Technique 1 (Primary)
+    ts1 = mode_settings.copy()
+    ts1['strategy'] = primary_strategy
+    df1 = get_signals(df.copy(), ts1, is_backtest=False)
+    tech_results.append(df1.iloc[-1])
+
+    # Technique 2 (Secondary, if exists)
+    if len(techniques) > 1:
+        ts2 = mode_settings.copy()
+        ts2['strategy'] = techniques[1]['strategy']
+        df2 = get_signals(df.copy(), ts2, is_backtest=False)
+        tech_results.append(df2.iloc[-1])
+
+    latest_row = tech_results[0]
 
     # Clean up trigger data
     exclude = ['open', 'high', 'low', 'close', 'volume', 'buy_candidate', 'sell_candidate', 'ema_up_win', 'macd_up_win', 'rsi_up_win', 'ema_down_win', 'macd_down_win', 'rsi_down_win', 'ema_up', 'ema_down', 'macd_up', 'macd_down', 'rsi_up', 'rsi_down']
@@ -1365,10 +1401,15 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         consecutive_buys = c_buys
         consecutive_sells = c_sells
     elif last_candle_ts != candle_ts:
-        if latest_row['buy_signal']:
+        # Buy confirmation: ALL techniques must signal BUY
+        buy_confirmed = all(res['buy_signal'] for res in tech_results)
+        # Sell confirmation: ONLY primary technique (as per clarification)
+        sell_confirmed = latest_row['sell_signal']
+
+        if buy_confirmed:
             consecutive_buys += 1
             consecutive_sells = 0
-        elif latest_row['sell_signal']:
+        elif sell_confirmed:
             consecutive_sells += 1
             consecutive_buys = 0
         else:
@@ -1379,7 +1420,10 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
                 data_manager.flag_ignore_sell(symbol, value=False)
     else:
         # If it's the same candle, keep existing counts unless signal lost
-        if not latest_row['buy_signal'] and not latest_row['sell_signal']:
+        buy_confirmed = all(res['buy_signal'] for res in tech_results)
+        sell_confirmed = latest_row['sell_signal']
+
+        if not buy_confirmed and not sell_confirmed:
             consecutive_buys = 0
             consecutive_sells = 0
             if data_manager.get_position(symbol):
@@ -1407,8 +1451,9 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'score': latest_row.get('score', 0),
         'whale_active': bool(latest_row.get('whale_active', 0)),
         'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
-        'aggr': mode_name,
-        'strategy': strategy_name,
+        'aggr': primary_aggr,
+        'strategy': primary_strategy,
+        'strategies': [primary_strategy] + ([techniques[1]['strategy']] if len(techniques) > 1 else []),
         'tendency': latest_row.get('tendency', 'Neutral'),
         'buy': consecutive_buys >= buy_threshold,
         'sell': consecutive_sells >= sell_threshold,
@@ -2241,7 +2286,8 @@ def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
 
         if patterns:
             # Found profitable patterns, perform final steps and return
-            patterns.sort(key=lambda x: x['start_ts'], reverse=True)
+            # Sort by profit to get the "best performing" ones
+            patterns.sort(key=lambda x: x['profit'], reverse=True)
             unique_patterns = []
             for p in patterns:
                 if len(unique_patterns) >= 4: break
@@ -2330,10 +2376,23 @@ def run_discovery_mode(exchange, config, args, status=None, data_manager=None, p
         timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
         cached_patterns = cache_mgr.get(symbol, timeframe, validity_duration)
         if cached_patterns:
-            # cached_patterns is a list of pattern dicts
-            best = cached_patterns[0]
-            best['is_cached'] = True
-            optimization_map[symbol] = best
+            # Select top 2 distinct strategies from cache
+            distinct_techniques = []
+            seen_strats = set()
+            sorted_patterns = sorted(cached_patterns, key=lambda x: x['profit'], reverse=True)
+            for p in sorted_patterns:
+                if p['strategy'] not in seen_strats:
+                    p['is_cached'] = True
+                    distinct_techniques.append(p)
+                    seen_strats.add(p['strategy'])
+                    if len(distinct_techniques) == 2:
+                        break
+
+            if not distinct_techniques:
+                 distinct_techniques = [cached_patterns[0]]
+                 distinct_techniques[0]['is_cached'] = True
+
+            optimization_map[symbol] = distinct_techniques
             if data_manager:
                 pattern_manager.set_patterns(symbol, cached_patterns)
             continue
@@ -2447,32 +2506,49 @@ def run_discovery_mode(exchange, config, args, status=None, data_manager=None, p
                     if shutdown_event.is_set(): break
                     sym, patterns = future.result()
                     if patterns:
-                        # "Last for": pick the most recent profitable pattern
-                        last_for_symbol = patterns[0]
-                        best_per_symbol[sym] = last_for_symbol
+                        # Select top 2 distinct strategies based on profit
+                        distinct_techniques = []
+                        seen_strats = set()
+                        # Sort patterns by profit to get the "best performing"
+                        sorted_patterns = sorted(patterns, key=lambda x: x['profit'], reverse=True)
+                        for p in sorted_patterns:
+                            if p['strategy'] not in seen_strats:
+                                distinct_techniques.append(p)
+                                seen_strats.add(p['strategy'])
+                                if len(distinct_techniques) == 2:
+                                    break
+
+                        if not distinct_techniques:
+                             distinct_techniques = [patterns[0]]
+
+                        best_tech = distinct_techniques[0]
+                        best_per_symbol[sym] = best_tech
 
                         # Store patterns in DataManager for real-time matching
                         if data_manager:
                              pattern_manager.set_patterns(sym, patterns)
 
-                        # Update current technique in bot_state immediately
+                        # Update current techniques in bot_state immediately
                         if sym in bot_state:
                              with bot_lock:
-                                  bot_state[sym]['strategy'] = last_for_symbol['strategy']
-                                  bot_state[sym]['aggr'] = last_for_symbol['aggr']
+                                  bot_state[sym]['strategy'] = best_tech['strategy']
+                                  bot_state[sym]['aggr'] = best_tech['aggr']
+                                  bot_state[sym]['strategies'] = [t['strategy'] for t in distinct_techniques]
 
-                        period_str = f" [dim](From {last_for_symbol.get('start_time')} to {last_for_symbol.get('end_time')})[/]"
+                        period_str = f" [dim](From {best_tech.get('start_time')} to {best_tech.get('end_time')})[/]"
                         # Always save patterns to cache
                         timeframe = config['pairs'][sym].get('timeframe', '1m')
                         cache_mgr.set(sym, timeframe, patterns)
 
                         msg_target = status.console if status else console
-                        optimization_map[sym] = last_for_symbol
-                        msg_target.print(f"\n[bold green]🏆 DISCOVERY FOR {sym}:[/] [bold]{last_for_symbol['strategy']} ({last_for_symbol['aggr']})[/] | Profit: {format_price(last_for_symbol['profit'])} EUR{period_str}")
+                        optimization_map[sym] = distinct_techniques # Store the list of top techniques
+
+                        tech_desc = " + ".join([f"{t['strategy']} ({t['aggr']})" for t in distinct_techniques])
+                        msg_target.print(f"\n[bold green]🏆 DISCOVERY FOR {sym}:[/] [bold]{tech_desc}[/] | Best Profit: {format_price(best_tech['profit'])} EUR{period_str}")
 
                         # Use a generic 'total' score for recommendations
-                        if last_for_symbol['profit'] > best_overall['total']['profit']:
-                             best_overall['total'] = {'profit': last_for_symbol['profit'], 'params': (last_for_symbol['strategy'], last_for_symbol['aggr'], sym)}
+                        if best_tech['profit'] > best_overall['total']['profit']:
+                             best_overall['total'] = {'profit': best_tech['profit'], 'params': (best_tech['strategy'], best_tech['aggr'], sym)}
             finally:
                 signal.signal(signal.SIGINT, original_handler)
 
