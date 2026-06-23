@@ -12,6 +12,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 - **ETH Strategy (Stochastic RSI)**: Optimized for Ethereum's volatility, following the findings of *Zhang et al. (2020)*.
 - **Market Regime Detection**: Utilizes volatility-based switching between Mean-Reversion and Trend-Following (*Baur & Dimpfl, 2021*).
 - **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for every signal, penalizing high-risk setups.
+- **Hardware SIMD Optimization**: Automatic detection and utilization of CPU instruction sets (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) for optimized performance on non-GPU environments.
 
 ---
 
@@ -19,6 +20,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 
 ### ⚡ Performance & Reliability
 - **GPU Acceleration**: Calculations are offloaded to the graphics chip via PyTorch. Supported backends: **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** and **ROCm**.
+- **Instruction Set Optimization**: Automatically leverages advanced CPU features (SSE/AVX) for vectorized math operations when GPU is unavailable.
 - **Multi-Processing Benchmark**: Strategy optimization is parallelized across all CPU cores.
 - **Fresh Ticker Price**: Fetches a fresh price from the exchange immediately before placing a Buy order to ensure compliance with Spot market NOTIONAL limits and reduce "Filter failure" errors.
 - **Interactive Dashboard**: Navigate through trading pairs with arrow keys and visualize real-time ASCII candlestick charts by pressing **ENTER**.
@@ -40,8 +42,14 @@ This bot implements strategies and logic recommended by leading empirical studie
 ---
 
 ## 📈 Supported Strategies
-The bot features 30+ distinct trading strategies, including:
-`moving_averages`, `ichimoku_cloud`, `parabolic_sar`, `rsi_support_resistance`, `bollinger_bands`, `macd_range`, `breakout_volume`, `donchian_channels`, `atr_breakout`, `stochastic_rsi`, `williams_r`, `vwap_momentum`, `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`, `macd_bollinger_bands`, `double_ema`, `double_ema_macd_rsi`, `scientific_ensemble`, and various Monte Carlo based approaches.
+The bot features 35+ distinct trading strategies, including:
+
+- **Trend Following**: `moving_averages`, `ichimoku_cloud`, `parabolic_sar`, `double_ema`, `adx_trend_strength`, `halving_cycle_proxy`.
+- **Mean Reversion & Range**: `bollinger_bands`, `rsi_support_resistance`, `macd_range`, `pairs_trading_proxy`.
+- **Breakout & Momentum**: `breakout_volume`, `donchian_channels`, `atr_breakout`, `stochastic_rsi`, `williams_r`, `vwap_momentum`, `listing_surge_proxy`.
+- **Scalping & Order Flow**: `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`.
+- **Advanced Proxies**: `scientific_ensemble`, `whale_detection_proxy`, `pump_dump_proxy`, `market_regime_proxy`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`, `mvrv_proxy`.
+- **Monte Carlo Engines**: `mc_mean_reversion`, `mc_momentum`, `mc_dynamic_allocation`, `mc_market_making`, `mc_stop_loss_eval`, `mc_options_pricing`.
 
 ---
 
@@ -134,12 +142,6 @@ To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` o
 
 - Make sure to synchronize your clock before usage of the bot.
 
----
-
-## 📜 Data Persistence
-The bot maintains a consolidated archive `bot_data_backup.zip`. Runtime JSON/Pickle files are flushed into this archive and deleted from the disk to prevent accidental data loss. The bot restores its state from this archive at startup.
-
----
 
 ## ⚖️ Disclaimer
 Trading carries significant risk. Use at your own risk. Licensed under **GPL**.
