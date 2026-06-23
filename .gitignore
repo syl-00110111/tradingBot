@@ -4,8 +4,3 @@ __pycache__/
 *$py.class
 .env
 api.json
-trades_history_*.json
-benchmark_cache.json
-
-ohlcv_cache.pkl.gz
-bot_data_backup.zip
