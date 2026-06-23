@@ -52,7 +52,7 @@ class BinanceExchange(ExchangeInterface):
     def __init__(self, api_key, api_secret):
         config = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'options': {'defaultType': 'spot', 'poolSize': 50},
+            'options': {'defaultType': 'spot', 'poolSize': 50, 'adjustForTimeDifference': True},
             'session': create_ccxt_session()
         }
         self.exchange = ThrottledExchange(ccxt.binance(config))
