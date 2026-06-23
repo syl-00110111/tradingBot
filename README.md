@@ -119,7 +119,7 @@ Main bot settings.
 2. Activate it: `.\venv\Scripts\activate`
 3. Install dependencies: `pip install -r requirements.txt`
 
-*Note: On Windows, you may need to use **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific llvmlite dependency requirements on this platform.*
+*Note: On Windows, you may need to type `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` and maybe use revision **Python 3.13** and install the **Visual C++ 2015-2022 Redistributable (x64)** available at [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe) due to specific llvmlite dependency requirements on this platform.*
 
 **Regular maintenance:**
 
@@ -132,7 +132,7 @@ To stay up-to-date with any changes in API calls: `pip install --upgrade ccxt` o
 - **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
 
-- Make sure to synchronize your clock before usage.
+- Make sure to synchronize your clock before usage of the bot.
 
 ---
 
