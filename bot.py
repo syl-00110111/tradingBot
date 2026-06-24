@@ -1194,7 +1194,7 @@ def main():
                 return
             exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
-            run_discovery_mode(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
+            run_discovery(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
             return
 
         pairs = config.get('pairs', {})
@@ -1221,7 +1221,7 @@ def main():
                 return
 
             status.update(f"[bold blue]Scanning for suitable strategies for all pairs...")
-            opt_map = run_discovery_mode(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
+            opt_map = run_discovery(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
             # Store profits for prioritization
             pair_priorities = []
             for sym, techniques in opt_map.items():
@@ -1519,6 +1519,28 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         buy_threshold += 1
         sell_threshold += 1
 
+    # Monte Carlo Validation for real trades
+    mc_verified_buy = False
+    mc_verified_sell = False
+    if consecutive_buys >= buy_threshold or (consecutive_sells >= sell_threshold and data_manager.get_position(symbol)):
+        mc = MonteCarloEngine(num_simulations=500, timeframe_candles=20)
+        mc.set_device(device if device is not None else torch.device("cpu"))
+        mc_score = mc.validate_strategy(df)
+
+        if consecutive_buys >= buy_threshold:
+            if mc_score > 0.45: # Acceptance threshold
+                mc_verified_buy = True
+            else:
+                # logging.info(f"[{symbol}] BUY signal rejected by Monte Carlo (Score: {mc_score:.2f})")
+                pass
+
+        if consecutive_sells >= sell_threshold:
+            if mc_score > 0.35: # Slightly lower threshold for exit to be safe
+                mc_verified_sell = True
+            else:
+                # logging.info(f"[{symbol}] SELL signal rejected by Monte Carlo (Score: {mc_score:.2f})")
+                pass
+
     return {
         'price': latest_row['close'],
         'ema_f': latest_row.get('ema_f', 0),
@@ -1534,12 +1556,12 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'strategy': primary_strategy,
         'strategies': [primary_strategy] + ([techniques[1]['strategy']] if len(techniques) > 1 else []),
         'tendency': latest_row.get('tendency', 'Neutral'),
-        'buy': consecutive_buys >= buy_threshold,
-        'sell': consecutive_sells >= sell_threshold,
+        'buy': mc_verified_buy,
+        'sell': mc_verified_sell,
         'consecutive_buys': consecutive_buys,
         'consecutive_sells': consecutive_sells,
         '_last_candle_ts': candle_ts,
-        'sell_triggered': consecutive_sells >= sell_threshold and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
+        'sell_triggered': mc_verified_sell and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
         'position': data_manager.get_position(symbol),
         'expected_profit': float(pair_config.get('expected_profit', 0)),
         'trigger_data': trigger_data
@@ -2179,12 +2201,8 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     if len(equity_curve) > start_idx:
         total_profit = equity_curve[-1] - equity_curve[start_idx]
 
-    # Monte Carlo Validation
-    if not skip_mc:
-        mc_score = mc.validate_strategy(df)
-        total_profit *= mc_score # Penalize if MC validation is low
-    else:
-        mc_score = 1.0
+    # Monte Carlo Validation removed from Backtest as requested
+    mc_score = 1.0
 
     wins = [t for t in trades if t['profit'] > 0]
     win_rate = len(wins) / len(trades) if trades else 0
@@ -2418,17 +2436,7 @@ def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
             unique_patterns = []
             for p in patterns:
                 if len(unique_patterns) >= 4: break
-
-                # Monte Carlo validation
-                p_start_ts_dt = pd.to_datetime(p['start_ts'], unit='s')
-                p_start_idx = df_in['timestamp'].searchsorted(p_start_ts_dt)
-                if p_start_idx != -1:
-                    window_df = df_in.iloc[max(0, p_start_idx-250):]
-                    mc = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
-                    mc.set_device(device if device is not None else torch.device("cpu"))
-                    mc_score = mc.validate_strategy(window_df)
-                    p['profit'] *= mc_score
-                    p['score'] *= mc_score
+                # Monte Carlo validation removed from Discovery as requested
                 unique_patterns.append(p)
             return symbol, unique_patterns
 
@@ -2441,7 +2449,7 @@ def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
 
     return symbol, []
 
-def run_discovery_mode(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
+def run_discovery(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
     """
     Orchestrates the strategy discovery/optimization process for multiple symbols.
 
