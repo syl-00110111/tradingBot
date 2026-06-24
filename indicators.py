@@ -98,6 +98,42 @@ def torch_tema(series, length):
     ema3 = torch_ema(ema2, length)
     return 3 * ema1 - 3 * ema2 + ema3
 
+def torch_heikin_ashi(open_t, high_t, low_t, close_t):
+    """
+    High-performance Heikin Ashi implementation in PyTorch.
+
+    Parameters
+    ----------
+    open_t, high_t, low_t, close_t : torch.Tensor
+        OHLC series tensors.
+
+    Returns
+    -------
+    ha_open, ha_high, ha_low, ha_close : torch.Tensor
+        Calculated Heikin Ashi OHLC series.
+    """
+    n = open_t.size(0)
+    ha_close = (open_t + high_t + low_t + close_t) / 4.0
+    ha_open = torch.empty_like(open_t)
+
+    if n > 0:
+        ha_open = _torch_ha_open_loop(open_t, close_t, ha_close)
+
+    ha_high = torch.maximum(torch.maximum(high_t, ha_open), ha_close)
+    ha_low = torch.minimum(torch.minimum(low_t, ha_open), ha_close)
+
+    return ha_open, ha_high, ha_low, ha_close
+
+@torch.jit.script
+def _torch_ha_open_loop(open_t: torch.Tensor, close_t: torch.Tensor, ha_close: torch.Tensor):
+    n = open_t.size(0)
+    ha_open = torch.empty_like(open_t)
+    # Initial HA_Open is (Open[0] + Close[0]) / 2
+    ha_open[0] = (open_t[0] + close_t[0]) / 2.0
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2.0
+    return ha_open
+
 def torch_rsi(series, length):
     """
     Vectorized Relative Strength Index (RSI) implementation in PyTorch.
@@ -210,7 +246,8 @@ STRATEGIES = [
     'mc_stop_loss_eval', 'mc_options_pricing',
     'whale_detection_proxy', 'pump_dump_proxy', 'market_regime_proxy', 'scientific_ensemble',
     'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'mvrv_proxy', 'adx_trend_strength',
-    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy', 'tema_crossover'
+    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy', 'tema_crossover',
+    'heikin_ashi'
 ]
 
 # Global MC engine for reuse
@@ -378,6 +415,8 @@ def get_signals(df, mode_config, is_backtest=False):
         df = strategy_listing_surge(df, mode_config)
     elif strategy == 'tema_crossover':
         df = strategy_tema_crossover(df, mode_config)
+    elif strategy == 'heikin_ashi':
+        df = strategy_heikin_ashi(df, mode_config)
     else:
         df = strategy_double_ema_macd_rsi(df, mode_config)
 
@@ -1549,6 +1588,52 @@ def strategy_tema_crossover(df, config):
 
     df['buy_candidate'] = (df['close'] > df[col_name]) & (df['close'].shift(1) <= df[col_name].shift(1))
     df['sell_candidate'] = (df['close'] < df[col_name]) & (df['close'].shift(1) >= df[col_name].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_heikin_ashi(df, config):
+    """
+    Heikin Ashi Strategy.
+
+    Uses Heikin Ashi "shadow" candles for noise filtering.
+    Buy signal: Green HA candle (HA_Close > HA_Open) with no lower wick.
+    Sell signal: Red HA candle (HA_Close < HA_Open) with no upper wick.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
+    device = config.get('device', torch.device('cpu'))
+
+    if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
+        o_t = torch.tensor(df['open'].values, device=device, dtype=torch.float64)
+        h_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
+        l_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
+        c_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+        ha_o, ha_h, ha_l, ha_c = torch_heikin_ashi(o_t, h_t, l_t, c_t)
+        df['ha_open'] = ha_o.to('cpu').numpy()
+        df['ha_high'] = ha_h.to('cpu').numpy()
+        df['ha_low'] = ha_l.to('cpu').numpy()
+        df['ha_close'] = ha_c.to('cpu').numpy()
+    else:
+        ha_df = ta.ha(df['open'], df['high'], df['low'], df['close'])
+        df['ha_open'] = ha_df.iloc[:, 0]; df['ha_high'] = ha_df.iloc[:, 1]
+        df['ha_low'] = ha_df.iloc[:, 2]; df['ha_close'] = ha_df.iloc[:, 3]
+
+    # Buy: Green candle (HA_Close > HA_Open) and No lower wick (HA_Low == HA_Open)
+    # Using a small epsilon for float comparison
+    df['buy_candidate'] = (df['ha_close'] > df['ha_open']) & (np.abs(df['ha_low'] - df['ha_open']) < 1e-8)
+
+    # Sell: Red candle (HA_Close < HA_Open) and No upper wick (HA_High == HA_Open)
+    df['sell_candidate'] = (df['ha_close'] < df['ha_open']) & (np.abs(df['ha_high'] - df['ha_open']) < 1e-8)
 
     return apply_confirmation(df, config.get('confirmation_window', 3))
 
