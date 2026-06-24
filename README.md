@@ -82,9 +82,19 @@ Store your API credentials and preferred exchange.
 Main bot settings.
 
 #### Core Settings
-*   **`max_open_positions`**: (int) Maximum number of trades the bot can hold simultaneously (default: `18`).
-*   **`base_trade_amount`**: (float) The amount to spend per trade (default: `9.0`). If `>= 1.0`, it's treated as a percentage of available balance (e.g., `9.0` = 9%). If `< 1.0`, it's treated as a decimal fraction (e.g., `0.1` = 10%).
-*   **`global_risk_multiplier`**: (float) Scaler for position sizing and technical confirmations (default: `1.1`). Higher values increase trade size but also require more confirmation signals.
+*   **`max_open_positions`**: (int) Maximum number of trades the bot can hold simultaneously (default: `26`).
+*   **`max_trade_percentage`**: (float | object) The **maximum** percentage of your available balance to spend per trade (default: `12.0`). This acts as a strict ceiling. The bot calculates the optimal position size from below, ensuring that even with risk multipliers and bonuses, the total will never exceed this value.
+    *   *Note: 12% is a significant portion of capital; adjust according to your risk tolerance.*
+    *   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
+        ```json
+        "max_trade_percentage": {
+            "BTC": 5.0,
+            "USDT": 12.0,
+            "USDC": 10.0,
+            "default": 12.0
+        }
+        ```
+*   **`global_risk_multiplier`**: (float) Scaler for position sizing and technical confirmations (default: `1.1`). Higher values increase trade size (up to the `max_trade_percentage` limit) but also require more confirmation signals.
 *   **`win_streak_bonus`**: (Object)
     *   `enabled`: (bool) Enable/disable position sizing increase on win streaks (default: `true`).
     *   `threshold`: (int) Number of consecutive wins required (default: `2`).

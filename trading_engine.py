@@ -124,8 +124,9 @@ class TradingEngine:
         """
         Calculates the amount of an asset to buy based on wallet balance and risk.
 
-        Takes into account the `base_trade_amount` (percentage or absolute),
+        Takes into account the `max_trade_percentage` (treated as a strict ceiling),
         the `global_risk_multiplier`, and applies an optional bonus for win streaks.
+        The calculation starts from below to reach the maximum defined percentage.
 
         Parameters
         ----------
@@ -149,16 +150,37 @@ class TradingEngine:
             else: base_balance = balance.get(base_currency, 0)
         else: base_balance = balance.get(base_currency, 0)
 
-        raw_val = float(self.config.get('base_trade_amount', 9.0))
-        base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
-        trade_amount_base = base_balance * base_percentage
+        # 1. Determine the strict ceiling for this base asset
+        # Support for per-base-asset override in config
+        # Example config: "max_trade_percentage": {"BTC": 5.0, "USDT": 12.0, "default": 12.0}
+        cfg_val = self.config.get('max_trade_percentage', 12.0)
+        if isinstance(cfg_val, dict):
+             max_pct = float(cfg_val.get(base_currency, cfg_val.get('default', 12.0)))
+        else:
+             max_pct = float(cfg_val)
+
+        ceiling_pct = max_pct / 100.0 if max_pct >= 1.0 else max_pct
+        max_allowed_base = base_balance * ceiling_pct
+
+        # 2. Calculate initial base amount starting from below
+        # We start with a base of 75% of the ceiling to leave room for multipliers
+        base_target_pct = ceiling_pct * 0.75
+        trade_amount_base = base_balance * base_target_pct
+
+        # 3. Apply risk multiplier
         trade_amount_base *= self.risk_multiplier
 
+        # 4. Apply win streak bonus
         ws_config = self.config.get('win_streak_bonus', {})
         if ws_config.get('enabled') and win_streak >= ws_config.get('threshold', 2):
              multiplier = ws_config.get('multiplier', 1.2)
              trade_amount_base *= multiplier
-             logging.info(f"Win streak detected ({win_streak}), applying {multiplier}x multiplier. New target: {trade_amount_base:.2f} {base_currency}")
+             # logging.info(f"Win streak detected ({win_streak}), applying {multiplier}x multiplier.")
+
+        # 5. Enforce strict ceiling
+        if trade_amount_base > max_allowed_base:
+             trade_amount_base = max_allowed_base
+             # logging.info(f"Trade amount capped at strict ceiling: {max_pct}% of {base_currency} balance.")
 
         if trade_amount_base > base_balance: trade_amount_base = base_balance
         if current_price > 0: return trade_amount_base / current_price

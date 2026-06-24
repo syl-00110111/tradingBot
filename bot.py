@@ -2192,7 +2192,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
                 position = None
 
         # Buy logic
-        raw_val = float(config.get('base_trade_amount', 9.0))
+        raw_val = float(config.get('max_trade_percentage', 12.0))
         base_percentage = raw_val / 100.0 if raw_val >= 1.0 else raw_val
         trade_amount = balance * base_percentage
         if not position and row['buy_signal'] and balance >= trade_amount:
