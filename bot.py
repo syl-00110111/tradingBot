@@ -86,6 +86,16 @@ status_pause_until = 0
 bot_state = {}
 bot_lock = threading.Lock()
 
+def precision_to_int(p):
+    """Converts various precision formats (int or float step) to decimal places."""
+    if p is None: return 8
+    if isinstance(p, int): return p
+    if isinstance(p, float):
+        if p > 0:
+            import math
+            return max(0, int(-math.log10(p)))
+    return 8
+
 def format_price(price, precision=None):
     """
     Formats a numeric price into a string with adaptive precision.
@@ -94,8 +104,9 @@ def format_price(price, precision=None):
     ----------
     price : float or int or None
         The price value to format.
-    precision : int, optional
-        The number of decimal places to use. If None, it uses up to 10.
+    precision : int or float, optional
+        The number of decimal places to use or the step size (e.g., 0.001).
+        If None, it uses up to 10.
 
     Returns
     -------
@@ -117,7 +128,8 @@ def format_price(price, precision=None):
         # Default: up to 10 decimal places, then strip zeros
         return f"{price:.10f}".rstrip('0').rstrip('.')
     else:
-        return f"{price:.{precision}f}".rstrip('0').rstrip('.')
+        p_int = precision_to_int(precision)
+        return f"{price:.{p_int}f}".rstrip('0').rstrip('.')
 
 def format_amt(amt, precision=None):
     """
@@ -127,8 +139,8 @@ def format_amt(amt, precision=None):
     ----------
     amt : float or int or None
         The amount value to format.
-    precision : int, optional
-        The number of decimal places to use.
+    precision : int or float, optional
+        The number of decimal places to use or the step size (e.g., 0.01).
 
     Returns
     -------
@@ -142,7 +154,8 @@ def format_amt(amt, precision=None):
     if precision is None:
         return f"{amt:.10f}".rstrip('0').rstrip('.')
     else:
-        return f"{amt:.{precision}f}".rstrip('0').rstrip('.')
+        p_int = precision_to_int(precision)
+        return f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
 
 class DashboardHandler(logging.Handler):
     """
