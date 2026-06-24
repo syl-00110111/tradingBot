@@ -62,7 +62,7 @@ def create_ccxt_session():
         The configured session object.
     """
     session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=150, pool_maxsize=200)
+    adapter = HTTPAdapter(pool_connections=500, pool_maxsize=500)
     session.mount('https://', adapter)
     session.mount('http://', adapter)
     return session
@@ -102,7 +102,7 @@ class CCXTExchange(ExchangeInterface):
         exchange_class = getattr(ccxt, exchange_id)
         config = {
             'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True,
-            'options': {'poolSize': 50, 'adjustForTimeDifference': True},
+            'options': {'poolSize': 500, 'adjustForTimeDifference': True},
             'session': create_ccxt_session()
         }
 
