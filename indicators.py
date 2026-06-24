@@ -73,6 +73,31 @@ def torch_ema(series, length):
     alpha = 2.0 / (length + 1)
     return torch_ema_kernel(series, float(alpha))
 
+def torch_tema(series, length):
+    """
+    High-performance Triple Exponential Moving Average (TEMA) implementation in PyTorch.
+
+    TEMA = (3 * EMA1) - (3 * EMA2) + EMA3
+    where EMA1 is the EMA of the price, EMA2 is the EMA of EMA1, and
+    EMA3 is the EMA of EMA2.
+
+    Parameters
+    ----------
+    series : torch.Tensor
+        The input price series tensor.
+    length : int
+        The period length for the TEMA.
+
+    Returns
+    -------
+    torch.Tensor
+        The calculated TEMA series tensor.
+    """
+    ema1 = torch_ema(series, length)
+    ema2 = torch_ema(ema1, length)
+    ema3 = torch_ema(ema2, length)
+    return 3 * ema1 - 3 * ema2 + ema3
+
 def torch_rsi(series, length):
     """
     Vectorized Relative Strength Index (RSI) implementation in PyTorch.
@@ -185,7 +210,7 @@ STRATEGIES = [
     'mc_stop_loss_eval', 'mc_options_pricing',
     'whale_detection_proxy', 'pump_dump_proxy', 'market_regime_proxy', 'scientific_ensemble',
     'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'mvrv_proxy', 'adx_trend_strength',
-    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy'
+    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy', 'tema_crossover'
 ]
 
 # Global MC engine for reuse
@@ -235,6 +260,7 @@ def get_signals(df, mode_config, is_backtest=False):
             df['macd_hist'] = m_hist.to('cpu').numpy()
             df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
             df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
+            df['tema_20'] = torch_tema(close_t, 20).to('cpu').numpy()
         else:
             ema_f = ta.ema(df['close'], length=8)
             df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
@@ -249,6 +275,8 @@ def get_signals(df, mode_config, is_backtest=False):
             df['rsi'] = rsi.fillna(50) if rsi is not None else 50
             adx_df = ta.adx(df['high'], df['low'], df['close'])
             df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
+            tema_20 = ta.tema(df['close'], length=20)
+            df['tema_20'] = tema_20.fillna(df['close']) if tema_20 is not None else df['close']
 
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
@@ -348,6 +376,8 @@ def get_signals(df, mode_config, is_backtest=False):
         df = strategy_halving_cycle(df, mode_config)
     elif strategy == 'listing_surge_proxy':
         df = strategy_listing_surge(df, mode_config)
+    elif strategy == 'tema_crossover':
+        df = strategy_tema_crossover(df, mode_config)
     else:
         df = strategy_double_ema_macd_rsi(df, mode_config)
 
@@ -1482,6 +1512,45 @@ def strategy_listing_surge(df, config):
     df['sell_candidate'] = df['close'] < df['close'].shift(3) # Exit fast after surge
 
     return apply_confirmation(df, 1)
+
+def strategy_tema_crossover(df, config):
+    """
+    Triple Exponential Moving Average (TEMA) Crossover strategy.
+
+    Buy signal when price crosses above the TEMA.
+    Sell signal when price crosses below the TEMA.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration (tema_length).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
+    length = config.get('tema_length', 20)
+    device = config.get('device', torch.device('cpu'))
+
+    # Check if tema_20 (default) was already calculated, otherwise calculate custom length
+    col_name = f'tema_{length}_strat'
+    if length == 20 and 'tema_20' in df.columns:
+        df[col_name] = df['tema_20']
+    else:
+        if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
+            close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+            df[col_name] = torch_tema(close_t, length).to('cpu').numpy()
+        else:
+            tema_series = ta.tema(df['close'], length=length)
+            df[col_name] = tema_series.fillna(df['close']) if tema_series is not None else df['close']
+
+    df['buy_candidate'] = (df['close'] > df[col_name]) & (df['close'].shift(1) <= df[col_name].shift(1))
+    df['sell_candidate'] = (df['close'] < df[col_name]) & (df['close'].shift(1) >= df[col_name].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
 
 # --- LEGACY / ORIGINAL ---
 
