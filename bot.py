@@ -86,14 +86,16 @@ status_pause_until = 0
 bot_state = {}
 bot_lock = threading.Lock()
 
-def format_price(price):
+def format_price(price, precision=None):
     """
-    Formats a numeric price into a string with 7 decimal places.
+    Formats a numeric price into a string with adaptive precision.
 
     Parameters
     ----------
     price : float or int or None
         The price value to format.
+    precision : int, optional
+        The number of decimal places to use. If None, it uses up to 10.
 
     Returns
     -------
@@ -102,8 +104,45 @@ def format_price(price):
     """
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
-    if price == 0: return "0.0000000"
-    return f"{price:.7f}"
+    if price == 0: return "0"
+
+    if precision is None:
+        # For very small prices, use scientific notation if it's smaller than 0.000001
+        if abs(price) < 0.000001:
+            formatted = f"{price:.10f}".rstrip('0').rstrip('.')
+            if len(formatted.split('.')[-1]) > 8: # If still very small and long
+                 return f"{price:.4e}"
+            return formatted
+
+        # Default: up to 10 decimal places, then strip zeros
+        return f"{price:.10f}".rstrip('0').rstrip('.')
+    else:
+        return f"{price:.{precision}f}".rstrip('0').rstrip('.')
+
+def format_amt(amt, precision=None):
+    """
+    Formats a numeric amount into a string with adaptive precision.
+
+    Parameters
+    ----------
+    amt : float or int or None
+        The amount value to format.
+    precision : int, optional
+        The number of decimal places to use.
+
+    Returns
+    -------
+    str
+        The formatted amount string, or "-" if amt is None.
+    """
+    if amt is None: return "-"
+    if not isinstance(amt, (int, float)): return str(amt)
+    if amt == 0: return "0"
+
+    if precision is None:
+        return f"{amt:.10f}".rstrip('0').rstrip('.')
+    else:
+        return f"{amt:.{precision}f}".rstrip('0').rstrip('.')
 
 class DashboardHandler(logging.Handler):
     """
@@ -422,6 +461,39 @@ def make_dashboard(global_mode, config):
          last_marquee_update = now_ts
 
     with bot_lock:
+        # Dynamically calculate max widths for specific columns
+        all_pairs = sorted([s for s in bot_state.keys() if not s.startswith("_")])
+
+        max_pair_w = max([len(s) for s in all_pairs] + [len("Pair")])
+        max_tendency_w = max([len(bot_state[s].get('tendency', 'N/A')) for s in all_pairs] + [len("Tendency")])
+
+        last_order_lens = []
+        for s in all_pairs:
+            lo = bot_state[s].get('last_action', 'Waiting')
+            if lo == "WAITING": lo = "Waiting"
+            last_order_lens.append(len(lo))
+        max_last_order_w = max(last_order_lens + [len("Last Order")])
+
+        signal_lens = []
+        for s in all_pairs:
+            data = bot_state[s]
+            buy_count = data.get('consecutive_buys', 0)
+            sell_count = data.get('consecutive_sells', 0)
+            if buy_count > 0: sig = f"{buy_count} Buy"
+            elif sell_count > 0: sig = f"{sell_count} Sell"
+            else: sig = "Waiting"
+            signal_lens.append(len(sig))
+        max_signal_w = max(signal_lens + [len("Signal")])
+
+        max_aggr_w = max([len(str(bot_state[s].get('aggr', 'N/A'))) for s in all_pairs] + [len("Aggress")])
+
+        max_strat_w = 0
+        for s in all_pairs:
+            strats = bot_state[s].get('strategies', [bot_state[s].get('strategy', 'N/A')])
+            for st in strats:
+                max_strat_w = max(max_strat_w, len(str(st)) if st else 0)
+        max_strat_w = max(max_strat_w, len("Strategy"))
+
         # 1. Logs Panel
         log_height = 8
         log_content = Text()
@@ -453,28 +525,28 @@ def make_dashboard(global_mode, config):
         # 2. Pairs Panel
         table = Table(expand=True, box=None, padding=(0, 1))
         if expert_mode:
-            table.add_column("Pair", style="cyan", no_wrap=True, width=12)
+            table.add_column("Pair", style="cyan", no_wrap=True, width=max_pair_w)
             table.add_column("EMA F/S", style="green", no_wrap=True, width=18)
             table.add_column("MACD", style="blue", no_wrap=True, width=10)
             table.add_column("RSI", style="yellow", no_wrap=True, width=7)
-            table.add_column("Vol/ADX", style="dim white", no_wrap=True, width=12)
+            table.add_column("Vol/ADX", style="dim white", no_wrap=True, width=15)
             table.add_column("Flags", style="bold white", no_wrap=True, width=8)
             table.add_column("Scr", style="bold white", no_wrap=True, width=5)
             table.add_column("B.Prof", style="bold green", no_wrap=True, width=8)
-            table.add_column("Aggress", style="white", no_wrap=True, width=10)
-            table.add_column("Strategy", style="bold cyan", no_wrap=True, width=26)
+            table.add_column("Aggress", style="white", no_wrap=True, width=max_aggr_w)
+            table.add_column("Strategy", style="bold cyan", no_wrap=True, width=max_strat_w)
         else:
-            table.add_column("Pair", style="cyan", no_wrap=True, width=12)
+            table.add_column("Pair", style="cyan", no_wrap=True, width=max_pair_w)
             table.add_column("Price", style="magenta", no_wrap=True, width=10)
             table.add_column("Amt", style="cyan", no_wrap=True, width=12)
             table.add_column("Entry", style="magenta", no_wrap=True, width=10)
             table.add_column("Fee", style="red", no_wrap=True, width=10)
             table.add_column("B.Prof", style="bold green", no_wrap=True, width=8)
-            table.add_column("Tendency", style="bold white", no_wrap=True, width=10)
-            table.add_column("Last Order", style="bold", no_wrap=True, width=10)
-            table.add_column("Signal", style="bold", no_wrap=True, width=10)
-            table.add_column("Aggress", style="white", no_wrap=True, width=10)
-            table.add_column("Strategy", style="bold cyan", no_wrap=True, width=26)
+            table.add_column("Tendency", style="bold white", no_wrap=True, width=max_tendency_w)
+            table.add_column("Last Order", style="bold", no_wrap=True, width=max_last_order_w)
+            table.add_column("Signal", style="bold", no_wrap=True, width=max_signal_w)
+            table.add_column("Aggress", style="white", no_wrap=True, width=max_aggr_w)
+            table.add_column("Strategy", style="bold cyan", no_wrap=True, width=max_strat_w)
 
         sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
         # Calculate exactly available height: Header(3) + Logs(10) + Status(3) + Panel Border(2) = 18
@@ -523,9 +595,9 @@ def make_dashboard(global_mode, config):
             fee_str = "-"
             if has_position:
                  p = data['position']
-                 amt_str = f"{p['amount']:.8f}"
-                 entry_str = format_price(p['entry_price'])
-                 fee_str = f"{p.get('entry_fee', 0):.7f}"
+                 amt_str = format_amt(p['amount'], precision=data.get('amount_precision'))
+                 entry_str = format_price(p['entry_price'], precision=data.get('price_precision'))
+                 fee_str = format_price(p.get('entry_fee', 0), precision=data.get('price_precision'))
 
             tendency = data.get('tendency', 'N/A')
             tend_style = "bold green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "bold yellow" if tendency == "Range" else "white"
@@ -539,10 +611,10 @@ def make_dashboard(global_mode, config):
 
                  row_vals = [
                       symbol,
-                      f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
+                      f"{format_price(data.get('ema_f', 0), precision=data.get('price_precision'))}/{format_price(data.get('ema_s', 0), precision=data.get('price_precision'))}",
                       f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0):.4f}",
                       f"{data.get('rsi', 0):.2f}",
-                      f"{data.get('volatility', 0):.4f}/{data.get('adx', 0):.1f}",
+                      f"{data.get('volatility', 0):.6f}/{data.get('adx', 0):.2f}",
                       f"[{'bold cyan' if 'WHL' in flags_str else 'dim white'}]{flags_str}[/]",
                       f"{data.get('score', 0)}",
                       f"{data.get('expected_profit', 0):.5f}" if has_position else '0.00000',
@@ -552,7 +624,7 @@ def make_dashboard(global_mode, config):
             else:
                  row_vals = [
                       symbol,
-                      format_price(data.get('price', 0)),
+                      format_price(data.get('price', 0), precision=data.get('price_precision')),
                       amt_str, entry_str, fee_str,
                       f"{data.get('expected_profit', 0):.5f}" if has_position else '0.00000',
                       f"[{tend_style}]{tendency}[/]",
@@ -791,7 +863,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     active_benchmarks = {} # symbol -> future
 
     time.sleep(5)
-    exchange.load_markets()
+    markets = exchange.load_markets()
 
     # Use a persistent ProcessPoolExecutor for re-benchmarking
     with concurrent.futures.ProcessPoolExecutor() as bench_executor:
@@ -891,6 +963,13 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
                             with bot_lock:
                                 data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
+                                # Inject precision from markets
+                                if symbol in markets:
+                                     m = markets[symbol]
+                                     if 'precision' in m:
+                                          data['price_precision'] = m['precision'].get('price')
+                                          data['amount_precision'] = m['precision'].get('amount')
+
                                 bot_state[symbol].update(data)
                                 bot_state[symbol]['candles_since_last_signal'] = candles_since
 
@@ -1546,7 +1625,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             if order:
                 fee = order.get('calculated_fee', 0)
                 total_paid = (amount * current_price) + fee
-                logging.info(f"[{symbol}] Executing buy of amount {amount:.8f} at {current_price:.7f}, final price paid: {total_paid:.7f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                logging.info(f"[{symbol}] Executing buy of amount {format_amt(amount)} at {format_price(current_price)}, final price paid: {format_price(total_paid)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
                 data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
                 return True
             else:
@@ -1615,7 +1694,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                 fee = order.get('calculated_fee', 0)
                 amount = position['amount']
                 total_received = (amount * data['price']) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {amount:.8f} at {data['price']:.7f}, final price received: {total_received:.7f} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                logging.info(f"[{symbol}] Executing sell of amount {format_amt(amount)} at {format_price(data['price'])}, final price received: {format_price(total_received)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
                 profit = total_received - position.get('entry_total_base', 0)
                 data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
                 return True
@@ -1750,8 +1829,56 @@ def sync_live_positions(exchange, data_manager, config):
         except: pass
 
         if curr_price > 0:
-             # logging.info(f"[{symbol}] Auto-populating position from wallet ({amount:.6f} units).")
-             data_manager.add_position(symbol, curr_price, amount, 0, {"info": "auto_populated"}, time.time(), total_base=amount*curr_price)
+             # Attempt to fetch real entry price and fee from trade history
+             entry_price = curr_price
+             entry_fee = 0
+             entry_total_base = amount * curr_price
+
+             try:
+                  my_trades = exchange.fetch_my_trades(symbol, limit=50)
+                  if my_trades:
+                       # Filter buy trades
+                       buys = [t for t in my_trades if t['side'] == 'buy']
+                       if buys:
+                            # Sort by timestamp descending
+                            buys.sort(key=lambda x: x['timestamp'], reverse=True)
+
+                            # We take the most recent buy(s) that could have formed this position
+                            # For simplicity, we take the last one's price and fee rate
+                            last_buy = buys[0]
+                            entry_price = last_buy['price']
+
+                            # Calculate total fee if possible
+                            total_fee = 0
+                            accumulated_amount = 0
+                            for b in buys:
+                                 if accumulated_amount >= amount * 0.99: # 1% tolerance
+                                      break
+
+                                 trade_amt = b['amount']
+                                 trade_price = b['price']
+
+                                 if 'fee' in b and b['fee']:
+                                      fee_cost = b['fee'].get('cost', 0)
+                                      fee_currency = b['fee'].get('currency')
+                                      _, quote = symbol.split('/')
+
+                                      if fee_currency and fee_currency != quote:
+                                           try:
+                                                fticker = exchange.fetch_ticker(f"{fee_currency}/{quote}")
+                                                if fticker: fee_cost *= fticker['last']
+                                           except: pass
+                                      total_fee += fee_cost
+
+                                 accumulated_amount += trade_amt
+
+                            entry_fee = total_fee
+                            entry_total_base = (amount * entry_price) + entry_fee
+                            # logging.info(f"[{symbol}] Recovered real entry price {entry_price} and fees {entry_fee} from trade history.")
+             except Exception as e:
+                  logging.warning(f"[{symbol}] Failed to recover trade history: {e}")
+
+             data_manager.add_position(symbol, entry_price, amount, entry_fee, {"info": "auto_populated"}, time.time(), total_base=entry_total_base)
         else:
              logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. Please manage manually.")
 
@@ -1824,9 +1951,9 @@ def show_balances(exchange):
 
         table.add_row(
             asset,
-            f"{free:.8f}",
-            f"{used:.8f}",
-            f"{total:.8f}",
+            format_amt(free),
+            format_amt(used),
+            format_amt(total),
             val_str
         )
 
