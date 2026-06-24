@@ -315,7 +315,7 @@ def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 80000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 120000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -323,7 +323,7 @@ def get_optimal_timeframe(exchange, symbol, config):
             spread = ticker['ask'] - ticker['bid']
             spread_pct = (spread / ticker['bid']) * 100
         spr_low = thresholds.get('spread_pct', {}).get('low', 0.001)
-        spr_high = thresholds.get('spread_pct', {}).get('high', 0.02)
+        spr_high = thresholds.get('spread_pct', {}).get('high', 0.04)
 
         # 3. Volatility
         volatility = 0.05
