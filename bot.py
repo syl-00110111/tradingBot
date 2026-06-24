@@ -1403,8 +1403,8 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     elif last_candle_ts != candle_ts:
         # Buy confirmation: ALL techniques must signal BUY
         buy_confirmed = all(res['buy_signal'] for res in tech_results)
-        # Sell confirmation: ONLY primary technique (as per clarification)
-        sell_confirmed = latest_row['sell_signal']
+        # Sell confirmation: ALL techniques must signal SELL
+        sell_confirmed = all(res['sell_signal'] for res in tech_results)
 
         if buy_confirmed:
             consecutive_buys += 1
@@ -1421,7 +1421,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     else:
         # If it's the same candle, keep existing counts unless signal lost
         buy_confirmed = all(res['buy_signal'] for res in tech_results)
-        sell_confirmed = latest_row['sell_signal']
+        sell_confirmed = all(res['sell_signal'] for res in tech_results)
 
         if not buy_confirmed and not sell_confirmed:
             consecutive_buys = 0
