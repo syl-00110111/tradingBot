@@ -460,7 +460,7 @@ def get_signals(df, mode_config, is_scan=False):
         df = strategy_ema_rsi_volume(df, mode_config)
     elif strategy == 'macd_bollinger_bands':
         df = strategy_macd_bollinger(df, mode_config)
-    elif strategy.startswith('mc_'):
+    elif strategy and strategy.startswith('mc_'):
         df = handle_mc_strategies(df, strategy, mode_config, is_scan)
     elif strategy == 'whale_detection_proxy':
         df = strategy_whale_detection(df, mode_config)
