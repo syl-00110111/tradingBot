@@ -26,6 +26,7 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 import torch
+import logging
 from monte_carlo import MonteCarloEngine
 
 @torch.jit.script
