@@ -74,6 +74,9 @@ class ExchangeInterface:
     Developers adding new exchanges should inherit from this class and
     implement all abstract methods.
     """
+    def __init__(self):
+        self.markets = {}
+
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
     def watch_ohlcv(self, symbol, timeframe): raise NotImplementedError
     def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
@@ -81,6 +84,7 @@ class ExchangeInterface:
     def fetch_ticker(self, symbol): raise NotImplementedError
     def fetch_trades(self, symbol, limit=100): raise NotImplementedError
     def fetch_trading_fee(self, symbol): raise NotImplementedError
+    def amount_to_precision(self, symbol, amount): raise NotImplementedError
 
 class CCXTExchange(ExchangeInterface):
     """
@@ -96,6 +100,7 @@ class CCXTExchange(ExchangeInterface):
         Exchange API secret.
     """
     def __init__(self, exchange_id, api_key, api_secret, options=None):
+        super().__init__()
         if not hasattr(ccxt, exchange_id):
             raise ValueError(f"Exchange '{exchange_id}' is not supported by CCXT.")
 
@@ -113,7 +118,9 @@ class CCXTExchange(ExchangeInterface):
         self.exchange_id = exchange_id
 
     def load_markets(self):
-        try: return self.exchange.load_markets()
+        try:
+            self.markets = self.exchange.load_markets()
+            return self.markets
         except Exception as e: logging.error(f"Failed to load markets for {self.exchange_id}: {e}"); return {}
 
     def watch_ohlcv(self, symbol, timeframe):
@@ -197,6 +204,9 @@ class CCXTExchange(ExchangeInterface):
             logging.warning(f"Error fetching trading fee for {symbol} on {self.exchange_id}: {e}. Falling back to 0.1%")
             return 0.001
 
+    def amount_to_precision(self, symbol, amount):
+        return self.exchange.amount_to_precision(symbol, amount)
+
     def create_order(self, symbol, side, amount, price=None):
         try:
             if not self.exchange.markets: self.exchange.load_markets()
@@ -259,11 +269,11 @@ class MockExchange(ExchangeInterface):
         The type of exchange to simulate ('binance', 'kraken', etc.).
     """
     def __init__(self, api_key=None, api_secret=None, exchange_id='binance', options=None):
+        super().__init__()
         self.balance = {'EUR': 1000.0, 'USDC': 1000.0, 'USDT': 1000.0}
         self.ohlcv_data = {}
         self.real_exchange = None
         self.fee_rate = 0.001
-        self.markets = {}
         self.exchange_id = exchange_id
         self._balance_initialized = False
         if api_key and api_secret and api_key != "YOUR_API_KEY":
@@ -298,8 +308,9 @@ class MockExchange(ExchangeInterface):
 
     def load_markets(self):
         if self.real_exchange:
-            return self.real_exchange.load_markets()
-        return {}
+            self.markets = self.real_exchange.load_markets()
+            return self.markets
+        return self.markets
 
     def watch_ohlcv(self, symbol, timeframe):
         if self.real_exchange:
@@ -356,6 +367,11 @@ class MockExchange(ExchangeInterface):
         if self.real_exchange:
             return self.real_exchange.fetch_trading_fee(symbol)
         return self.fee_rate
+
+    def amount_to_precision(self, symbol, amount):
+        if self.real_exchange:
+            return self.real_exchange.amount_to_precision(symbol, amount)
+        return str(amount) # No precision logic for pure mock yet
 
     def create_order(self, symbol, side, amount, price=None):
         self._init_balance()

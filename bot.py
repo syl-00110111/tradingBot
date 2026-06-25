@@ -40,6 +40,7 @@ import matplotlib.pyplot as plt
 import plotext as plt_ascii
 import torch
 import re
+import math
 from datetime import datetime, timedelta, timezone
 
 from rich.live import Live
@@ -209,9 +210,9 @@ class DashboardHandler(logging.Handler):
                         except: pass
 
             # Transform raw CCXT errors into the requested grouped format (Point 2)
-            # Raw example: "Error during buy order on MEGA/USDC via binance: binance {"code":-1013,"msg":"Filter failure: NOTIONAL"}"
+            # Raw example: "Error during buy order on MEGA/USDC via binance {"code":-1013,"msg":"Filter failure: NOTIONAL"}"
             if "Error during buy order" in msg:
-                 err_match = re.search(r'Error during buy order on ([A-Z0-9/]+) via (\w+): \w+ (\{.*\})', msg)
+                 err_match = re.search(r'Error during buy order on ([A-Z0-9/]+) via (\w+) (\{.*\})', msg)
                  if err_match:
                       symbol, exchange, err_json = err_match.groups()
                       try:
@@ -983,31 +984,21 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     pairs_dict = config.get('pairs', {})
     pair_keys = priority_order if priority_order else list(pairs_dict.keys())
 
-    last_assets_update = 0
-    sim_init_done = False
     active_scans = {} # symbol -> future
 
     time.sleep(5)
     markets = exchange.load_markets()
 
+    # Initial sync happens exactly once at the start (Point 1)
+    if mode == 'simulation':
+        initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
+    else:
+        sync_live_positions(exchange, data_manager, config)
+
     # Use a persistent ProcessPoolExecutor for re-scaning
     with concurrent.futures.ProcessPoolExecutor() as bench_executor:
       while not shutdown_event.is_set():
         now_ts = time.time()
-        # Periodically sync positions to catch changes from web interface (Point 2)
-        if now_ts - last_assets_update > 300: # Every 5 minutes
-             sync_live_positions(exchange, data_manager, config)
-             last_assets_update = now_ts
-
-        if mode == 'simulation' and not sim_init_done:
-            initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
-            sim_init_done = True
-
-        if mode == 'live' and not sim_init_done:
-            # First time load for live
-            sync_live_positions(exchange, data_manager, config)
-            sim_init_done = True
-
         try:
             # 1. Check completed re-scans
             completed_symbols = []
@@ -1744,6 +1735,53 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         except: pass
 
         cost = amount * current_price
+
+        # Check Notional Limit (Point 3)
+        try:
+            market = exchange.markets.get(symbol) if hasattr(exchange, 'markets') else None
+            if not market:
+                # Fallback if markets not loaded
+                markets = exchange.load_markets()
+                market = markets.get(symbol)
+
+            if market and 'limits' in market and 'cost' in market['limits'] and market['limits']['cost']['min']:
+                min_notional = float(market['limits']['cost']['min'])
+                if cost < min_notional:
+                    # Attempt to increase trade size to minimum allowed
+                    new_amount = min_notional / current_price
+
+                    # Round up to the nearest valid amount to avoid being still below min notional
+                    if 'precision' in market and 'amount' in market['precision'] and market['precision']['amount']:
+                        prec = market['precision']['amount']
+                        # Check if precision is decimal places or step size
+                        if isinstance(prec, float) or (isinstance(prec, str) and '.' in prec):
+                             step = float(prec) if isinstance(prec, float) else float(prec)
+                             new_amount = math.ceil(new_amount / step) * step
+                        else:
+                             # Assume it's decimal places
+                             new_amount = math.ceil(new_amount * (10**int(prec))) / (10**int(prec))
+
+                    # Use exchange precision if available
+                    if hasattr(exchange, 'amount_to_precision'):
+                        new_amount = float(exchange.amount_to_precision(symbol, new_amount))
+
+                    new_cost = new_amount * current_price
+                    if new_cost < min_notional:
+                         # Still below min notional? Add one more precision step
+                         if 'precision' in market and 'amount' in market['precision'] and market['precision']['amount']:
+                              prec = market['precision']['amount']
+                              step = float(prec) if isinstance(prec, float) else (10**-int(prec))
+                              new_amount += step
+                              if hasattr(exchange, 'amount_to_precision'):
+                                   new_amount = float(exchange.amount_to_precision(symbol, new_amount))
+                              new_cost = new_amount * current_price
+
+                    logging.info(f"[{symbol}] Cost {cost:.2f} is below min notional {min_notional:.2f}. Adjusting amount from {amount:.6f} to {new_amount:.6f} (New cost: {new_cost:.2f})")
+                    amount = new_amount
+                    cost = new_cost
+        except Exception as ne:
+            logging.warning(f"[{symbol}] Could not verify notional limit: {ne}")
+
         base_asset = base_currency
         free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance.get(base_asset), dict) else balance.get(base_asset, 0)
 
@@ -1755,11 +1793,11 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         try:
             order = exchange.create_order(symbol, 'buy', amount)
             if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
-                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')}: {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Insufficient balance"}')
+                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Insufficient balance"}')
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 return False
             if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
-                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')}: {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Filter failure: NOTIONAL"}')
+                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Filter failure: NOTIONAL"}')
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 return False
             if order:
@@ -1771,7 +1809,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             else:
                 logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}. Suspending pair.")
         except Exception as e:
-            logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')}: {getattr(exchange, 'exchange_id', 'exchange')} {e}")
+            logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')} {e}")
             pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
             return False
     else:
