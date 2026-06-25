@@ -74,7 +74,6 @@ expert_mode = False
 show_help = False
 marquee_enabled = False
 shutdown_event = threading.Event()
-suspended_pairs = set()
 
 # Marquee Timing Control
 last_marquee_update = 0
@@ -85,6 +84,8 @@ status_pause_until = 0
 # State shared between threads
 bot_state = {}
 bot_lock = threading.Lock()
+# symbol -> {until: float, reason: str, amount_required: float}
+pair_suspensions = {}
 
 def precision_to_int(p):
     """Converts various precision formats (int or float step) to decimal places."""
@@ -174,10 +175,81 @@ class DashboardHandler(logging.Handler):
 
     def emit(self, record):
         msg = self.format(record)
+        # Avoid displaying HTML error pages for HTTP 500
+        if "HTTP 500" in msg and "<html" in msg.upper():
+            msg = msg.split("<html")[0].strip()
+
         timestamp = datetime.now().strftime("%H:%M:%S")
         expiry = datetime.now() + timedelta(seconds=self.duration)
 
         with bot_lock:
+            # Group HTTP 500 errors
+            if "HTTP 500" in msg:
+                error_type = "HTTP 500 Error Code"
+                for log in all_logs:
+                    if error_type in log['msg']:
+                        try:
+                            parts = log['msg'].split(']')
+                            times_str = parts[0][1:]
+                            rest = parts[1]
+                            if timestamp not in times_str: times_str += f",{timestamp}"
+                            import re
+                            current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', rest)
+                            new_symbol = re.search(r'([A-Z0-9]+/[A-Z0-9]+)', msg)
+                            if new_symbol:
+                                sym = new_symbol.group(1)
+                                if sym not in current_symbols: current_symbols.append(sym)
+                            exchange_name = "exchange"
+                            ex_match = re.search(r'on (\w+):', rest)
+                            if ex_match: exchange_name = ex_match.group(1)
+                            symbols_str = ",".join(current_symbols)
+                            log['msg'] = f"[{times_str}] Error fetching OHLCV for {symbols_str} on {exchange_name}: {error_type}"
+                            log['expiry'] = expiry
+                            return
+                        except: pass
+
+            # Transform raw CCXT errors into the requested grouped format (Point 2)
+            # Raw example: "Error during buy order on MEGA/USDC via binance: binance {"code":-1013,"msg":"Filter failure: NOTIONAL"}"
+            if "Error during buy order" in msg:
+                 import re
+                 err_match = re.search(r'Error during buy order on ([A-Z0-9/]+) via (\w+): \w+ (\{.*\})', msg)
+                 if err_match:
+                      symbol, exchange, err_json = err_match.groups()
+                      try:
+                           err_data = json.loads(err_json)
+                           code = err_data.get('code', 'N/A')
+                           m_msg = err_data.get('msg', 'N/A')
+                           # Use temporary format that will be caught by the grouper below
+                           msg = f"[{symbol}] Buy execution failed: Exchange rejected order ({code}, {m_msg}). Suspending pair."
+                      except: pass
+
+            # Group Buy execution failed errors by error code
+            if "Buy execution failed" in msg:
+                 import re
+                 code_match = re.search(r'\((\-?\d+)', msg)
+                 if code_match:
+                      code = code_match.group(1)
+                      for log in all_logs:
+                           if "Buy execution failed" in log['msg'] and f"({code}" in log['msg']:
+                                try:
+                                     parts = log['msg'].split(']')
+                                     times_str = parts[0][1:]
+                                     rest = parts[1]
+                                     if timestamp not in times_str: times_str += f",{timestamp}"
+                                     current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', log['msg'])
+                                     new_symbol = re.search(r'\[([A-Z0-9/]+)\]', msg)
+                                     if new_symbol:
+                                          sym = new_symbol.group(1)
+                                          if sym not in current_symbols: current_symbols.append(sym)
+
+                                     symbols_str = ",".join(current_symbols)
+                                     # Extract original error details
+                                     err_details = re.search(r'\(.*\)', log['msg']).group(0)
+                                     log['msg'] = f"[{times_str}] [{symbols_str}] Buy execution failed: Exchange rejected order {err_details}. Suspending pair."
+                                     log['expiry'] = expiry
+                                     return
+                                except: pass
+
             # Connection pool log filtering (generic)
             pool_msg = "Connection pool is full, discarding connection"
             if pool_msg in msg:
@@ -389,7 +461,8 @@ def render_ascii_chart(symbol, config):
         A Rich Text object containing the rendered ASCII chart.
     """
     global chart_cache
-    timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+    # Force 1m timeframe for chart as well (Point 3)
+    timeframe = '1m'
     cache_key = f"{symbol}_{timeframe}"
 
     with ohlcv_cache_lock:
@@ -407,21 +480,32 @@ def render_ascii_chart(symbol, config):
 
     plt_ascii.clf()
     plt_ascii.theme('dark')
-    plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
 
-    # Use numeric indices for x-axis to avoid parsing crashes (ValueError: Date Form should be...)
+    # Use subplots to show volume under k-lines (Point 4)
+    plt_ascii.subplots(2, 1)
+
+    # Subplot 1: Candlestick
+    plt_ascii.subplot(1, 1)
+    plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
     df_plot.reset_index(drop=True, inplace=True)
-
     plt_ascii.candlestick(indices, df_plot)
 
-    # Set xticks manually for labels
+    # Set xticks manually for labels with hours (Point 4)
     if len(df) > 5:
          step = len(df) // 5
          tick_indices = list(range(0, len(df), step))
          tick_labels = [df.iloc[i]['timestamp'].strftime("%H:%M") for i in tick_indices]
+         plt_ascii.xticks(tick_indices, tick_labels)
+
+    # Subplot 2: Volume
+    plt_ascii.subplot(2, 1)
+    volumes = df['volume'].tolist()
+    plt_ascii.bar(indices, volumes, color='blue', label='Volume')
+    plt_ascii.title("Volume")
+    if len(df) > 5:
          plt_ascii.xticks(tick_indices, tick_labels)
 
     # Get plot size from console
@@ -787,7 +871,7 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
     Background thread to watch OHLCV updates and update the local cache.
 
     Initializes the cache with historical data and then listens for real-time
-    candle updates from the exchange.
+    candle updates from the exchange. Handles gap filling between fetch and watch.
 
     Parameters
     ----------
@@ -802,7 +886,7 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
     """
     # logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
     try:
-        # Pre-fill cache with historical data for indicator stability
+        # 1. Fetch initial historical data
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
         if ohlcv:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -811,16 +895,33 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
             with ohlcv_cache_lock:
                 ohlcv_cache[f"{symbol}_{timeframe}"] = df
 
+        # 2. Transition to watch (Websockets preference)
         for candle in exchange.watch_ohlcv(symbol, timeframe):
             if shutdown_event.is_set(): break
-            # Update cache
+
             with ohlcv_cache_lock:
                 cache_key = f"{symbol}_{timeframe}"
                 if cache_key in ohlcv_cache:
                     df = ohlcv_cache[cache_key]
-                    # candle is [timestamp, open, high, low, close, volume]
                     new_row = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     new_ts = pd.to_datetime(new_row['timestamp'], unit='ms').iloc[0]
+
+                    # Check for gaps (if new candle is more than 1 timeframe period away from last)
+                    if not df.empty:
+                        last_ts = df.index[-1]
+                        # Assuming 1m timeframe for now as per Point 3
+                        period_delta = timedelta(minutes=1)
+                        if new_ts > last_ts + period_delta:
+                            # GAP DETECTED: Perform a fetch to fill the void (Point 1)
+                            # logging.info(f"[{symbol}] Gap detected in OHLCV stream. Fetching missing data.")
+                            since_ms = int(last_ts.timestamp() * 1000) + 1
+                            missing_ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms)
+                            if missing_ohlcv:
+                                m_df = pd.DataFrame(missing_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                                m_df['timestamp'] = pd.to_datetime(m_df['timestamp'], unit='ms')
+                                m_df.set_index('timestamp', drop=False, inplace=True)
+                                df = pd.concat([df, m_df])
+
                     new_row['timestamp'] = new_ts
                     new_row.set_index('timestamp', drop=False, inplace=True)
 
@@ -829,9 +930,10 @@ def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
                         df.loc[new_ts] = new_row.iloc[0]
                     else:
                         df = pd.concat([df, new_row]).tail(1000)
-                        # Ensure chronological order and remove potential duplicates
-                        df = df[~df.index.duplicated(keep='last')].sort_index()
-                        ohlcv_cache[cache_key] = df
+
+                    # Ensure chronological order and remove potential duplicates
+                    df = df[~df.index.duplicated(keep='last')].sort_index()
+                    ohlcv_cache[cache_key] = df
                 else:
                     df = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -845,7 +947,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     Main background thread for the trading loop.
 
     Starts OHLCV watchers, periodically analyzes all pairs, handles
-    re-benchmarking triggers, and executes buy/sell orders based on signals.
+    re-scaning triggers, and executes buy/sell orders based on signals.
 
     Parameters
     ----------
@@ -862,10 +964,22 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     mode : str
         Bot operation mode ('live', 'simulation', etc.).
     """
+    # Initial Optimal Timeframe Discovery (Point 3 - Background)
+    for symbol in config.get('pairs', {}):
+        try:
+            tf, score, _ = get_optimal_timeframe(exchange, symbol, config)
+            config['pairs'][symbol]['optimal_tf'] = tf
+            config['pairs'][symbol]['optimal_tf_score'] = score
+            config['pairs'][symbol]['timeframe'] = '1m'
+        except:
+            config['pairs'][symbol]['optimal_tf'] = '1m'
+            config['pairs'][symbol]['optimal_tf_score'] = 0
+            config['pairs'][symbol]['timeframe'] = '1m'
+
     # Start watchers for all pairs
     for symbol in config.get('pairs', {}):
-        timeframe = config['pairs'][symbol].get('timeframe', '1m')
-        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, timeframe, config), daemon=True).start()
+        # Every pair treated at 1m timeframe as per Point 3
+        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, '1m', config), daemon=True).start()
 
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
@@ -873,12 +987,12 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
     last_assets_update = 0
     sim_init_done = False
-    active_benchmarks = {} # symbol -> future
+    active_scans = {} # symbol -> future
 
     time.sleep(5)
     markets = exchange.load_markets()
 
-    # Use a persistent ProcessPoolExecutor for re-benchmarking
+    # Use a persistent ProcessPoolExecutor for re-scaning
     with concurrent.futures.ProcessPoolExecutor() as bench_executor:
       while not shutdown_event.is_set():
         if mode == 'simulation' and not sim_init_done:
@@ -891,9 +1005,9 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             sim_init_done = True
 
         try:
-            # 1. Check completed re-benchmarks
+            # 1. Check completed re-scans
             completed_symbols = []
-            for sym, future in active_benchmarks.items():
+            for sym, future in active_scans.items():
                 if future.done():
                     try:
                         sym_result, patterns = future.result()
@@ -907,20 +1021,20 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                 bot_state[sym]['aggr'] = best['aggr']
                                 bot_state[sym]['strategy'] = best['strategy']
                                 bot_state[sym]['expected_profit'] = best['profit']
-                            # logging.info(f"[{sym}] Re-benchmarked to {best['strategy']} ({best['aggr']})")
+                            # logging.info(f"[{sym}] Re-tested to {best['strategy']} ({best['aggr']})")
 
-                            # Re-evaluate timeframe after re-benchmarking (background)
-                            new_tf, _, _ = get_optimal_timeframe(exchange, sym, config)
-                            if new_tf != config['pairs'][sym].get('timeframe'):
-                                # logging.info(f"[{sym}] Updating timeframe to {new_tf}")
-                                config['pairs'][sym]['timeframe'] = new_tf
+                            # Re-evaluate optimal timeframe after re-scanning (background)
+                            # Every pair stays at 1m timeframe, we only update the score weighting
+                            new_tf, new_score, _ = get_optimal_timeframe(exchange, sym, config)
+                            config['pairs'][sym]['optimal_tf'] = new_tf
+                            config['pairs'][sym]['optimal_tf_score'] = new_score
 
                     except Exception as e:
-                        logging.error(f"Error in background re-benchmark for {sym}: {e}")
+                        logging.error(f"Error in background re-scan for {sym}: {e}")
                     completed_symbols.append(sym)
 
             for sym in completed_symbols:
-                del active_benchmarks[sym]
+                del active_scans[sym]
 
             potential_buys = []
 
@@ -930,7 +1044,32 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                 for future in concurrent.futures.as_completed(future_to_sym):
                     if shutdown_event.is_set(): break
                     symbol = future_to_sym[future]
-                    if symbol in suspended_pairs: continue
+
+                    # Check suspensions
+                    now_ts = time.time()
+                    if symbol in pair_suspensions:
+                        susp = pair_suspensions[symbol]
+                        if now_ts < susp.get('until', 0):
+                            continue
+
+                        # Special check for budget suspension
+                        if susp.get('reason') == 'budget':
+                            # Check USDC availability (1.5x)
+                            try:
+                                balance = exchange.fetch_balances()
+                                base_curr = symbol.split('/')[1]
+                                free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
+                                if free_bal >= susp.get('amount_required', 0) * 1.5:
+                                    logging.info(f"[{symbol}] Budget recovered (1.5x available). Resuming pair.")
+                                    del pair_suspensions[symbol]
+                                else:
+                                    continue
+                            except: continue
+                        else:
+                            # Time-based suspension (e.g. HTTP 500)
+                            logging.info(f"[{symbol}] Suspension expired. Resuming pair.")
+                            del pair_suspensions[symbol]
+
                     try:
                         data = future.result()
                         if data:
@@ -944,9 +1083,9 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             else:
                                 candles_since = 0
 
-                            # 3. Handle re-benchmarking triggers (Asynchronous)
-                            if candles_since >= no_signal_thresh and symbol not in active_benchmarks:
-                                # logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Scheduling background re-benchmark...")
+                            # 3. Handle re-scaning triggers (Asynchronous)
+                            if candles_since >= no_signal_thresh and symbol not in active_scans:
+                                # logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Scheduling background re-scan...")
                                 candles_since = 0
 
                                 # Use cached OHLCV data instead of blocking network call
@@ -963,15 +1102,15 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                     aggrs = [global_aggr] if global_aggr else ['dynamic']
                                     strategies = [global_strat] if global_strat else STRATEGIES
 
-                                    # Submit re-benchmark task to ProcessPoolExecutor
+                                    # Submit re-scan task to ProcessPoolExecutor
                                     # Determine current technique to exclude (rotation rule)
                                     exclude = None
                                     with bot_lock:
                                          if symbol in bot_state:
                                               exclude = (bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
 
-                                    active_benchmarks[symbol] = bench_executor.submit(
-                                        run_discovery_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device, exclude_technique=exclude
+                                    active_scans[symbol] = bench_executor.submit(
+                                        run_optimization_test_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device, exclude_technique=exclude
                                     )
 
                             with bot_lock:
@@ -995,7 +1134,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                  except: pass
 
                                  if pos and not engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate):
-                                      # Profit check failed, reverse sell and trigger immediate re-benchmark (silent)
+                                      # Profit check failed, reverse sell and trigger immediate re-scan (silent)
 
                                       # Flag to ignore sell until signal resets
                                       data_manager.flag_ignore_sell(symbol, value=True)
@@ -1004,8 +1143,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                       data['sell'] = False
                                       data['sell_triggered'] = False
 
-                                      # Trigger re-benchmark
-                                      if symbol not in active_benchmarks:
+                                      # Trigger re-scan
+                                      if symbol not in active_scans:
                                            timeframe = config['pairs'][symbol].get('timeframe', '1m')
                                            cache_key = f"{symbol}_{timeframe}"
                                            df_bench = None
@@ -1013,8 +1152,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                                 if cache_key in ohlcv_cache:
                                                      df_bench = ohlcv_cache[cache_key].copy()
                                            if df_bench is not None and not df_bench.empty:
-                                                active_benchmarks[symbol] = bench_executor.submit(
-                                                     run_discovery_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
+                                                active_scans[symbol] = bench_executor.submit(
+                                                     run_optimization_test_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
                                                      exclude_technique=(bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
                                                 )
                                  elif execute_sell(exchange, data_manager, engine, symbol, data):
@@ -1028,15 +1167,21 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             if data.get('buy') and not data.get('position'):
                                  potential_buys.append((symbol, data))
                     except Exception as e:
-                        logging.error(f"Error analyzing {symbol}: {e}")
+                        err_msg = str(e)
+                        if "500" in err_msg:
+                            logging.error(f"Error analyzing {symbol}: HTTP 500 Error Code")
+                            # Suspend for 21 minutes
+                            pair_suspensions[symbol] = {'until': time.time() + 21 * 60, 'reason': 'http_500'}
+                        else:
+                            logging.error(f"Error analyzing {symbol}: {e}")
 
             if potential_buys and not shutdown_event.is_set():
                 max_open = int(config.get('max_open_positions', 18))
                 current_open = len(data_manager.get_open_positions())
                 slots_available = max_open - current_open
                 if slots_available > 0:
-                     # Prioritize by benchmark profit (casted to float for robust sorting)
-                     potential_buys.sort(key=lambda x: float(x[1].get('expected_profit', 0)), reverse=True)
+                     # Prioritize by signal score
+                     potential_buys.sort(key=lambda x: x[1].get('score', 0), reverse=True)
                      balance = exchange.fetch_balances()
                      for i in range(min(len(potential_buys), slots_available)):
                           if shutdown_event.is_set(): break
@@ -1069,18 +1214,12 @@ def main():
     parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--exchange', help='CCXT Exchange ID to use (e.g., binance, kraken, bitvavo)')
-    parser.add_argument('--mode', choices=['live', 'simulation', 'balance', 'backtest', 'benchmark'], default='simulation', help='Bot mode')
+    parser.add_argument('--mode', choices=['live', 'simulation', 'balance'], default='simulation', help='Bot mode')
     parser.add_argument('--config', help='Path to config file (optional, defaults to config.json or config.default.json)')
-    parser.add_argument('--symbol', help='Target symbol for backtest/benchmark (e.g. BTC/EUR)')
-    parser.add_argument('--every-symbol', action='store_true', help='Run benchmark for all configured pairs')
-
-    strat_help = f"Strategy for backtest. Available: {', '.join(STRATEGIES)}"
-    parser.add_argument('--strategy', help=strat_help)
-    parser.add_argument('--aggr', help='Agressivity for backtest')
-    parser.add_argument('--backtest-positions', type=int, default=1, help='Max simultaneous positions in backtest (1-4)')
+    parser.add_argument('--symbol', help='Target symbol (e.g. BTC/EUR)')
     parser.add_argument('--timeframe', choices=['1m', '3m', '5m', '15m', '30m'], help='Manual timeframe override')
-    parser.add_argument('--since', help='Start date for backtest/benchmark (YYYY-MM-DD HH:MM)')
-    parser.add_argument('--until', help='End date for backtest/benchmark (YYYY-MM-DD HH:MM)')
+    parser.add_argument('--since', help='Start date (YYYY-MM-DD HH:MM)')
+    parser.add_argument('--until', help='End date (YYYY-MM-DD HH:MM)')
 
     args = parser.parse_args()
 
@@ -1127,14 +1266,20 @@ def main():
         config = load_config()
 
     # Load pairs from pairs.txt if available
+    pairs_from_file = []
     if os.path.exists('pairs.txt'):
         with open('pairs.txt', 'r') as f:
-            pairs = [line.strip() for line in f if line.strip()]
-    else:
-        # Final fallbacks or empty list if no pairs.txt
-        pairs = []
+            pairs_from_file = [line.strip() for line in f if line.strip()]
 
-    config['pairs'] = {p: {} for p in pairs}
+    if 'pairs' not in config:
+        config['pairs'] = {}
+
+    for p in pairs_from_file:
+        if p not in config['pairs']:
+            config['pairs'][p] = {}
+
+    # Ensure all configured pairs are in pairs_from_file (optional but good for consistency)
+    pairs = list(config['pairs'].keys())
     base_currencies = sorted(list(set([p.split('/')[1] for p in pairs if '/' in p])))
     config['base_currencies'] = base_currencies
 
@@ -1165,8 +1310,8 @@ def main():
 
         if not gpu_enabled:
             console.print("[bold yellow]Warning: GPU acceleration is disabled or no compatible GPU found.[/]")
-            console.print("[yellow]Computations will run on CPU, which can be significantly slower (minutes to hours) for the first benchmarks.[/]")
-            console.print("[yellow]Please ensure benchmark_cache.json remains intact once finished to avoid re-running slow benchmarks.[/]")
+            console.print("[yellow]Computations will run on CPU, which can be significantly slower (minutes to hours) for the first tests.[/]")
+            console.print("[yellow]Please ensure test_cache.json remains intact once finished to avoid re-running slow tests.[/]")
         else:
             console.print(f"[bold green]GPU Acceleration enabled using device: {device}[/]")
 
@@ -1188,81 +1333,18 @@ def main():
             logging.info(f"Starting bot in LIVE mode on {exchange_id}")
         elif args.mode == 'simulation':
             exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options)
-            logging.info(f"Starting bot in SIMULATION mode ({exchange_id} discovery)")
+            logging.info(f"Starting bot in SIMULATION mode ({exchange_id})")
         elif args.mode == 'balance':
             exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             exchange.load_markets()
             show_balances(exchange)
-            return
-        elif args.mode == 'backtest':
-            if not args.symbol:
-                console.print("[red]Error: --symbol required for backtest[/]")
-                return
-            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
-            run_backtest_mode(exchange, config, args, engine=engine, device=device)
-            return
-        elif args.mode == 'benchmark':
-            if not args.symbol and not args.every_symbol:
-                console.print("[red]Error: --symbol or --every-symbol required for benchmark[/]")
-                return
-            exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
-            # Pass data_manager=None in pure benchmark mode to avoid creating trade history files
-            run_discovery(exchange, config, args, status=status, data_manager=None, pattern_manager=pattern_manager, engine=engine, device=device)
             return
 
         pairs = config.get('pairs', {})
         # Global override for agressivity
         global_agressivity = config.get('force_agressivity_to_all_pairs')
 
-        # Auto-optimization via benchmarking
         if args.mode in ['live', 'simulation']:
-            # Determine optimal timeframe for each pair first
-            status.update("[bold blue]Determining optimal timeframes for all pairs...")
-            try:
-                for symbol in config['pairs']:
-                    if shutdown_event.is_set(): break
-                    if args.timeframe:
-                        tf = args.timeframe
-                        score = "N/A"
-                        reasons = ["Manual Override"]
-                    else:
-                        tf, score, reasons = get_optimal_timeframe(exchange, symbol, config)
-                    config['pairs'][symbol]['timeframe'] = tf
-                    console.print(f"[dim][{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
-            except KeyboardInterrupt:
-                console.print("[bold red]Timeframe discovery interrupted by user.[/]")
-                return
-
-            status.update(f"[bold blue]Scanning for suitable strategies for all pairs...")
-            opt_map = run_discovery(exchange, config, args, status=status, data_manager=data_manager, pattern_manager=pattern_manager, engine=engine, device=device)
-            # Store profits for prioritization
-            pair_priorities = []
-            for sym, techniques in opt_map.items():
-                # techniques is a list of top 1 or 2 patterns
-                if not isinstance(techniques, list):
-                    techniques = [techniques]
-
-                best = techniques[0]
-                if sym in config['pairs']:
-                    config['pairs'][sym]['techniques'] = techniques
-                    config['pairs'][sym]['aggr'] = best['aggr']
-                    config['pairs'][sym]['strategy'] = best['strategy']
-
-                    # Score for prioritization (the predicted profit)
-                    priority_score = best['profit']
-                    config['pairs'][sym]['expected_profit'] = priority_score
-                    pair_priorities.append((sym, priority_score))
-
-                    if best.get('is_cached'):
-                        tech_desc = " + ".join([f"{t['strategy']} ({t['aggr']})" for t in techniques])
-                        console.print(f"[bold green][{sym}][/] Strategies discovered from [cyan]cached results[/]: [cyan]{tech_desc}[/] | Predicted Profit: {format_price(priority_score)} EUR")
-
-                time.sleep(1) # Brief pause after bench
-
-                # Global sort pairs by expected profit for priority execution
-                sorted_pairs = [p[0] for p in sorted(pair_priorities, key=lambda x: x[1], reverse=True)]
-                config['_priority_pairs'] = sorted_pairs
-
             if args.mode == 'simulation' and data_manager:
                 data_manager.clear_history()
 
@@ -1270,26 +1352,19 @@ def main():
             # Check if we already have an open position for this symbol
             pos = data_manager.get_position(symbol)
 
-            # Retrieve optimized settings from config if available (after benchmark)
-            pair_cfg = pairs[symbol]
-            techniques = pair_cfg.get('techniques', [])
-            if not techniques:
-                techniques = [{
-                    'strategy': pair_cfg.get('strategy', 'double_ema_macd_rsi'),
-                    'aggr': pair_cfg.get('aggr', 'normal')
-                }]
-
-            aggr_val = techniques[0].get('aggr', 'normal')
-            strat_val = techniques[0].get('strategy', 'double_ema_macd_rsi')
-            exp_profit = float(pair_cfg.get('expected_profit', 0))
+            pair_cfg = config['pairs'][symbol]
+            techniques_cfg = pair_cfg.get('techniques', [])
+            if not techniques_cfg:
+                # Default: all strategies with all common aggr levels
+                techniques_cfg = [{"strategy": s, "aggr": ["normal", "aggressive", "dynamic"]} for s in STRATEGIES]
 
             bot_state[symbol] = {
-                'aggr': aggr_val,
-                'strategy': strat_val,
-                'strategies': [t['strategy'] for t in techniques],
+                'aggr': techniques_cfg[0].get('aggr', ['normal'])[0] if isinstance(techniques_cfg[0].get('aggr'), list) else techniques_cfg[0].get('aggr', 'normal'),
+                'strategy': techniques_cfg[0].get('strategy', 'N/A'),
+                'strategies': [t.get('strategy') for t in techniques_cfg],
                 'last_action': 'BUY' if pos else 'Waiting',
                 'position': pos,
-                'expected_profit': exp_profit
+                'expected_profit': 0
             }
 
     threading.Thread(target=input_thread_func, daemon=True).start()
@@ -1376,10 +1451,8 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     and applies volatility-based confirmation windows. It also handles re-initialization
     of signal counts on first run by looking at historical data.
     """
-    # Retrieve patterns for matching
-    patterns = pattern_manager.get_patterns(symbol)
-
-    timeframe = pair_config.get('timeframe', '1m')
+    # Force 1m timeframe for analysis
+    timeframe = "1m"
 
     # Try to get from cache first (updated by watch_ohlcv)
     cache_key = f"{symbol}_{timeframe}"
@@ -1399,38 +1472,16 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
             ohlcv_cache[cache_key] = df
 
     # Pre-calculate common indicators for regime detection
-    df = get_signals(df, {"device": device}, is_backtest=False)
+    df = get_signals(df, {"device": device}, is_scan=False)
     latest_row_base = df.iloc[-1]
 
-    # 1. Pattern Matching logic
-    active_pattern = None
-    if patterns:
-        best_sim = 0
-        for p in patterns:
-            p_len = len(p['prices'])
-            if len(df) < p_len: continue
-
-            buffer_window = df.iloc[-p_len:]
-            sim = calculate_similarity(buffer_window, p, device=device)
-            if sim > 0.70 and sim > best_sim: # Lowered threshold to 70% for better responsiveness
-                best_sim = sim
-                active_pattern = p
-
-    # 2. Dynamic Activation & Multi-strategy Evaluation
-    techniques = pair_config.get('techniques', [])
-    if not techniques:
-        techniques = [{
-            'strategy': pair_config.get('strategy', 'double_ema_macd_rsi'),
-            'aggr': pair_config.get('aggr', 'normal')
-        }]
-
-    # If a successful pattern is matched, it replaces the primary strategy
-    if active_pattern:
-        primary_strategy = active_pattern['strategy']
-        primary_aggr = active_pattern['aggr']
-    else:
-        primary_strategy = techniques[0]['strategy']
-        primary_aggr = techniques[0]['aggr']
+    # Dynamic Activation & Multi-strategy Evaluation
+    techniques_cfg = pair_config.get('techniques', [])
+    if not techniques_cfg:
+        # If no configuration, try all aggressiveness profiles for all strategies
+        techniques_cfg = []
+        for strat in STRATEGIES:
+            techniques_cfg.append({"strategy": strat, "aggr": ["normal", "aggressive", "dynamic"]})
 
     # Use Dynamic Risk Engine if engine is available
     if engine:
@@ -1443,22 +1494,52 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         }
     mode_settings['device'] = device
 
-    # Evaluate signals for all techniques
-    tech_results = []
-    # Technique 1 (Primary)
-    ts1 = mode_settings.copy()
-    ts1['strategy'] = primary_strategy
-    df1 = get_signals(df.copy(), ts1, is_backtest=False)
-    tech_results.append(df1.iloc[-1])
+    # Evaluate signals for all techniques and aggressiveness profiles
+    buy_count = 0
+    sell_count = 0
+    total_tendency_score = 0
+    total_score = 0
 
-    # Technique 2 (Secondary, if exists)
-    if len(techniques) > 1:
-        ts2 = mode_settings.copy()
-        ts2['strategy'] = techniques[1]['strategy']
-        df2 = get_signals(df.copy(), ts2, is_backtest=False)
-        tech_results.append(df2.iloc[-1])
+    tf_score = pair_config.get('optimal_tf_score', 0)
+    all_results = []
 
-    latest_row = tech_results[0]
+    for t in techniques_cfg:
+        strategy = t.get('strategy')
+        aggr_list = t.get('aggr', ['normal'])
+        if isinstance(aggr_list, str): aggr_list = [aggr_list]
+
+        for aggr in aggr_list:
+            ts = mode_settings.copy()
+            ts['strategy'] = strategy
+            ts['aggr'] = aggr
+
+            res_df = get_signals(df.copy(), ts, is_scan=False)
+            latest = res_df.iloc[-1]
+            all_results.append(latest)
+
+            # Tendency mapping
+            t_map = {"Bullish": 1, "Bearish": -1, "Neutral": 0, "Range": 0}
+            total_tendency_score += t_map.get(latest.get('tendency'), 0)
+            total_score += latest.get('score', 0)
+
+            if latest.get('buy_signal'):
+                buy_count += 1
+            if latest.get('sell_signal'):
+                sell_count += 1
+
+    # Score calculation
+    final_buy_score = buy_count + tf_score if buy_count > 0 else 0
+    final_sell_score = sell_count + tf_score if sell_count > 0 else 0
+
+    final_buy_confirmed = False
+    final_sell_confirmed = False
+
+    if final_buy_score > final_sell_score and final_buy_score > 0:
+        final_buy_confirmed = True
+    elif final_sell_score > final_buy_score and final_sell_score > 0:
+        final_sell_confirmed = True
+
+    latest_row = all_results[0] if all_results else latest_row_base
 
     # Clean up trigger data
     exclude = ['open', 'high', 'low', 'close', 'volume', 'buy_candidate', 'sell_candidate', 'ema_up_win', 'macd_up_win', 'rsi_up_win', 'ema_down_win', 'macd_down_win', 'rsi_down_win', 'ema_up', 'ema_down', 'macd_up', 'macd_down', 'rsi_up', 'rsi_down']
@@ -1475,58 +1556,28 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     consecutive_buys = prev_data.get('consecutive_buys', 0)
     consecutive_sells = prev_data.get('consecutive_sells', 0)
 
-    # RESTART FIX: If first run, look back at historical signals to pick up current trend
-    if last_candle_ts is None:
-        buy_hist = df['buy_signal'].tolist()
-        sell_hist = df['sell_signal'].tolist()
-
-        c_buys = 0
-        for s in reversed(buy_hist[-10:]):
-            if s: c_buys += 1
-            else: break
-
-        c_sells = 0
-        for s in reversed(sell_hist[-10:]):
-            if s: c_sells += 1
-            else: break
-
-        consecutive_buys = c_buys
-        consecutive_sells = c_sells
-    elif last_candle_ts != candle_ts:
-        # Buy confirmation: ALL techniques must signal BUY
-        buy_confirmed = all(res['buy_signal'] for res in tech_results)
-        # Sell confirmation: ALL techniques must signal SELL
-        sell_confirmed = all(res['sell_signal'] for res in tech_results)
-
-        if buy_confirmed:
+    if last_candle_ts != candle_ts:
+        if final_buy_confirmed:
             consecutive_buys += 1
             consecutive_sells = 0
-        elif sell_confirmed:
+        elif final_sell_confirmed:
             consecutive_sells += 1
             consecutive_buys = 0
         else:
             consecutive_buys = 0
             consecutive_sells = 0
-            # Reset ignore_sell if we are back in neutral/no signal zone
             if data_manager.get_position(symbol):
                 data_manager.flag_ignore_sell(symbol, value=False)
     else:
-        # If it's the same candle, keep existing counts unless signal lost
-        buy_confirmed = all(res['buy_signal'] for res in tech_results)
-        sell_confirmed = all(res['sell_signal'] for res in tech_results)
-
-        if not buy_confirmed and not sell_confirmed:
+        if not final_buy_confirmed and not final_sell_confirmed:
             consecutive_buys = 0
             consecutive_sells = 0
             if data_manager.get_position(symbol):
                 data_manager.flag_ignore_sell(symbol, value=False)
 
     # Dynamic confirmation window based on volatility
-    # Default is 1 signal for both buy and sell.
     buy_threshold = 1
     sell_threshold = 1
-
-    # High volatility adds an additional confirmation signal
     volatility = latest_row.get('volatility', 0)
     if volatility > 0.1: # High volatility
         buy_threshold += 1
@@ -1543,16 +1594,15 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         if consecutive_buys >= buy_threshold:
             if mc_score > 0.45: # Acceptance threshold
                 mc_verified_buy = True
-            else:
-                # logging.info(f"[{symbol}] BUY signal rejected by Monte Carlo (Score: {mc_score:.2f})")
-                pass
 
         if consecutive_sells >= sell_threshold:
             if mc_score > 0.35: # Slightly lower threshold for exit to be safe
                 mc_verified_sell = True
-            else:
-                # logging.info(f"[{symbol}] SELL signal rejected by Monte Carlo (Score: {mc_score:.2f})")
-                pass
+
+    # Determine final tendency and total score for UI
+    final_tendency = "Neutral"
+    if total_tendency_score > 0: final_tendency = "Bullish"
+    elif total_tendency_score < 0: final_tendency = "Bearish"
 
     return {
         'price': latest_row['close'],
@@ -1562,13 +1612,13 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'rsi': latest_row.get('rsi', 0),
         'adx': latest_row.get('adx', 0),
         'volatility': latest_row.get('volatility', 0),
-        'score': latest_row.get('score', 0),
+        'score': total_score,
         'whale_active': bool(latest_row.get('whale_active', 0)),
         'is_mean_rev': bool(latest_row.get('is_mean_rev', 0)),
-        'aggr': primary_aggr,
-        'strategy': primary_strategy,
-        'strategies': [primary_strategy] + ([techniques[1]['strategy']] if len(techniques) > 1 else []),
-        'tendency': latest_row.get('tendency', 'Neutral'),
+        'aggr': techniques_cfg[0].get('aggr', ['normal'])[0] if isinstance(techniques_cfg[0].get('aggr'), list) else techniques_cfg[0].get('aggr', 'normal'),
+        'strategy': techniques_cfg[0].get('strategy', 'N/A'),
+        'strategies': [t.get('strategy') for t in techniques_cfg],
+        'tendency': final_tendency,
         'buy': mc_verified_buy,
         'sell': mc_verified_sell,
         'consecutive_buys': consecutive_buys,
@@ -1612,12 +1662,12 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
     Raises
     ------
     Exception
-        Any exception during order creation is logged, and the pair is added to `suspended_pairs`.
+        Any exception during order creation is logged, and the pair is added to `pair_suspensions`.
 
     Notes
     -----
     If the order fails due to insufficient balance or exchange filters, the symbol
-    is added to `suspended_pairs` to prevent further attempts.
+    is added to `pair_suspensions` to prevent further attempts.
     """
     if balance is None:
         balance = exchange.fetch_balances()
@@ -1639,23 +1689,29 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
     base_currency = symbol.split('/')[1]
     if amount > 0:
         # Check if balance is sufficient before attempting order
+        # Use API before any buy to verify availability (Point 2)
+        try:
+             balance = exchange.fetch_balances()
+        except: pass
+
         cost = amount * current_price
         base_asset = base_currency
-        free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance, dict) and 'free' in balance else balance.get(base_asset, 0)
+        free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance.get(base_asset), dict) else balance.get(base_asset, 0)
 
         if free_balance < cost:
-            logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)})")
+            logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)}). Suspending pair until 1.5x budget available.")
+            pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
             return False
 
         try:
             order = exchange.create_order(symbol, 'buy', amount)
             if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
-                logging.error(f"[{symbol}] Buy failed: Insufficient balance. Suspending pair.")
-                suspended_pairs.add(symbol)
+                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')}: {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Insufficient balance"}')
+                pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 return False
             if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
-                logging.error(f"[{symbol}] Buy failed: Filter failure NOTIONAL. Suspending pair.")
-                suspended_pairs.add(symbol)
+                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')}: {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Filter failure: NOTIONAL"}')
+                pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 return False
             if order:
                 fee = order.get('calculated_fee', 0)
@@ -1665,10 +1721,9 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
                 return True
             else:
                 logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}. Suspending pair.")
-                suspended_pairs.add(symbol)
         except Exception as e:
-            logging.error(f"[{symbol}] Buy failed with exception: {e}. Suspending pair.")
-            suspended_pairs.add(symbol)
+            logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')}: {getattr(exchange, 'exchange_id', 'exchange')} {e}")
+            pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
             return False
     else:
         logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
@@ -1778,8 +1833,8 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
         current_open = len(data_manager.get_open_positions())
         slots_available = max_open - current_open
         if slots_available > 0:
-            # Prioritize by benchmark profit
-            potential_buys.sort(key=lambda x: float(x[1].get('expected_profit', 0)), reverse=True)
+            # Prioritize by signal score
+            potential_buys.sort(key=lambda x: x[1].get('score', 0), reverse=True)
             balance = exchange.fetch_balances()
             for i in range(min(len(potential_buys), slots_available)):
                 symbol, data = potential_buys[i]
@@ -1995,9 +2050,9 @@ def show_balances(exchange):
     console.print(table)
     console.print(f"\n[bold yellow]Estimated Total Wallet Value: {total_eur_value:.2f} EUR[/]\n")
 
-def plot_backtest(df, symbol, strategy_name, aggr_name, results):
+def plot_scan(df, symbol, strategy_name, aggr_name, results):
     """
-    Generates and saves a matplotlib plot for backtesting results.
+    Generates and saves a matplotlib plot for scaning results.
 
     The plot shows price action, buy/sell signals, and key performance statistics.
 
@@ -2012,7 +2067,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     aggr_name : str
         Name of the aggressivity mode tested.
     results : dict
-        Backtest results including profit, win rate, and drawdown.
+        Scan results including profit, win rate, and drawdown.
     """
     plt.figure(figsize=(12, 7))
     plt.plot(df['timestamp'], df['close'], label='Price', color='blue', alpha=0.6)
@@ -2025,7 +2080,7 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     sells = df[df['sell_signal']]
     plt.scatter(sells['timestamp'], sells['close'], marker='v', color='red', label='SELL Signal', s=100)
 
-    plt.title(f"Backtest: {symbol} | Strategy: {strategy_name} | Aggr: {aggr_name}")
+    plt.title(f"Scan: {symbol} | Strategy: {strategy_name} | Aggr: {aggr_name}")
     plt.xlabel("Time")
     plt.ylabel("Price")
 
@@ -2038,12 +2093,12 @@ def plot_backtest(df, symbol, strategy_name, aggr_name, results):
     plt.grid(True, alpha=0.3)
 
     # Save plot
-    filename = f"backtest_{symbol.replace('/', '_')}_{strategy_name}.png"
+    filename = f"scan_{symbol.replace('/', '_')}_{strategy_name}.png"
     plt.savefig(filename)
-    console.print(f"[bold green]Backtest plot saved as {filename}[/]")
+    console.print(f"[bold green]Scan plot saved as {filename}[/]")
     plt.close()
 
-def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe='1m', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False, eval_candles=None):
+def run_scan_logic(exchange, symbol, strategy, aggr_name, config, timeframe='1m', df_in=None, limit=500, engine=None, device=None, skip_mc=False, return_full_df=False, eval_candles=None):
     """
     Core logic for simulating a trading strategy over historical data.
 
@@ -2083,7 +2138,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     Returns
     -------
     dict or None
-        Summary of backtest results, or None if calculation fails.
+        Summary of scan results, or None if calculation fails.
     """
     from indicators import get_signals
 
@@ -2097,7 +2152,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     # Use Dynamic Risk Engine if available, otherwise balanced defaults
     if engine and df_in is not None and not df_in.empty:
          # Use the technical state from the end of the data to get dynamic settings
-         base_df = get_signals(df_in.copy(), {"device": device if device is not None else torch.device("cpu")}, is_backtest=True)
+         base_df = get_signals(df_in.copy(), {"device": device if device is not None else torch.device("cpu")}, is_scan=True)
          latest = base_df.iloc[-1]
          aggr_settings = engine.get_dynamic_settings(latest.get('adx', 0), latest.get('volatility', 0))
     else:
@@ -2134,7 +2189,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     if 'buy_signal' not in df.columns:
         try:
             test_config['device'] = device if device is not None else torch.device('cpu')
-            df = get_signals(df, test_config, is_backtest=True)
+            df = get_signals(df, test_config, is_scan=True)
         except Exception as e:
             if exchange is not None:
                  console.print(f"[red]Error calculating signals for {symbol}: {e}[/]")
@@ -2214,7 +2269,7 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
     if len(equity_curve) > start_idx:
         total_profit = equity_curve[-1] - equity_curve[start_idx]
 
-    # Monte Carlo Validation removed from Backtest as requested
+    # Monte Carlo Validation removed from Scan as requested
     mc_score = 1.0
 
     wins = [t for t in trades if t['profit'] > 0]
@@ -2254,9 +2309,9 @@ def run_backtest_logic(exchange, symbol, strategy, aggr_name, config, timeframe=
         'equity_curve': equity_curve if return_full_df else []
     }
 
-def run_backtest_mode(exchange, config, args, engine=None, device=None):
+def run_scan_mode(exchange, config, args, engine=None, device=None):
     """
-    Executes the bot in backtest mode based on command-line arguments.
+    Executes the bot in scan mode based on command-line arguments.
 
     Parameters
     ----------
@@ -2271,7 +2326,7 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
     device : torch.device, optional
         Computation device.
     """
-    # Default strategy for backtest
+    # Default strategy for scan
     default_strategy = "double_ema_macd_rsi"
 
     strategy = args.strategy or default_strategy
@@ -2284,16 +2339,16 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
         console.print("[dim]Please check for typos.[/]")
         return
 
-    console.print(f"[bold blue]Running Backtest for {args.symbol} | Strategy: {strategy} | Aggr: {aggr} | Timeframe: {timeframe}...[/]")
-    results = run_backtest_logic(exchange, args.symbol, strategy, aggr, config, timeframe=timeframe, engine=engine, device=device)
+    console.print(f"[bold blue]Running Scan for {args.symbol} | Strategy: {strategy} | Aggr: {aggr} | Timeframe: {timeframe}...[/]")
+    results = run_scan_logic(exchange, args.symbol, strategy, aggr, config, timeframe=timeframe, engine=engine, device=device)
 
     if results:
         if results['trades_count'] > 0:
-            plot_backtest(results['df'], args.symbol, strategy, aggr, results)
+            plot_scan(results['df'], args.symbol, strategy, aggr, results)
         else:
-            console.print("[yellow]No trades executed during backtest. Plot not generated.[/]")
+            console.print("[yellow]No trades executed during scan. Plot not generated.[/]")
 
-        console.print(f"\n[bold yellow]Backtest Summary for {args.symbol}:[/]")
+        console.print(f"\n[bold yellow]Scan Summary for {args.symbol}:[/]")
         console.print(f"Total Profit: {format_price(results['profit'])} EUR")
         console.print(f"Win Rate: {results['win_rate']:.1%}")
         console.print(f"Max Drawdown: {results['max_dd']:.1%}")
@@ -2301,9 +2356,9 @@ def run_backtest_mode(exchange, config, args, engine=None, device=None):
         if results.get('sell_buy_sequence'):
              console.print(f"[bold green]Signal Sequence Detected: SELL followed by BUY[/]")
     else:
-        console.print(f"[red]Backtest failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
+        console.print(f"[red]Scan failed for {args.symbol} using {strategy} ({aggr}). Check symbol and aggr settings.[/]")
 
-def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
+def run_optimization_test_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in, engine=None, device=None, exclude_technique=None):
     """
     Scans historical data for success patterns using expanding time slices.
 
@@ -2375,12 +2430,12 @@ def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
 
                 # 1. Calculate signals
                 try:
-                    full_df = get_signals(current_df.copy(), mode_settings, is_backtest=True)
+                    full_df = get_signals(current_df.copy(), mode_settings, is_scan=True)
                 except Exception:
                     continue
 
-                # 2. Run backtest
-                res_full = run_backtest_logic(None, symbol, strategy, aggr, config,
+                # 2. Run scan
+                res_full = run_scan_logic(None, symbol, strategy, aggr, config,
                                              timeframe=timeframe, df_in=full_df, engine=engine,
                                              device=device, skip_mc=True, return_full_df=True, eval_candles=len(full_df))
 
@@ -2462,7 +2517,7 @@ def run_discovery_for_symbol(symbol, config, timeframe, aggrs, strategies, df_in
 
     return symbol, []
 
-def run_discovery(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
+def run_optimization_test(exchange, config, args, status=None, data_manager=None, pattern_manager=None, engine=None, device=None):
     """
     Orchestrates the strategy discovery/optimization process for multiple symbols.
 
@@ -2624,7 +2679,7 @@ def run_discovery(exchange, config, args, status=None, data_manager=None, patter
                 else:
                     if not status: console.print(f"[yellow]No OHLCV returned for {symbol} ({timeframe}) during pre-fetch.[/]")
             except Exception as e:
-                if not status: console.print(f"[red]Failed to fetch {symbol} for benchmark: {e}[/]")
+                if not status: console.print(f"[red]Failed to fetch {symbol} for test: {e}[/]")
 
         def handle_bench_shutdown(sig, frame):
              shutdown_event.set()
@@ -2641,13 +2696,13 @@ def run_discovery(exchange, config, args, status=None, data_manager=None, patter
             try:
                 futures = []
                 for sym in symbol_data_map:
-                    # Determine if we should exclude current technique (for re-benchmarking rotation)
+                    # Determine if we should exclude current technique (for re-scaning rotation)
                     exclude = None
                     if sym in bot_state:
                          exclude = (bot_state[sym].get('strategy'), bot_state[sym].get('aggr'))
 
                     futures.append(executor.submit(
-                        run_discovery_for_symbol, sym, config, config['pairs'][sym].get('timeframe', '1m'),
+                        run_optimization_test_for_symbol, sym, config, config['pairs'][sym].get('timeframe', '1m'),
                         aggrs, strategies, symbol_data_map[sym], engine, device, exclude_technique=exclude
                     ))
                 for future in concurrent.futures.as_completed(futures):

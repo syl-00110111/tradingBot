@@ -119,6 +119,7 @@ class CCXTExchange(ExchangeInterface):
     def watch_ohlcv(self, symbol, timeframe):
         """
         Watches for OHLCV updates using a polling fallback mechanism.
+        Preference for real WebSockets (Watch) over Fetch where possible.
 
         Since the standard CCXT library is synchronous, this method simulates
         a real-time stream by periodically fetching the latest candles and
@@ -147,12 +148,24 @@ class CCXTExchange(ExchangeInterface):
                             yield candle
                             last_candle = candle
             except Exception as e:
+                err_msg = str(e)
+                if "500" in err_msg:
+                    # Let it bubble up for suspension handling in bot.py
+                    raise e
                 logging.error(f"Error in watch_ohlcv loop for {symbol} on {self.exchange_id}: {e}")
             time.sleep(2)
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
-        try: return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-        except Exception as e: logging.error(f"Error fetching OHLCV for {symbol} on {self.exchange_id}: {e}"); return None
+        try:
+            return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        except Exception as e:
+            err_msg = str(e)
+            if "500" in err_msg:
+                # Do not log HTML page here, just the error type (Point 1)
+                raise Exception(f"HTTP 500 Error Code for {symbol} on {self.exchange_id}")
+            else:
+                logging.error(f"Error fetching OHLCV for {symbol} on {self.exchange_id}: {e}")
+            return None
 
     def fetch_ticker(self, symbol):
         try: return self.exchange.fetch_ticker(symbol)
@@ -227,7 +240,7 @@ class CCXTExchange(ExchangeInterface):
             err_msg = str(e)
             if 'minimum amount precision' in err_msg or 'dust' in err_msg.lower():
                 return {'error': 'dust_limit', 'message': err_msg}
-            logging.error(f"Error during {side} order on {symbol} via {self.exchange_id}: {e}"); return None
+            raise e
 
 class MockExchange(ExchangeInterface):
     """
