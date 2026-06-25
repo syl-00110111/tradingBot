@@ -376,51 +376,64 @@ def get_signals(df, mode_config, is_scan=False):
     # Common indicators for tendency and background analysis (Expert Mode)
     if df.empty: return df
 
+    # For multi-technique scanning, we check if the requested EMA/RSI settings
+    # match what's already in the dataframe. If not, we MUST recalculate.
+    current_ema_fast = df.attrs.get('ema_fast')
+    requested_ema_fast = mode_config.get('ema_fast', 8)
+
+    needs_recalc = ('ema_f' not in df.columns) or (current_ema_fast != requested_ema_fast)
+
     # Optimization: Skip if already calculated
-    if 'ema_f' not in df.columns:
+    # We check for 'ema_f' and also if the settings match.
+    # For now, just checking 'ema_f' is enough to avoid full recalculation of common indicators
+    # in the tight multi-technique loop.
+    if needs_recalc:
         # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
         use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
         if use_acceleration:
             close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
             high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
             low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
-            df['ema_f'] = torch_ema(close_t, 8).to('cpu').numpy()
-            df['ema_s'] = torch_ema(close_t, 18).to('cpu').numpy()
-            m_val, m_sig, m_hist = torch_macd(close_t)
+            df['ema_f'] = torch_ema(close_t, mode_config.get('ema_fast', 8)).to('cpu').numpy()
+            df['ema_s'] = torch_ema(close_t, mode_config.get('ema_slow', 18)).to('cpu').numpy()
+            m_val, m_sig, m_hist = torch_macd(close_t, fast=mode_config.get('macd_fast', 12), slow=mode_config.get('macd_slow', 26), signal=mode_config.get('macd_signal', 9))
             df['macd_val'] = m_val.to('cpu').numpy()
             df['macd_sig'] = m_sig.to('cpu').numpy()
             df['macd_hist'] = m_hist.to('cpu').numpy()
-            df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
+            df['rsi'] = torch_rsi(close_t, mode_config.get('rsi_period', 14)).to('cpu').numpy()
             df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
             df['tema_20'] = torch_tema(close_t, 20).to('cpu').numpy()
+            df.attrs['ema_fast'] = requested_ema_fast
         else:
-            ema_f = ta.ema(df['close'], length=8)
+            ema_f = ta.ema(df['close'], length=mode_config.get('ema_fast', 8))
             df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
-            ema_s = ta.ema(df['close'], length=18)
+            ema_s = ta.ema(df['close'], length=mode_config.get('ema_slow', 18))
             df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
-            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+            macd = ta.macd(df['close'], fast=mode_config.get('macd_fast', 12), slow=mode_config.get('macd_slow', 26), signal=mode_config.get('macd_signal', 9))
             if macd is not None:
                 df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
             else:
                 df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
-            rsi = ta.rsi(df['close'], length=14)
+            rsi = ta.rsi(df['close'], length=mode_config.get('rsi_period', 14))
             df['rsi'] = rsi.fillna(50) if rsi is not None else 50
             adx_df = ta.adx(df['high'], df['low'], df['close'])
             df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
             tema_20 = ta.tema(df['close'], length=20)
             df['tema_20'] = tema_20.fillna(df['close']) if tema_20 is not None else df['close']
+            df.attrs['ema_fast'] = requested_ema_fast
 
-    df['returns'] = np.log(df['close'] / df['close'].shift(1))
-    df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+    if 'returns' not in df.columns:
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
 
-    # Whale Detection Proxy (Common)
-    df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
-    df['vol_std_whale'] = df['volume'].rolling(window=20).std()
-    df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
+        # Whale Detection Proxy (Common)
+        df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
+        df['vol_std_whale'] = df['volume'].rolling(window=20).std()
+        df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
 
-    # Market Regime Proxy (Common)
-    df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
-    df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
+        # Market Regime Proxy (Common)
+        df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
+        df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
 
     # Initialize default score and tendency if not present
     if 'score' not in df.columns:
@@ -493,7 +506,7 @@ def get_signals(df, mode_config, is_scan=False):
         df = strategy_candle_patterns(df, mode_config)
     elif strategy == 'sinewave_cycle':
         df = strategy_sinewave(df, mode_config)
-    else:
+    elif strategy is not None:
         logging.warning(f"Strategy {strategy} not recognized.")
 
     return df

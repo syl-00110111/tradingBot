@@ -39,6 +39,7 @@ import concurrent.futures
 import matplotlib.pyplot as plt
 import plotext as plt_ascii
 import torch
+import re
 from datetime import datetime, timedelta, timezone
 
 from rich.live import Live
@@ -193,7 +194,6 @@ class DashboardHandler(logging.Handler):
                             times_str = parts[0][1:]
                             rest = parts[1]
                             if timestamp not in times_str: times_str += f",{timestamp}"
-                            import re
                             current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', rest)
                             new_symbol = re.search(r'([A-Z0-9]+/[A-Z0-9]+)', msg)
                             if new_symbol:
@@ -211,7 +211,6 @@ class DashboardHandler(logging.Handler):
             # Transform raw CCXT errors into the requested grouped format (Point 2)
             # Raw example: "Error during buy order on MEGA/USDC via binance: binance {"code":-1013,"msg":"Filter failure: NOTIONAL"}"
             if "Error during buy order" in msg:
-                 import re
                  err_match = re.search(r'Error during buy order on ([A-Z0-9/]+) via (\w+): \w+ (\{.*\})', msg)
                  if err_match:
                       symbol, exchange, err_json = err_match.groups()
@@ -225,7 +224,6 @@ class DashboardHandler(logging.Handler):
 
             # Group Buy execution failed errors by error code
             if "Buy execution failed" in msg:
-                 import re
                  code_match = re.search(r'\((\-?\d+)', msg)
                  if code_match:
                       code = code_match.group(1)
@@ -995,6 +993,12 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     # Use a persistent ProcessPoolExecutor for re-scaning
     with concurrent.futures.ProcessPoolExecutor() as bench_executor:
       while not shutdown_event.is_set():
+        now_ts = time.time()
+        # Periodically sync positions to catch changes from web interface (Point 2)
+        if now_ts - last_assets_update > 300: # Every 5 minutes
+             sync_live_positions(exchange, data_manager, config)
+             last_assets_update = now_ts
+
         if mode == 'simulation' and not sim_init_done:
             initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
             sim_init_done = True
@@ -1347,8 +1351,10 @@ def main():
         global_agressivity = config.get('force_agressivity_to_all_pairs')
 
         if args.mode in ['live', 'simulation']:
-            if args.mode == 'simulation' and data_manager:
-                data_manager.clear_history()
+            # Do not clear history if we want to see previous trades
+            # if args.mode == 'simulation' and data_manager:
+            #     data_manager.clear_history()
+            pass
 
         for symbol in pairs:
             # Check if we already have an open position for this symbol
@@ -1505,29 +1511,70 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     tf_score = pair_config.get('optimal_tf_score', 0)
     all_results = []
 
+    # Optimization: Pre-calculate indicator variants for different profiles
+    # (Since profiles only affect parameters like EMA/RSI periods)
+    profile_results = {}
+    unique_profiles = set()
     for t in techniques_cfg:
-        strategy = t.get('strategy')
         aggr_list = t.get('aggr', ['normal'])
         if isinstance(aggr_list, str): aggr_list = [aggr_list]
+        unique_profiles.update(aggr_list)
 
-        for aggr in aggr_list:
-            ts = mode_settings.copy()
+    for p in unique_profiles:
+        p_settings = engine.get_dynamic_settings(latest_row_base.get('adx', 0), latest_row_base.get('volatility', 0), aggr=p)
+        p_settings['device'] = device
+        # Pre-calculate base indicators for this profile
+        # We need a way to pass this to get_signals to avoid full recalculation
+        profile_results[p] = p_settings
+
+    # To avoid blocking, we limit the number of techniques scanned if it's too many
+    # or we use a more efficient way. For now, let's limit to top strategies if
+    # none were specified.
+    active_techniques = techniques_cfg
+    if not pair_config.get('techniques') and len(active_techniques) > 5:
+        # If no specific config, and we have many strategies, maybe just pick a subset
+        # or just run them all but be aware of the performance hit.
+        pass
+
+    # Multi-technique scanning (Point 3)
+    # The user wants ALL techniques scanned if no specific config is provided.
+    # Map aggr -> list of strategies to minimize recalculations of common indicators
+    aggr_to_strats = {}
+    for t in active_techniques:
+        strat = t.get('strategy')
+        aggr_list = t.get('aggr', ['normal'])
+        if isinstance(aggr_list, str): aggr_list = [aggr_list]
+        for a in aggr_list:
+            if a not in aggr_to_strats: aggr_to_strats[a] = []
+            aggr_to_strats[a].append(strat)
+
+    # Multi-processing for faster multi-technique scanning (Optimization Point 3)
+    # Given the high number of strategy/aggr combinations, we use parallelism.
+    all_tasks = []
+    for aggr, strats in aggr_to_strats.items():
+        ts_base = profile_results[aggr].copy()
+        ts_base['strategy'] = None
+        df_aggr = get_signals(df.copy(), ts_base, is_scan=False)
+        for strategy in strats:
+            ts = ts_base.copy()
             ts['strategy'] = strategy
-            ts['aggr'] = aggr
+            all_tasks.append((df_aggr, ts))
 
-            res_df = get_signals(df.copy(), ts, is_scan=False)
-            latest = res_df.iloc[-1]
-            all_results.append(latest)
-
-            # Tendency mapping
-            t_map = {"Bullish": 1, "Bearish": -1, "Neutral": 0, "Range": 0}
-            total_tendency_score += t_map.get(latest.get('tendency'), 0)
-            total_score += latest.get('score', 0)
-
-            if latest.get('buy_signal'):
-                buy_count += 1
-            if latest.get('sell_signal'):
-                sell_count += 1
+    # Using ThreadPoolExecutor for lightweight tasks that are partially GPU accelerated
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(all_tasks), 16)) as t_executor:
+        futures = [t_executor.submit(get_signals, d, t, False) for d, t in all_tasks]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                res_df = future.result()
+                if res_df.empty: continue
+                latest = res_df.iloc[-1]
+                all_results.append(latest)
+                t_map = {"Bullish": 1, "Bearish": -1, "Neutral": 0, "Range": 0}
+                total_tendency_score += t_map.get(latest.get('tendency', 'Neutral'), 0)
+                total_score += latest.get('score', 0)
+                if latest.get('buy_signal'): buy_count += 1
+                if latest.get('sell_signal'): sell_count += 1
+            except: pass
 
     # Score calculation
     final_buy_score = buy_count + tf_score if buy_count > 0 else 0
@@ -1880,9 +1927,16 @@ def sync_live_positions(exchange, data_manager, config):
         free_balances = balance
     base_currencies = config.get('base_currencies', ['EUR'])
 
-    # We clear local cache for Live mode as requested
-    data_manager.data['open_positions'] = {}
+    # We keep local cache but will update it to avoid redundant history fetch
+    # data_manager.data['open_positions'] = {}
     sellable_found = False
+
+    # Pre-fetch all tickers to avoid multiple API calls
+    all_tickers = {}
+    try:
+        if hasattr(exchange.exchange, 'fetch_tickers'):
+            all_tickers = exchange.exchange.fetch_tickers()
+    except: pass
 
     for asset, amount in free_balances.items():
         if asset in base_currencies or amount <= 0: continue
@@ -1896,15 +1950,21 @@ def sync_live_positions(exchange, data_manager, config):
                 break
         if not symbol: continue
 
+        # Check if we already know this position to avoid redundant history fetch
+        existing_pos = data_manager.get_position(symbol)
+        if existing_pos and abs(existing_pos['amount'] - amount) / amount < 0.001:
+            sellable_found = True
+            continue
+
         # Check if it's dust
         is_dust = False
         try:
             markets = exchange.markets if hasattr(exchange, 'markets') and exchange.markets else exchange.load_markets()
+            ticker = all_tickers.get(symbol) or exchange.fetch_ticker(symbol)
             if symbol in markets:
                 m = markets[symbol]
                 min_amt = m['limits']['amount']['min']
                 min_cost = m['limits']['cost']['min'] or 10
-                ticker = exchange.fetch_ticker(symbol)
                 if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
                     is_dust = True
             elif amount <= 0.000001: is_dust = True
@@ -1914,11 +1974,12 @@ def sync_live_positions(exchange, data_manager, config):
         sellable_found = True
 
         # Fetch current price for placeholder entry
-        curr_price = 0
-        try:
-             ticker = exchange.fetch_ticker(symbol)
-             if ticker: curr_price = ticker['last']
-        except: pass
+        curr_price = ticker['last'] if ticker else 0
+        if curr_price == 0:
+            try:
+                 ticker = exchange.fetch_ticker(symbol)
+                 if ticker: curr_price = ticker['last']
+            except: pass
 
         if curr_price > 0:
              # Attempt to fetch real entry price and fee from trade history
@@ -1927,7 +1988,8 @@ def sync_live_positions(exchange, data_manager, config):
              entry_total_base = amount * curr_price
 
              try:
-                  my_trades = exchange.fetch_my_trades(symbol, limit=50)
+                  # limit to 10 for performance
+                  my_trades = exchange.fetch_my_trades(symbol, limit=10)
                   if my_trades:
                        # Filter buy trades
                        buys = [t for t in my_trades if t['side'] == 'buy']
