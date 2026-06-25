@@ -1331,9 +1331,11 @@ def main():
         if args.mode == 'live':
             exchange = CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             logging.info(f"Starting bot in LIVE mode on {exchange_id}")
+            logging.info("Waiting for first data streams and analysis...")
         elif args.mode == 'simulation':
             exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options)
             logging.info(f"Starting bot in SIMULATION mode ({exchange_id})")
+            logging.info("Waiting for first data streams and analysis...")
         elif args.mode == 'balance':
             exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             exchange.load_markets()
