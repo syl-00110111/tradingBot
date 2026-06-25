@@ -410,22 +410,20 @@ def get_signals(df, mode_config, is_scan=False):
             tema_20 = ta.tema(df['close'], length=20)
             df['tema_20'] = tema_20.fillna(df['close']) if tema_20 is not None else df['close']
 
-    df['returns'] = np.log(df['close'] / df['close'].shift(1))
-    df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+        df['returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
 
-    # Whale Detection Proxy (Common)
-    df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
-    df['vol_std_whale'] = df['volume'].rolling(window=20).std()
-    df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
+        # Whale Detection Proxy (Common)
+        df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
+        df['vol_std_whale'] = df['volume'].rolling(window=20).std()
+        df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
 
-    # Market Regime Proxy (Common)
-    df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
-    df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
+        # Market Regime Proxy (Common)
+        df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
+        df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
 
-    # Initialize default score and tendency if not present
-    if 'score' not in df.columns:
+        # Initialize default score and tendency
         df['score'] = 0
-    if 'tendency' not in df.columns:
         df['tendency'] = "Neutral"
 
     # Strategy Selection
@@ -493,7 +491,7 @@ def get_signals(df, mode_config, is_scan=False):
         df = strategy_candle_patterns(df, mode_config)
     elif strategy == 'sinewave_cycle':
         df = strategy_sinewave(df, mode_config)
-    else:
+    elif strategy:
         logging.warning(f"Strategy {strategy} not recognized.")
 
     return df
@@ -517,8 +515,12 @@ def apply_confirmation(df, window):
     pandas.DataFrame
         Dataframe with 'buy_signal' and 'sell_signal' boolean columns.
     """
-    df['buy_signal'] = df['buy_candidate'].rolling(window=window).max() > 0
-    df['sell_signal'] = df['sell_candidate'].rolling(window=window).max() > 0
+    if window <= 1:
+        df['buy_signal'] = df['buy_candidate']
+        df['sell_signal'] = df['sell_candidate']
+    else:
+        df['buy_signal'] = df['buy_candidate'].rolling(window=window).max().fillna(0) > 0
+        df['sell_signal'] = df['sell_candidate'].rolling(window=window).max().fillna(0) > 0
     return df
 
 def detect_hammer(open_, high, low, close):

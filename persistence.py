@@ -59,13 +59,38 @@ class DataManager:
         The operation mode (default is 'simulation').
     """
     def __init__(self, mode='simulation'):
+        self.mode = mode
+        self.filepath = f"trading_data_{mode}.json"
         self.data = {"open_positions": {}, "trade_history": []}
+        self.load_from_disk()
+
+    def load_from_disk(self):
+        """
+        Loads trading data from a JSON file.
+        """
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r') as f:
+                    self.data = json.load(f)
+            except Exception as e:
+                logging.error(f"Error loading data from {self.filepath}: {e}")
+
+    def save_to_disk(self):
+        """
+        Saves trading data to a JSON file.
+        """
+        try:
+            with open(self.filepath, 'w') as f:
+                json.dump(self.data, f, indent=4)
+        except Exception as e:
+            logging.error(f"Error saving data to {self.filepath}: {e}")
 
     def clear_history(self):
         """
         Resets the trade history and open positions.
         """
         self.data = {"open_positions": {}, "trade_history": []}
+        self.save_to_disk()
 
     def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
         """
@@ -93,6 +118,7 @@ class DataManager:
             "entry_total_base": total_base, "trigger_data": trigger_data,
             "timestamp": timestamp, "sell_signals_received": 0, "last_sell_signal_candle_ts": None
         }
+        self.save_to_disk()
 
     def increment_sell_signals(self, symbol, candle_ts):
         """
@@ -115,6 +141,7 @@ class DataManager:
             if pos.get("last_sell_signal_candle_ts") != candle_ts:
                 pos["sell_signals_received"] = pos.get("sell_signals_received", 0) + 1
                 pos["last_sell_signal_candle_ts"] = candle_ts
+                self.save_to_disk()
                 return True
         return False
 
@@ -131,6 +158,7 @@ class DataManager:
         """
         if symbol in self.data["open_positions"]:
             self.data["open_positions"][symbol]["ignore_sell"] = value
+            self.save_to_disk()
 
     def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0):
         """
@@ -169,6 +197,7 @@ class DataManager:
                 "sell_signals_received": position.get("sell_signals_received", 0)
             }
             self.data["trade_history"].append(trade)
+            self.save_to_disk()
             return trade
         return None
 

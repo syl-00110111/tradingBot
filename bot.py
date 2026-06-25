@@ -976,14 +976,30 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             config['pairs'][symbol]['optimal_tf_score'] = 0
             config['pairs'][symbol]['timeframe'] = '1m'
 
+    priority_order = config.get('_priority_pairs')
+    pairs_dict = config.get('pairs', {})
+    pair_keys = priority_order if priority_order else list(pairs_dict.keys())
+
+    # Initial Optimal Timeframe Discovery (Point 3 - Background) - Parallelized
+    def discover_tf(sym):
+        try:
+            tf, score, _ = get_optimal_timeframe(exchange, sym, config)
+            return sym, tf, score
+        except:
+            return sym, '1m', 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(pair_keys)) if pair_keys else 1) as tf_executor:
+        futures = [tf_executor.submit(discover_tf, sym) for sym in pair_keys]
+        for f in concurrent.futures.as_completed(futures):
+            sym, tf, score = f.result()
+            config['pairs'][sym]['optimal_tf'] = tf
+            config['pairs'][sym]['optimal_tf_score'] = score
+            config['pairs'][sym]['timeframe'] = '1m'
+
     # Start watchers for all pairs
     for symbol in config.get('pairs', {}):
         # Every pair treated at 1m timeframe as per Point 3
         threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, '1m', config), daemon=True).start()
-
-    priority_order = config.get('_priority_pairs')
-    pairs_dict = config.get('pairs', {})
-    pair_keys = priority_order if priority_order else list(pairs_dict.keys())
 
     last_assets_update = 0
     sim_init_done = False
@@ -992,8 +1008,9 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     time.sleep(5)
     markets = exchange.load_markets()
 
-    # Use a persistent ProcessPoolExecutor for re-scaning
-    with concurrent.futures.ProcessPoolExecutor() as bench_executor:
+    # Use persistent executors for better performance
+    with concurrent.futures.ProcessPoolExecutor() as bench_executor, \
+         concurrent.futures.ThreadPoolExecutor(max_workers=len(pair_keys) if pair_keys else 1) as executor:
       while not shutdown_event.is_set():
         if mode == 'simulation' and not sim_init_done:
             initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state)
@@ -1039,9 +1056,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             potential_buys = []
 
             # 2. Parallelize pair analysis
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(pair_keys)) as executor:
-                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pair_keys}
-                for future in concurrent.futures.as_completed(future_to_sym):
+            future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pair_keys}
+            for future in concurrent.futures.as_completed(future_to_sym):
                     if shutdown_event.is_set(): break
                     symbol = future_to_sym[future]
 
@@ -1236,9 +1252,6 @@ def main():
             device = torch.device('cpu')
             use_mkldnn = True
             torch.backends.mkldnn.enabled = True
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['MKL_NUM_THREADS'] = '1'
-            torch.set_num_threads(1)
             gpu_enabled = True
         elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
             device = torch.device('vulkan')
@@ -1347,8 +1360,7 @@ def main():
         global_agressivity = config.get('force_agressivity_to_all_pairs')
 
         if args.mode in ['live', 'simulation']:
-            if args.mode == 'simulation' and data_manager:
-                data_manager.clear_history()
+            pass # History is now persistent
 
         for symbol in pairs:
             # Check if we already have an open position for this symbol
@@ -1880,8 +1892,9 @@ def sync_live_positions(exchange, data_manager, config):
         free_balances = balance
     base_currencies = config.get('base_currencies', ['EUR'])
 
-    # We clear local cache for Live mode as requested
-    data_manager.data['open_positions'] = {}
+    # In Live mode, we sync with the exchange truth. In Simulation, we keep existing virtual positions.
+    if not isinstance(exchange, MockExchange):
+        data_manager.data['open_positions'] = {}
     sellable_found = False
 
     for asset, amount in free_balances.items():
