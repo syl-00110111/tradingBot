@@ -23,17 +23,9 @@ class TradingEngine:
         self.config = config
         self.risk_multiplier = float(config.get('global_risk_multiplier', 1.1))
 
-    def get_dynamic_settings(self, adx, volatility):
+    def get_dynamic_settings(self, adx, volatility, aggr='dynamic'):
         """
-        Adjusts technical indicator parameters based on current market regimes.
-
-        The engine identifies three regimes:
-        1. Trending (ADX > 25): Uses faster EMAs and more aggressive RSI thresholds.
-        2. High Volatility (Volatility > 0.015): Uses slower EMAs and wider RSI
-           thresholds to avoid noise.
-        3. Extreme Volatility (Volatility > 0.1): Increases the confirmation window
-           to 2 signals.
-        4. Default: Balanced settings for range-bound or low-volatility markets.
+        Adjusts technical indicator parameters based on current market regimes and aggressiveness.
 
         Parameters
         ----------
@@ -41,30 +33,40 @@ class TradingEngine:
             Current Average Directional Index (trend strength).
         volatility : float
             Current market volatility (standard deviation of log returns).
+        aggr : str
+            Aggressiveness profile: 'normal', 'aggressive', or 'dynamic'.
 
         Returns
         -------
         dict
             A dictionary of technical indicator settings.
         """
+        # Base settings (Normal)
         settings = {
             "ema_fast": 20, "ema_slow": 50,
             "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
             "confirmation_window": 1
         }
-        if adx > 25:
+
+        if aggr == 'aggressive':
             settings.update({
                 "ema_fast": 10, "ema_slow": 30,
                 "rsi_buy": 40, "rsi_sell": 60
             })
-        elif volatility > 0.015:
-            settings.update({
-                "ema_fast": 30, "ema_slow": 100,
-                "rsi_buy": 20, "rsi_sell": 80
-            })
+        elif aggr == 'dynamic':
+            if adx > 25:
+                settings.update({
+                    "ema_fast": 10, "ema_slow": 30,
+                    "rsi_buy": 40, "rsi_sell": 60
+                })
+            elif volatility > 0.015:
+                settings.update({
+                    "ema_fast": 30, "ema_slow": 100,
+                    "rsi_buy": 20, "rsi_sell": 80
+                })
 
-        # High volatility adds an additional confirmation signal
+        # High volatility adds an additional confirmation signal globally
         if volatility > 0.1:
             settings["confirmation_window"] = 2
 

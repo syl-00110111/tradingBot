@@ -59,7 +59,25 @@ class DataManager:
         The operation mode (default is 'simulation').
     """
     def __init__(self, mode='simulation'):
+        self.mode = mode
+        self.filename = f"trades_{mode}.json"
         self.data = {"open_positions": {}, "trade_history": []}
+        self.load()
+
+    def _save(self):
+        try:
+            with open(self.filename, 'w') as f:
+                json.dump(self.data, f, indent=4)
+        except Exception as e:
+            logging.error(f"Failed to save trade data: {e}")
+
+    def load(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    self.data = json.load(f)
+            except Exception as e:
+                logging.error(f"Failed to load trade data: {e}")
 
     def clear_history(self):
         """
@@ -93,6 +111,7 @@ class DataManager:
             "entry_total_base": total_base, "trigger_data": trigger_data,
             "timestamp": timestamp, "sell_signals_received": 0, "last_sell_signal_candle_ts": None
         }
+        self._save()
 
     def increment_sell_signals(self, symbol, candle_ts):
         """
@@ -131,6 +150,7 @@ class DataManager:
         """
         if symbol in self.data["open_positions"]:
             self.data["open_positions"][symbol]["ignore_sell"] = value
+            self._save()
 
     def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0):
         """
@@ -169,6 +189,7 @@ class DataManager:
                 "sell_signals_received": position.get("sell_signals_received", 0)
             }
             self.data["trade_history"].append(trade)
+            self._save()
             return trade
         return None
 
