@@ -73,6 +73,161 @@ def torch_ema(series, length):
     alpha = 2.0 / (length + 1)
     return torch_ema_kernel(series, float(alpha))
 
+def torch_tema(series, length):
+    """
+    High-performance Triple Exponential Moving Average (TEMA) implementation in PyTorch.
+
+    TEMA = (3 * EMA1) - (3 * EMA2) + EMA3
+    where EMA1 is the EMA of the price, EMA2 is the EMA of EMA1, and
+    EMA3 is the EMA of EMA2.
+
+    Parameters
+    ----------
+    series : torch.Tensor
+        The input price series tensor.
+    length : int
+        The period length for the TEMA.
+
+    Returns
+    -------
+    torch.Tensor
+        The calculated TEMA series tensor.
+    """
+    ema1 = torch_ema(series, length)
+    ema2 = torch_ema(ema1, length)
+    ema3 = torch_ema(ema2, length)
+    return 3 * ema1 - 3 * ema2 + ema3
+
+def torch_heikin_ashi(open_t, high_t, low_t, close_t):
+    """
+    High-performance Heikin Ashi implementation in PyTorch.
+
+    Parameters
+    ----------
+    open_t, high_t, low_t, close_t : torch.Tensor
+        OHLC series tensors.
+
+    Returns
+    -------
+    ha_open, ha_high, ha_low, ha_close : torch.Tensor
+        Calculated Heikin Ashi OHLC series.
+    """
+    n = open_t.size(0)
+    ha_close = (open_t + high_t + low_t + close_t) / 4.0
+    ha_open = torch.empty_like(open_t)
+
+    if n > 0:
+        ha_open = _torch_ha_open_loop(open_t, close_t, ha_close)
+
+    ha_high = torch.maximum(torch.maximum(high_t, ha_open), ha_close)
+    ha_low = torch.minimum(torch.minimum(low_t, ha_open), ha_close)
+
+    return ha_open, ha_high, ha_low, ha_close
+
+@torch.jit.script
+def _torch_ha_open_loop(open_t: torch.Tensor, close_t: torch.Tensor, ha_close: torch.Tensor):
+    n = open_t.size(0)
+    ha_open = torch.empty_like(open_t)
+    # Initial HA_Open is (Open[0] + Close[0]) / 2
+    ha_open[0] = (open_t[0] + close_t[0]) / 2.0
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2.0
+    return ha_open
+
+def torch_sinewave(close_t):
+    """
+    Simplified PyTorch implementation of Hilbert Transform SineWave.
+    Based on Ehlers' implementation.
+
+    Returns
+    -------
+    sine : torch.Tensor
+    leadsine : torch.Tensor
+    """
+    n = close_t.size(0)
+    sine = torch.zeros_like(close_t)
+    leadsine = torch.zeros_like(close_t)
+
+    if n < 7:
+        return sine, leadsine
+
+    # Simplified implementation of dominant cycle phase
+    # In a real Hilbert Transform, this involves multiple stages of filtering.
+    # Here we use a simplified version for the bot.
+
+    # 1. Detrender
+    # 2. InPhase & Quadrature
+    # 3. Phase calculation
+
+    # Due to complexity of a full Hilbert Transform in JIT, we'll use a
+    # reasonable approximation or just provide the structure for now.
+    # Actually, let's implement the core logic.
+
+    return _torch_sinewave_kernel(close_t)
+
+@torch.jit.script
+def _torch_sinewave_kernel(close_t: torch.Tensor):
+    n = close_t.size(0)
+    smooth = torch.zeros_like(close_t)
+    detrender = torch.zeros_like(close_t)
+    I1 = torch.zeros_like(close_t)
+    Q1 = torch.zeros_like(close_t)
+    jI = torch.zeros_like(close_t)
+    jQ = torch.zeros_like(close_t)
+    I2 = torch.zeros_like(close_t)
+    Q2 = torch.zeros_like(close_t)
+    Re = torch.zeros_like(close_t)
+    Im = torch.zeros_like(close_t)
+    period = torch.full_like(close_t, 6.0)
+    smooth_period = torch.full_like(close_t, 6.0)
+    phase = torch.zeros_like(close_t)
+    sine = torch.zeros_like(close_t)
+    leadsine = torch.zeros_like(close_t)
+
+    for i in range(6, n):
+        smooth[i] = (4*close_t[i] + 3*close_t[i-1] + 2*close_t[i-2] + close_t[i-3]) / 10.0
+        detrender[i] = (0.0962*smooth[i] + 0.5769*smooth[i-2] - 0.5769*smooth[i-4] - 0.0962*smooth[i-6]) * (0.075*period[i-1] + 0.54)
+
+        # Compute InPhase and Quadrature components
+        I1[i] = detrender[i-3]
+        Q1[i] = (0.0962*detrender[i] + 0.5769*detrender[i-2] - 0.5769*detrender[i-4] - 0.0962*detrender[i-6]) * (0.075*period[i-1] + 0.54)
+
+        # Advance the phase of I1 and Q1 by 90 degrees
+        jI[i] = (0.0962*I1[i] + 0.5769*I1[i-2] - 0.5769*I1[i-4] - 0.0962*I1[i-6]) * (0.075*period[i-1] + 0.54)
+        jQ[i] = (0.0962*Q1[i] + 0.5769*Q1[i-2] - 0.5769*Q1[i-4] - 0.0962*Q1[i-6]) * (0.075*period[i-1] + 0.54)
+
+        # Phasor addition for 3nd order Hilbert Transform
+        I2[i] = I1[i] - jQ[i]
+        Q2[i] = Q1[i] + jI[i]
+
+        # Smoothing I and Q components
+        I2[i] = 0.2*I2[i] + 0.8*I2[i-1]
+        Q2[i] = 0.2*Q2[i] + 0.8*Q2[i-1]
+
+        # Homodyne Discriminator
+        Re[i] = I2[i]*I2[i-1] + Q2[i]*Q2[i-1]
+        Im[i] = I2[i]*Q2[i-1] - Q2[i]*I2[i-1]
+        Re[i] = 0.2*Re[i] + 0.8*Re[i-1]
+        Im[i] = 0.2*Im[i] + 0.8*Im[i-1]
+
+        if Im[i] != 0 and Re[i] != 0:
+            period[i] = 360.0 / (torch.atan(Im[i]/Re[i]) * 180.0 / 3.14159)
+
+        if period[i] > 1.5 * period[i-1]: period[i] = 1.5 * period[i-1]
+        if period[i] < 0.67 * period[i-1]: period[i] = 0.67 * period[i-1]
+        if period[i] < 6: period[i] = 6
+        if period[i] > 50: period[i] = 50
+        period[i] = 0.2*period[i] + 0.8*period[i-1]
+        smooth_period[i] = 0.33*period[i] + 0.67*smooth_period[i-1]
+
+        if I1[i] != 0:
+            phase[i] = torch.atan(Q1[i] / I1[i]) * 180.0 / 3.14159
+
+        sine[i] = torch.sin(phase[i] * 3.14159 / 180.0)
+        leadsine[i] = torch.sin((phase[i] + 45.0) * 3.14159 / 180.0)
+
+    return sine, leadsine
+
 def torch_rsi(series, length):
     """
     Vectorized Relative Strength Index (RSI) implementation in PyTorch.
@@ -185,7 +340,8 @@ STRATEGIES = [
     'mc_stop_loss_eval', 'mc_options_pricing',
     'whale_detection_proxy', 'pump_dump_proxy', 'market_regime_proxy', 'scientific_ensemble',
     'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'mvrv_proxy', 'adx_trend_strength',
-    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy'
+    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy', 'tema_crossover',
+    'heikin_ashi', 'candle_patterns', 'sinewave_cycle'
 ]
 
 # Global MC engine for reuse
@@ -235,6 +391,7 @@ def get_signals(df, mode_config, is_backtest=False):
             df['macd_hist'] = m_hist.to('cpu').numpy()
             df['rsi'] = torch_rsi(close_t, 14).to('cpu').numpy()
             df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
+            df['tema_20'] = torch_tema(close_t, 20).to('cpu').numpy()
         else:
             ema_f = ta.ema(df['close'], length=8)
             df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
@@ -249,6 +406,8 @@ def get_signals(df, mode_config, is_backtest=False):
             df['rsi'] = rsi.fillna(50) if rsi is not None else 50
             adx_df = ta.adx(df['high'], df['low'], df['close'])
             df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
+            tema_20 = ta.tema(df['close'], length=20)
+            df['tema_20'] = tema_20.fillna(df['close']) if tema_20 is not None else df['close']
 
     df['returns'] = np.log(df['close'] / df['close'].shift(1))
     df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
@@ -348,6 +507,14 @@ def get_signals(df, mode_config, is_backtest=False):
         df = strategy_halving_cycle(df, mode_config)
     elif strategy == 'listing_surge_proxy':
         df = strategy_listing_surge(df, mode_config)
+    elif strategy == 'tema_crossover':
+        df = strategy_tema_crossover(df, mode_config)
+    elif strategy == 'heikin_ashi':
+        df = strategy_heikin_ashi(df, mode_config)
+    elif strategy == 'candle_patterns':
+        df = strategy_candle_patterns(df, mode_config)
+    elif strategy == 'sinewave_cycle':
+        df = strategy_sinewave(df, mode_config)
     else:
         df = strategy_double_ema_macd_rsi(df, mode_config)
 
@@ -375,6 +542,92 @@ def apply_confirmation(df, window):
     df['buy_signal'] = df['buy_candidate'].rolling(window=window).max() > 0
     df['sell_signal'] = df['sell_candidate'].rolling(window=window).max() > 0
     return df
+
+def detect_hammer(open_, high, low, close):
+    body = np.abs(close - open_)
+    lower_wick = np.minimum(open_, close) - low
+    upper_wick = high - np.maximum(open_, close)
+    return (lower_wick > 2 * body) & (upper_wick < 0.1 * lower_wick)
+
+def detect_inverted_hammer(open_, high, low, close):
+    body = np.abs(close - open_)
+    upper_wick = high - np.maximum(open_, close)
+    lower_wick = np.minimum(open_, close) - low
+    return (upper_wick > 2 * body) & (lower_wick < 0.1 * upper_wick)
+
+def detect_dragonfly_doji(open_, high, low, close):
+    body = np.abs(close - open_)
+    lower_wick = np.minimum(open_, close) - low
+    upper_wick = high - np.maximum(open_, close)
+    return (body < 0.1 * (high - low)) & (lower_wick > 3 * body) & (upper_wick < 0.1 * lower_wick)
+
+def detect_piercing_line(o, c, prev_o, prev_c):
+    return (prev_c < prev_o) & (c > o) & (o < prev_c) & (c > (prev_o + prev_c)/2)
+
+def detect_morning_star(o, c, p1_o, p1_c, p2_o, p2_c):
+    return (p2_c < p2_o) & (np.abs(p1_c - p1_o) < 0.3 * np.abs(p2_c - p2_o)) & (c > o) & (c > (p2_o + p2_c)/2)
+
+def detect_evening_doji_star(o, c, p1_o, p1_c, p1_h, p1_l, p2_o, p2_c):
+    doji = np.abs(p1_c - p1_o) < 0.1 * (p1_h - p1_l + 1e-10)
+    return (p2_c > p2_o) & (p1_o > p2_c) & doji & (c < o) & (c < (p2_o + p2_c)/2)
+
+def detect_three_white_soldiers(o, c, p1_o, p1_c, p2_o, p2_c):
+    return (c > o) & (p1_c > p1_o) & (p2_c > p2_o) & (c > p1_c) & (p1_c > p2_c)
+
+def detect_hanging_man(open_, high, low, close):
+    return detect_hammer(open_, high, low, close) # Same pattern, different context
+
+def detect_shooting_star(open_, high, low, close):
+    return detect_inverted_hammer(open_, high, low, close) # Same pattern, different context
+
+def detect_gravestone_doji(open_, high, low, close):
+    body = np.abs(close - open_)
+    upper_wick = high - np.maximum(open_, close)
+    lower_wick = np.minimum(open_, close) - low
+    return (body < 0.1 * (high - low)) & (upper_wick > 3 * body) & (lower_wick < 0.1 * upper_wick)
+
+def detect_dark_cloud_cover(o, c, prev_o, prev_c):
+    return (prev_c > prev_o) & (c < o) & (o > prev_c) & (c < (prev_o + prev_c)/2)
+
+def detect_evening_star(o, c, p1_o, p1_c, p2_o, p2_c):
+    return (p2_c > p2_o) & (np.abs(p1_c - p1_o) < 0.3 * np.abs(p2_c - p2_o)) & (c < o) & (c < (p2_o + p2_c)/2)
+
+def detect_three_line_strike(o, c, p1_o, p1_c, p2_o, p2_c, p3_o, p3_c):
+    # Bullish strike: 3 bearish candles followed by 1 large bullish candle
+    bullish = (p3_c < p3_o) & (p2_c < p2_o) & (p1_c < p1_o) & (c > o) & (c > p3_o)
+    # Bearish strike: 3 bullish candles followed by 1 large bearish candle
+    bearish = (p3_c > p3_o) & (p2_c > p2_o) & (p1_c > p1_o) & (c < o) & (c < p3_o)
+    return bullish, bearish
+
+def detect_spinning_top(open_, high, low, close):
+    body = np.abs(close - open_)
+    upper_wick = high - np.maximum(open_, close)
+    lower_wick = np.minimum(open_, close) - low
+    return (body < 0.2 * (high - low)) & (upper_wick > body) & (lower_wick > body)
+
+def detect_engulfing(o, c, prev_o, prev_c):
+    bullish = (prev_c < prev_o) & (c > o) & (o < prev_c) & (c > prev_o)
+    bearish = (prev_c > prev_o) & (c < o) & (o > prev_c) & (c < prev_o)
+    return bullish, bearish
+
+def detect_harami(o, c, prev_o, prev_c):
+    bullish = (prev_c < prev_o) & (c > o) & (o > prev_c) & (c < prev_o)
+    bearish = (prev_c > prev_o) & (c < o) & (o < prev_c) & (c > prev_o)
+    return bullish, bearish
+
+def detect_three_outside(o, c, po, pc, p2o, p2c):
+    # Bullish: Engulfing followed by a higher close
+    bullish = (p2c < p2o) & (pc > po) & (po < p2c) & (pc > p2o) & (c > pc)
+    # Bearish: Engulfing followed by a lower close
+    bearish = (p2c > p2o) & (pc < po) & (po > p2c) & (pc < p2o) & (c < pc)
+    return bullish, bearish
+
+def detect_three_inside(o, c, po, pc, p2o, p2c):
+    # Bullish: Harami followed by a higher close
+    bullish = (p2c < p2o) & (pc > po) & (pc < p2o) & (po > p2c) & (c > pc)
+    # Bearish: Harami followed by a lower close
+    bearish = (p2c > p2o) & (pc < po) & (pc > p2o) & (po < p2c) & (c < pc)
+    return bullish, bearish
 
 def normalize_series(series):
     """
@@ -1482,6 +1735,158 @@ def strategy_listing_surge(df, config):
     df['sell_candidate'] = df['close'] < df['close'].shift(3) # Exit fast after surge
 
     return apply_confirmation(df, 1)
+
+def strategy_tema_crossover(df, config):
+    """
+    Triple Exponential Moving Average (TEMA) Crossover strategy.
+
+    Buy signal when price crosses above the TEMA.
+    Sell signal when price crosses below the TEMA.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration (tema_length).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
+    length = config.get('tema_length', 20)
+    device = config.get('device', torch.device('cpu'))
+
+    # Check if tema_20 (default) was already calculated, otherwise calculate custom length
+    col_name = f'tema_{length}_strat'
+    if length == 20 and 'tema_20' in df.columns:
+        df[col_name] = df['tema_20']
+    else:
+        if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
+            close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+            df[col_name] = torch_tema(close_t, length).to('cpu').numpy()
+        else:
+            tema_series = ta.tema(df['close'], length=length)
+            df[col_name] = tema_series.fillna(df['close']) if tema_series is not None else df['close']
+
+    df['buy_candidate'] = (df['close'] > df[col_name]) & (df['close'].shift(1) <= df[col_name].shift(1))
+    df['sell_candidate'] = (df['close'] < df[col_name]) & (df['close'].shift(1) >= df[col_name].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_sinewave(df, config):
+    """
+    Hilbert Transform SineWave strategy.
+
+    Buy when Sine crosses above LeadSine.
+    Sell when Sine crosses below LeadSine.
+    """
+    device = config.get('device', torch.device('cpu'))
+    if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
+        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+        sine, leadsine = torch_sinewave(close_t)
+        df['sine'] = sine.to('cpu').numpy()
+        df['leadsine'] = leadsine.to('cpu').numpy()
+    else:
+        # Fallback to pandas_ta if available
+        sw = ta.sinewave(df['close'])
+        if sw is not None:
+            df['sine'] = sw.iloc[:, 0]; df['leadsine'] = sw.iloc[:, 1]
+        else:
+            df['sine'] = df['leadsine'] = 0
+
+    df['buy_candidate'] = (df['sine'] > df['leadsine']) & (df['sine'].shift(1) <= df['leadsine'].shift(1))
+    df['sell_candidate'] = (df['sine'] < df['leadsine']) & (df['sine'].shift(1) >= df['leadsine'].shift(1))
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
+
+def strategy_candle_patterns(df, config):
+    """
+    Comprehensive Candlestick Pattern strategy.
+    """
+    o, h, l, c = df['open'], df['high'], df['low'], df['close']
+    po, ph, pl, pc = o.shift(1), h.shift(1), l.shift(1), c.shift(1)
+    p2o, p2c = o.shift(2), c.shift(2)
+    p3o, p3c = o.shift(3), c.shift(3)
+
+    # Bullish
+    bull_eng, _ = detect_engulfing(o, c, po, pc)
+    bull_har, _ = detect_harami(o, c, po, pc)
+    hammer = detect_hammer(o, h, l, c)
+    inv_hammer = detect_inverted_hammer(o, h, l, c)
+    df_doji = detect_dragonfly_doji(o, h, l, c)
+    piercing = detect_piercing_line(o, c, po, pc)
+    morn_star = detect_morning_star(o, c, po, pc, p2o, p2c)
+    soldiers = detect_three_white_soldiers(o, c, po, pc, p2o, p2c)
+    bull_3ls, _ = detect_three_line_strike(o, c, po, pc, p2o, p2c, p3o, p3c)
+    bull_3out, _ = detect_three_outside(o, c, po, pc, p2o, p2c)
+    bull_3in, _ = detect_three_inside(o, c, po, pc, p2o, p2c)
+    spinning_top = detect_spinning_top(o, h, l, c)
+
+    # Bearish
+    _, bear_eng = detect_engulfing(o, c, po, pc)
+    _, bear_har = detect_harami(o, c, po, pc)
+    hang_man = detect_hanging_man(o, h, l, c)
+    shoot_star = detect_shooting_star(o, h, l, c)
+    grav_doji = detect_gravestone_doji(o, h, l, c)
+    dark_cloud = detect_dark_cloud_cover(o, c, po, pc)
+    even_star = detect_evening_star(o, c, po, pc, p2o, p2c)
+    even_doji_star = detect_evening_doji_star(o, c, po, pc, ph, pl, p2o, p2c)
+    _, bear_3ls = detect_three_line_strike(o, c, po, pc, p2o, p2c, p3o, p3c)
+    _, bear_3out = detect_three_outside(o, c, po, pc, p2o, p2c)
+    _, bear_3in = detect_three_inside(o, c, po, pc, p2o, p2c)
+
+    df['buy_candidate'] = bull_eng | bull_har | hammer | inv_hammer | df_doji | piercing | morn_star | soldiers | bull_3ls | bull_3out | bull_3in | (spinning_top & (c > o))
+    df['sell_candidate'] = bear_eng | bear_har | hang_man | shoot_star | grav_doji | dark_cloud | even_star | even_doji_star | bear_3ls | bear_3out | bear_3in | (spinning_top & (c < o))
+
+    return apply_confirmation(df, 1)
+
+def strategy_heikin_ashi(df, config):
+    """
+    Heikin Ashi Strategy.
+
+    Uses Heikin Ashi "shadow" candles for noise filtering.
+    Buy signal: Green HA candle (HA_Close > HA_Open) with no lower wick.
+    Sell signal: Red HA candle (HA_Close < HA_Open) with no upper wick.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    config : dict
+        Strategy configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated dataframe with buy/sell signals.
+    """
+    device = config.get('device', torch.device('cpu'))
+
+    if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
+        o_t = torch.tensor(df['open'].values, device=device, dtype=torch.float64)
+        h_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
+        l_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
+        c_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+        ha_o, ha_h, ha_l, ha_c = torch_heikin_ashi(o_t, h_t, l_t, c_t)
+        df['ha_open'] = ha_o.to('cpu').numpy()
+        df['ha_high'] = ha_h.to('cpu').numpy()
+        df['ha_low'] = ha_l.to('cpu').numpy()
+        df['ha_close'] = ha_c.to('cpu').numpy()
+    else:
+        ha_df = ta.ha(df['open'], df['high'], df['low'], df['close'])
+        df['ha_open'] = ha_df.iloc[:, 0]; df['ha_high'] = ha_df.iloc[:, 1]
+        df['ha_low'] = ha_df.iloc[:, 2]; df['ha_close'] = ha_df.iloc[:, 3]
+
+    # Buy: Green candle (HA_Close > HA_Open) and No lower wick (HA_Low == HA_Open)
+    # Using a small epsilon for float comparison
+    df['buy_candidate'] = (df['ha_close'] > df['ha_open']) & (np.abs(df['ha_low'] - df['ha_open']) < 1e-8)
+
+    # Sell: Red candle (HA_Close < HA_Open) and No upper wick (HA_High == HA_Open)
+    df['sell_candidate'] = (df['ha_close'] < df['ha_open']) & (np.abs(df['ha_high'] - df['ha_open']) < 1e-8)
+
+    return apply_confirmation(df, config.get('confirmation_window', 3))
 
 # --- LEGACY / ORIGINAL ---
 
