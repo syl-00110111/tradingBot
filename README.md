@@ -8,8 +8,7 @@ A universal cryptocurrency trading bot implemented in Python, leveraging multi-c
 This bot implements strategies and logic recommended by leading empirical studies in the cryptocurrency markets:
 
 - **Success Pattern Matching (SPM)**: The bot scans historical candles backwards to identify success patterns. It then uses GPU-accelerated Pearson correlation and technical state similarity (RSI/ADX) to activate trading only when current market conditions match these proven windows.
-- **BTC Strategy (MACD/RSI)**: MACD and RSI provide reliable signals for Bitcoin's price action (*Urquhart, 2016*; *Zhang et al., 2020*).
-- **ETH Strategy (Stochastic RSI)**: Optimized for Ethereum's volatility, following the findings of *Zhang et al. (2020)*.
+- **Multi-Technique Scoring**: Aggregates signals from multiple strategies and aggressiveness profiles. Signal score is weighted by the number of techniques and the optimal timeframe score of the symbol.
 - **Market Regime Detection**: Utilizes volatility-based switching between Mean-Reversion and Trend-Following (*Baur & Dimpfl, 2021*).
 - **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for every signal, penalizing high-risk setups.
 - **Hardware SIMD Optimization**: Automatic detection and utilization of CPU instruction sets (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) for optimized performance on non-GPU environments.
@@ -21,31 +20,30 @@ This bot implements strategies and logic recommended by leading empirical studie
 ### ⚡ Performance & Reliability
 - **GPU Acceleration**: Calculations are offloaded to the graphics chip via PyTorch. Supported backends: **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** and **ROCm**.
 - **Instruction Set Optimization**: Automatically leverages advanced CPU features (SSE/AVX) for vectorized math operations when GPU is unavailable.
-- **Multi-Processing Benchmark**: Strategy optimization is parallelized across all CPU cores.
+- **Multi-Processing Test**: Strategy optimization is parallelized across all CPU cores.
 - **Fresh Ticker Price**: Fetches a fresh price from the exchange immediately before placing a Buy order to ensure compliance with Spot market NOTIONAL limits and reduce "Filter failure" errors.
 - **Interactive Dashboard**: Navigate through trading pairs with arrow keys and visualize real-time ASCII candlestick charts by pressing **ENTER**.
 - **Auto-Position Discovery**: Automatically identifies existing assets in your wallet and populates them as managed positions for strategy-based exits.
 - **API Synchronization**: Live mode exclusively uses exchange API data for balances and positions.
 - **Dynamic Timeframe Selection**: Automatically determines the optimal timeframe (1m, 3m, 5m, 15m, 30m) for each pair based on 48h volume, spread, volatility, and trading activity.
-- **Advanced Re-benchmarking**: Continuous strategy optimization using a timeframe-tailored horizon (120 candles). Performance is evaluated using time-slice segmentation (tenths) to ensure consistency across chronological windows.
+- **Advanced Re-scanning**: Continuous signal scanning using a timeframe-tailored horizon.
 
 ### 🛡 Risk Management
 - **Confirmation Logic**: Requires consecutive identical signals (Buy or Sell) for execution:
   - **Standard**: 1 signal
   - **High Volatility (> 0.1)**: 2 signals
   - *Volatility is the sole property determining the confirmation window.*
-- **Loss Prevention**: Integrated break-even verification. If a sell order would result in a loss (including fees), it is automatically aborted, and the symbol is scheduled for an immediate re-benchmark with a mandatory change in trading technique.
-- **Technique Rotation**: To ensure adaptability, the bot enforces a mandatory change of strategy/aggressiveness after every performance test ('Last for' selection strategy).
-- **Automatic Suspension**: Automatically suspends trading for symbols where orders fail (e.g. insufficient balance or exchange limits) to prevent logic loops.
+- **Budget-Aware Suspension**: Automatically suspends trading for symbols where orders fail or budget is insufficient. Resumes only when 1.5x the required budget becomes available.
+- **HTTP 500 Resilience**: Implements a 21-minute cool-down for symbols encountering exchange server errors.
 - **Dynamic Position Sizing**: Position sizes are calculated as a **percentage** of your available base currency (e.g. 9.0 = 9%).
 
 ---
 
 ## 📈 Supported Strategies
-The bot features 35+ distinct trading strategies, including:
+The bot features 30+ distinct trading strategies, including:
 
-- **Trend Following**: `moving_averages`, `ichimoku_cloud`, `parabolic_sar`, `double_ema`, `adx_trend_strength`, `halving_cycle_proxy`.
-- **Mean Reversion & Range**: `bollinger_bands`, `rsi_support_resistance`, `macd_range`, `pairs_trading_proxy`.
+- **Trend Following**: `ichimoku_cloud`, `parabolic_sar`, `adx_trend_strength`, `halving_cycle_proxy`.
+- **Mean Reversion & Range**: `bollinger_bands`, `rsi_support_resistance`, `pairs_trading_proxy`.
 - **Breakout & Momentum**: `breakout_volume`, `donchian_channels`, `atr_breakout`, `stochastic_rsi`, `williams_r`, `vwap_momentum`, `listing_surge_proxy`.
 - **Scalping & Order Flow**: `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`.
 - **Advanced Proxies**: `scientific_ensemble`, `whale_detection_proxy`, `pump_dump_proxy`, `market_regime_proxy`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`, `mvrv_proxy`.
@@ -101,7 +99,7 @@ Main bot settings.
     *   `multiplier`: (float) Balance multiplier applied to trade size during a streak (default: `1.2`).
 
 #### Dynamic Logic Settings
-*   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-benchmark of the symbol (default: `48`).
+*   **`no_signal_threshold`**: (int) Number of candles to wait without a signal before triggering an automatic re-scan of the symbol (default: `48`).
 *   **`timeframe_thresholds`**: (Object) Criteria for dynamic timeframe selection (1m, 3m, 5m, 15m, 30m).
     *   **`volume_48h`**: (low/high) thresholds for 48h trading volume (default: `1000`/`80000`).
     *   **`spread_pct`**: (low/high) thresholds for the bid/ask spread percentage (default: `0.001`/`0.02`).
@@ -109,15 +107,17 @@ Main bot settings.
     *   **`trades_per_minute`**: (low/high) thresholds for trading frequency (default: `1`/`40`).
 
 #### Advanced Overrides (Optional)
-*   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy (e.g., `double_ema_macd_rsi`) for every pair, bypassing benchmarking.
+*   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy for every pair.
 *   **`force_agressivity_to_all_pairs`**: (string) Force a specific aggressiveness level (e.g., `dynamic`, `normal`, `aggressive`).
-*   **`pairs`**: (Object) Allows per-pair configuration overrides.
+*   **`pairs`**: (Object) Allows per-pair configuration with multiple techniques.
     Example:
     ```json
     "pairs": {
         "BTC/USDC": {
-            "strategy": "moving_averages",
-            "aggr": "aggressive"
+            "techniques": [
+                {"strategy": "ichimoku_cloud", "aggr": ["normal", "aggressive"]},
+                {"strategy": "bollinger_bands", "aggr": ["normal"]}
+            ]
         }
     }
     ```
@@ -147,8 +147,6 @@ Also, ensure that your computer's clock is synchronized.
 ### Execution Modes
 - **Simulation**: `python bot.py --mode simulation --exchange kraken`
 - **Live**: `python bot.py --mode live --exchange binance`
-- **Benchmark**: `python bot.py --mode benchmark --every-symbol`
-- **Backtest**: `python bot.py --mode backtest --symbol BTC/EUR --strategy moving_averages`
 - **Balance**: `python bot.py --mode balance`
 
 - Make sure to synchronize your clock before usage of the bot.
