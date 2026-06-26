@@ -74,6 +74,7 @@ all_logs = []
 status_scroll_index = 0
 expert_mode = False
 show_help = False
+startup_complete = False
 marquee_enabled = False
 shutdown_event = threading.Event()
 
@@ -255,6 +256,24 @@ class DashboardHandler(logging.Handler):
             if pool_msg in msg:
                  for log in all_logs:
                       if pool_msg in log['msg']:
+                           log['msg'] = f"[{timestamp}] {msg}"
+                           log['expiry'] = expiry
+                           return
+
+            # Status update merging (Point 2)
+            # 1. Syncing positions
+            if "Syncing positions from" in msg and "done." in msg:
+                 base_msg = msg.replace(" done.", "")
+                 for log in all_logs:
+                      if base_msg in log['msg'] and "done." not in log['msg']:
+                           log['msg'] = f"[{timestamp}] {msg}"
+                           log['expiry'] = expiry
+                           return
+
+            # 2. First data streams
+            if "First data streams acquired and analysis done." in msg:
+                 for log in all_logs:
+                      if "Waiting for first data streams and analysis..." in log['msg']:
                            log['msg'] = f"[{timestamp}] {msg}"
                            log['expiry'] = expiry
                            return
@@ -799,6 +818,11 @@ def make_dashboard(global_mode, config):
         chart_content = render_ascii_chart(chart_symbol, config)
         pairs_panel = Panel(chart_content, title=f"[bold]K-Lines: {chart_symbol}[/]", border_style="bold magenta")
 
+    if not startup_complete:
+         waiting_text = Text("\n\n\n\n\n[bold blink yellow]Waiting for system initialization...[/]\n", justify="center")
+         waiting_text.append("[dim]Fetching market data and calculating first signals...[/]\n", style="white")
+         pairs_panel = Panel(waiting_text, title="[bold]System Startup[/]", border_style="bold yellow")
+
     layout = Layout()
     layout.split(
         Layout(Panel(Text("CCXT Pro Trading Bot Dashboard", style="bold magenta", justify="center"), border_style="blue"), size=3),
@@ -816,10 +840,12 @@ def input_thread_func():
     toggle chart view, and toggle expert/marquee modes.
     """
     global pairs_scroll_offset, selected_pair_index, show_chart, chart_symbol, logs_scroll_offset, focused_panel
-    global pairs_pause_until, logs_pause_until, expert_mode, show_help, marquee_enabled
+    global pairs_pause_until, logs_pause_until, expert_mode, show_help, marquee_enabled, startup_complete
     while not shutdown_event.is_set():
         try:
             key = readchar.readkey()
+            if not startup_complete:
+                 continue
             # Calculate heights for clamping
             with bot_lock:
                  log_height = 8
@@ -1217,6 +1243,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             if not first_analysis_done:
                 logging.info("First data streams acquired and analysis done.")
                 first_analysis_done = True
+                global startup_complete
+                startup_complete = True
 
             for _ in range(5):
                  if shutdown_event.is_set(): break
