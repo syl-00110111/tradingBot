@@ -131,9 +131,10 @@ class TradingEngine:
         """
         return self.is_profitable(current_price, entry_price, fee_rate)
 
-    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, max_lots=1):
+    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, max_lots=1, timeframe='1m'):
         """
         Calcule la quantité d'un actif à acheter en fonction du solde du portefeuille et du risque.
+        Applique un multiplicateur pour les paires dynamiques (1s).
         """
         base_balance = 0
         if balance and isinstance(balance, dict):
@@ -162,6 +163,12 @@ class TradingEngine:
 
         # 3. Appliquer le multiplicateur de risque
         trade_amount_base *= self.risk_multiplier
+
+        # Multiplicateur pour les paires dynamiques (1s)
+        if timeframe == '1s':
+            dynamic_multiplier = float(self.config.get('dynamic_pair_multiplier', 2.0))
+            trade_amount_base *= dynamic_multiplier
+            # logging.info(f"Paire dynamique (1s) détectée, application du multiplicateur {dynamic_multiplier}x.")
 
         # 4. Appliquer le bonus de série de victoires
         ws_config = self.config.get('win_streak_bonus', {})

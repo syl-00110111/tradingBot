@@ -9,10 +9,14 @@ and includes a Mock handler for simulations and testing.
 """
 
 import ccxt
+import ccxt.pro as ccxtpro
+import asyncio
+import queue
 import time
 import logging
 import threading
 import requests
+import re
 from requests.adapters import HTTPAdapter
 
 class ThrottledExchange:
@@ -88,7 +92,7 @@ class ExchangeInterface:
 
 class CCXTExchange(ExchangeInterface):
     """
-    Generic exchange handler using CCXT.
+    Generic exchange handler using CCXT and CCXT Pro.
 
     Parameters
     ----------
@@ -119,7 +123,31 @@ class CCXTExchange(ExchangeInterface):
             config['options'].update(options)
 
         self.exchange = ThrottledExchange(exchange_class(config))
+
+        # CCXT Pro initialization
+        pro_config = config.copy()
+        # CCXT Pro doesn't use the same session as sync CCXT
+        if 'session' in pro_config: del pro_config['session']
+
+        self.pro_exchange = getattr(ccxtpro, exchange_id)(pro_config)
         self.exchange_id = exchange_id
+
+        # Async event loop for CCXT Pro
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.loop_thread.start()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def close(self):
+        """Closes the exchange and shuts down the async loop."""
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.pro_exchange.close(), self.loop)
+            future.result(timeout=5)
+        except: pass
+        self.loop.call_soon_threadsafe(self.loop.stop())
 
     def load_markets(self):
         try:
@@ -129,12 +157,7 @@ class CCXTExchange(ExchangeInterface):
 
     def watch_ohlcv(self, symbol, timeframe):
         """
-        Watches for OHLCV updates using a polling fallback mechanism.
-        Preference for real WebSockets (Watch) over Fetch where possible.
-
-        Since the standard CCXT library is synchronous, this method simulates
-        a real-time stream by periodically fetching the latest candles and
-        yielding new or updated ones.
+        Watches for OHLCV updates using either real WebSockets (CCXT Pro) or polling.
 
         Parameters
         ----------
@@ -148,23 +171,61 @@ class CCXTExchange(ExchangeInterface):
         list
             A single OHLCV candle [timestamp, open, high, low, close, volume].
         """
+        if timeframe in ['1s', '1m']:
+            yield from self._watch_websocket(symbol, timeframe)
+        else:
+            yield from self._watch_polling(symbol, timeframe)
+
+    def _watch_websocket(self, symbol, timeframe):
+        """Watches OHLCV via CCXT Pro WebSocket."""
+        q = queue.Queue()
+
+        async def _watcher():
+            try:
+                while True:
+                    ohlcv = await self.pro_exchange.watch_ohlcv(symbol, timeframe)
+                    if ohlcv:
+                        q.put(ohlcv)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                q.put(e)
+
+        task = asyncio.run_coroutine_threadsafe(_watcher(), self.loop)
+        last_candle = None
+
+        try:
+            while True:
+                item = q.get()
+                if isinstance(item, Exception):
+                    logging.error(f"WebSocket error for {symbol} ({timeframe}): {item}")
+                    raise item
+
+                # Pro watch_ohlcv usually returns the full list
+                for candle in item:
+                    if last_candle is None or candle[0] > last_candle[0] or (candle[0] == last_candle[0] and candle != last_candle):
+                        yield candle
+                        last_candle = candle
+        finally:
+            task.cancel()
+
+    def _watch_polling(self, symbol, timeframe):
+        """Watches OHLCV via standard CCXT polling."""
         last_candle = None
         while True:
             try:
                 ohlcv = self.fetch_ohlcv(symbol, timeframe, limit=5)
                 if ohlcv:
                     for candle in ohlcv:
-                        # Yield if it's a new candle OR if the current candle has changed data
                         if last_candle is None or candle[0] > last_candle[0] or (candle[0] == last_candle[0] and candle != last_candle):
                             yield candle
                             last_candle = candle
             except Exception as e:
                 err_msg = str(e)
                 if "500" in err_msg:
-                    # Let it bubble up for suspension handling in bot.py
                     raise e
-                logging.error(f"Error in watch_ohlcv loop for {symbol} on {self.exchange_id}: {e}")
-            time.sleep(2)
+                logging.error(f"Error in polling watch_ohlcv loop for {symbol} on {self.exchange_id}: {e}")
+            time.sleep(10 if timeframe not in ['1s', '1m', '3m', '5m'] else 2)
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
         try:
@@ -173,7 +234,6 @@ class CCXTExchange(ExchangeInterface):
             err_msg = str(e)
             # Grouping and clean error reporting
             status_code = "Error"
-            import re
             # Catch HTTP status codes (4xx, 5xx)
             code_match = re.search(r'\b([45]\d{2})\b', err_msg)
             if code_match:

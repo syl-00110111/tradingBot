@@ -380,39 +380,43 @@ def load_config():
         sys.exit(1)
     return load_config_from_path(path)
 
-def get_optimal_timeframe(exchange, symbol, config):
+def get_optimal_timeframe(exchange, symbol, config, current_score=None):
     """
     Dynamically determines the optimal timeframe for a pair.
 
-    The decision is based on 48h volume, spread, volatility, and trades per minute,
-    comparing them against thresholds defined in the configuration.
+    Decision is based on 48h volume, spread, volatility, and trades per minute.
+    Supports '1s' for highly active pairs and absolute scoring.
 
     Parameters
     ----------
     exchange : ExchangeInterface
-        The exchange instance to fetch market data from.
+        The exchange instance.
     symbol : str
         The trading pair symbol.
     config : dict
-        The bot configuration containing timeframe thresholds.
+        Bot configuration.
+    current_score : int, optional
+        Deprecated: scoring is now absolute to avoid drift.
 
     Returns
     -------
     tf : str
-        The suggested timeframe (e.g., '1m', '5m', '30m').
+        The suggested timeframe ('1s', '1m', '3m', '5m', '15m', '30m').
     score : int
-        The calculated score based on market conditions.
+        The calculated absolute score.
     reasons : list of str
-        List of reasons contributing to the chosen timeframe.
+        Contributing reasons.
     """
     thresholds = config.get('timeframe_thresholds', {})
 
     try:
         ticker = exchange.fetch_ticker(symbol)
-        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=60)
-        trades = exchange.fetch_trades(symbol, limit=1000)
+        if not ticker: return '1m', 0, ["Ticker unavailable"]
 
-        # 1. Volume 48h
+        ohlcv_1h = exchange.fetch_ohlcv(symbol, '1h', limit=24)
+        trades = exchange.fetch_trades(symbol, limit=200) # Reduced limit to lower API pressure
+
+        # 1. Volume 48h (approx)
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
         vol_high = thresholds.get('volume_48h', {}).get('high', 120000)
@@ -425,15 +429,15 @@ def get_optimal_timeframe(exchange, symbol, config):
         spr_low = thresholds.get('spread_pct', {}).get('low', 0.001)
         spr_high = thresholds.get('spread_pct', {}).get('high', 0.04)
 
-        # 3. Volatility
+        # 3. Volatility (Short-term)
         volatility = 0.05
-        if ohlcv and len(ohlcv) > 0:
-            closes = [candle[4] for candle in ohlcv]
+        if ohlcv_1h and len(ohlcv_1h) > 0:
+            closes = [candle[4] for candle in ohlcv_1h]
             volatility = (max(closes) - min(closes)) / min(closes)
         vlt_low = thresholds.get('volatility_pct', {}).get('low', 0.01)
         vlt_high = thresholds.get('volatility_pct', {}).get('high', 0.1)
 
-        # 4. Trades per minute
+        # 4. Trades activity
         if trades:
             times = [t['timestamp'] for t in trades]
             duration_mins = (max(times) - min(times)) / 60000
@@ -441,36 +445,45 @@ def get_optimal_timeframe(exchange, symbol, config):
         else:
             trades_per_min = 0
         tpm_low = thresholds.get('trades_per_minute', {}).get('low', 1)
-        tpm_high = thresholds.get('trades_per_minute', {}).get('high', 40)
+        tpm_high = thresholds.get('trades_per_minute', {}).get('high', 100)
 
-        # Scoring logic: higher score = faster timeframe
+        # Base Score (Absolute)
         score = 0
         reasons = []
-        if volume_48h > vol_high: score += 1; reasons.append("High Vol")
-        elif volume_48h < vol_low: score -= 1; reasons.append("Low Vol")
+
+        # Absolute increments
+        if volume_48h > vol_high * 10: score += 2; reasons.append("Ultra High Vol")
+        elif volume_48h > vol_high: score += 1; reasons.append("High Vol")
 
         if spread_pct < spr_low: score += 1; reasons.append("Tight Spread")
-        elif spread_pct > spr_high: score -= 1; reasons.append("Wide Spread")
 
-        if volatility < vlt_low: score += 1; reasons.append("Stable")
-        elif volatility > vlt_high: score -= 1; reasons.append("Volatile")
+        if volatility > vlt_high: score += 1; reasons.append("High Volatility")
 
-        if trades_per_min > tpm_high: score += 1; reasons.append("Active")
-        elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
+        if trades_per_min > tpm_high: score += 2; reasons.append("Very Active")
+        elif trades_per_min > tpm_high / 2: score += 1; reasons.append("Active")
 
-        if score >= 2: tf = '1m'
+        # Absolute decrements
+        if volume_48h < vol_low: score -= 1; reasons.append("Low Vol")
+        if spread_pct > spr_high: score -= 1; reasons.append("Wide Spread")
+        if volatility < vlt_low: score -= 1; reasons.append("Stable")
+        if trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
+
+        # Score Capping
+        score = max(-2, min(4, score))
+
+        # Mapping score to timeframe
+        if score >= 3: tf = '1s'
+        elif score == 2: tf = '1m'
         elif score == 1: tf = '3m'
-        elif score <= 0 and score >= -1: tf = '5m'
-        elif score == -2: tf = '15m'
+        elif score == 0: tf = '5m'
+        elif score == -1: tf = '15m'
         else: tf = '30m'
 
-        # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
         return tf, score, reasons
 
     except Exception as e:
-        err_msg = str(e)
-        logging.warning(f"Error determining timeframe for {symbol}: {err_msg}. Defaulting to 1m.")
-        return '1m', 0, [f"Error: {err_msg}"]
+        logging.warning(f"Error determining timeframe for {symbol}: {e}. Defaulting to 1m.")
+        return '1m', 0, [str(e)]
 
 def render_ascii_chart(symbol, config):
     """
@@ -927,81 +940,79 @@ def input_thread_func():
             break
         except Exception: pass
 
-def ohlcv_watcher_thread(exchange, symbol, timeframe, config):
+def ohlcv_watcher_thread(exchange, symbol, config):
     """
-    Background thread to watch OHLCV updates and update the local cache.
-
-    Initializes the cache with historical data and then listens for real-time
-    candle updates from the exchange. Handles gap filling between fetch and watch.
-
-    Parameters
-    ----------
-    exchange : ExchangeInterface
-        The exchange instance to watch.
-    symbol : str
-        The trading pair symbol.
-    timeframe : str
-        The timeframe to watch (e.g., '1m').
-    config : dict
-        The bot configuration.
+    Background thread to watch OHLCV updates for a symbol.
+    Supports adaptive timeframe changes.
     """
-    # logging.info(f"Starting OHLCV watcher for {symbol} ({timeframe})")
-    try:
-        # 1. Fetch initial historical data
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
-        if ohlcv:
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
-            with ohlcv_cache_lock:
-                ohlcv_cache[f"{symbol}_{timeframe}"] = df
+    current_tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
 
-        # 2. Transition to watch (Websockets preference)
-        for candle in exchange.watch_ohlcv(symbol, timeframe):
-            if shutdown_event.is_set(): break
+    while not shutdown_event.is_set():
+        try:
+            # 1. Fetch initial historical data for the current timeframe
+            ohlcv = exchange.fetch_ohlcv(symbol, current_tf, limit=500)
+            if ohlcv:
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
+                with ohlcv_cache_lock:
+                    ohlcv_cache[f"{symbol}_{current_tf}"] = df
 
-            with ohlcv_cache_lock:
-                cache_key = f"{symbol}_{timeframe}"
-                if cache_key in ohlcv_cache:
-                    df = ohlcv_cache[cache_key]
-                    new_row = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    new_ts = pd.to_datetime(new_row['timestamp'], unit='ms').iloc[0]
+            # 2. Watch for real-time updates
+            for candle in exchange.watch_ohlcv(symbol, current_tf):
+                if shutdown_event.is_set(): break
 
-                    # Check for gaps (if new candle is more than 1 timeframe period away from last)
-                    if not df.empty:
-                        last_ts = df.index[-1]
-                        # Assuming 1m timeframe for now as per Point 3
-                        period_delta = timedelta(minutes=1)
-                        if new_ts > last_ts + period_delta:
-                            # GAP DETECTED: Perform a fetch to fill the void (Point 1)
-                            # logging.info(f"[{symbol}] Gap detected in OHLCV stream. Fetching missing data.")
-                            since_ms = int(last_ts.timestamp() * 1000) + 1
-                            missing_ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms)
-                            if missing_ohlcv:
-                                m_df = pd.DataFrame(missing_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                                m_df['timestamp'] = pd.to_datetime(m_df['timestamp'], unit='ms')
-                                m_df.set_index('timestamp', drop=False, inplace=True)
-                                df = pd.concat([df, m_df])
+                # Check if timeframe needs to change
+                with bot_lock:
+                    new_tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
 
-                    new_row['timestamp'] = new_ts
-                    new_row.set_index('timestamp', drop=False, inplace=True)
+                if new_tf != current_tf:
+                    logging.info(f"[{symbol}] Timeframe changing from {current_tf} to {new_tf}. Restarting watcher.")
+                    current_tf = new_tf
+                    break # Restart loop with new timeframe
 
-                    # Update or append
-                    if not df.empty and new_ts in df.index:
-                        df.loc[new_ts] = new_row.iloc[0]
+                with ohlcv_cache_lock:
+                    cache_key = f"{symbol}_{current_tf}"
+                    if cache_key in ohlcv_cache:
+                        df = ohlcv_cache[cache_key]
+                        new_row = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        new_ts = pd.to_datetime(new_row['timestamp'], unit='ms').iloc[0]
+
+                        # Check for gaps
+                        if not df.empty:
+                            last_ts = df.index[-1]
+                            # Adaptive delta based on timeframe
+                            delta_map = {'1s': timedelta(seconds=1), '1m': timedelta(minutes=1), '3m': timedelta(minutes=3), '5m': timedelta(minutes=5), '15m': timedelta(minutes=15), '30m': timedelta(minutes=30)}
+                            period_delta = delta_map.get(current_tf, timedelta(minutes=1))
+
+                            if new_ts > last_ts + period_delta:
+                                since_ms = int(last_ts.timestamp() * 1000) + 1
+                                missing_ohlcv = exchange.fetch_ohlcv(symbol, current_tf, since=since_ms)
+                                if missing_ohlcv:
+                                    m_df = pd.DataFrame(missing_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                                    m_df['timestamp'] = pd.to_datetime(m_df['timestamp'], unit='ms')
+                                    m_df.set_index('timestamp', drop=False, inplace=True)
+                                    df = pd.concat([df, m_df])
+
+                        new_row['timestamp'] = new_ts
+                        new_row.set_index('timestamp', drop=False, inplace=True)
+
+                        if not df.empty and new_ts in df.index:
+                            df.loc[new_ts] = new_row.iloc[0]
+                        else:
+                            df = pd.concat([df, new_row]).tail(1000)
+
+                        df = df[~df.index.duplicated(keep='last')].sort_index()
+                        ohlcv_cache[cache_key] = df
                     else:
-                        df = pd.concat([df, new_row]).tail(1000)
-
-                    # Ensure chronological order and remove potential duplicates
-                    df = df[~df.index.duplicated(keep='last')].sort_index()
-                    ohlcv_cache[cache_key] = df
-                else:
-                    df = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    df.set_index('timestamp', drop=False, inplace=True)
-                    ohlcv_cache[cache_key] = df
-    except Exception as e:
-        logging.error(f"Error in OHLCV watcher for {symbol}: {e}")
+                        df = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                        df.set_index('timestamp', drop=False, inplace=True)
+                        ohlcv_cache[cache_key] = df
+        except Exception as e:
+            if not shutdown_event.is_set():
+                logging.error(f"Error in OHLCV watcher for {symbol}: {e}")
+                time.sleep(5)
 
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
     """
@@ -1027,13 +1038,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     """
     first_analysis_done = False
 
-    # Initial Optimal Timeframe Discovery (Point 3 - Background)
+    # Initial Optimal Timeframe Discovery
     for symbol in config.get('pairs', {}):
         try:
             tf, score, _ = get_optimal_timeframe(exchange, symbol, config)
             config['pairs'][symbol]['optimal_tf'] = tf
             config['pairs'][symbol]['optimal_tf_score'] = score
-            config['pairs'][symbol]['timeframe'] = '1m'
+            # Initialize adaptive timeframe
+            config['pairs'][symbol]['timeframe'] = tf
         except:
             config['pairs'][symbol]['optimal_tf'] = '1m'
             config['pairs'][symbol]['optimal_tf_score'] = 0
@@ -1041,8 +1053,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
     # Start watchers for all pairs
     for symbol in config.get('pairs', {}):
-        # Every pair treated at 1m timeframe as per Point 3
-        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, '1m', config), daemon=True).start()
+        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, config), daemon=True).start()
 
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
@@ -1092,6 +1103,26 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     except Exception as e:
                         logging.error(f"Error in background re-scan for {sym}: {e}")
                     completed_symbols.append(sym)
+
+                    # Periodically re-evaluate optimal timeframe adaptively
+                    # Call only if it's been more than 15 minutes since last timeframe check
+                    last_tf_check = config['pairs'][sym].get('_last_tf_check', 0)
+                    if time.time() - last_tf_check > 900: # 15 minutes
+                        try:
+                            old_tf = config['pairs'][sym].get('timeframe')
+                            old_score = config['pairs'][sym].get('optimal_tf_score', 0)
+                            new_tf, new_score, _ = get_optimal_timeframe(exchange, sym, config, current_score=old_score)
+
+                            config['pairs'][sym]['optimal_tf'] = new_tf
+                            config['pairs'][sym]['optimal_tf_score'] = new_score
+                            config['pairs'][sym]['_last_tf_check'] = time.time()
+
+                            # Apply adaptive change
+                            if new_tf != old_tf:
+                                with bot_lock:
+                                    config['pairs'][sym]['timeframe'] = new_tf
+                                # ohlcv_watcher_thread will detect this and restart
+                        except: pass
 
             for sym in completed_symbols:
                 del active_scans[sym]
@@ -1268,7 +1299,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                      for i in range(min(len(potential_buys), slots_available)):
                           if shutdown_event.is_set(): break
                           symbol, data = potential_buys[i]
-                          if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
+                          tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+                          if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance, timeframe=tf):
                                with bot_lock:
                                    bot_state[symbol]['last_action'] = 'BUY'
                                    bot_state[symbol]['position'] = data_manager.get_position(symbol)
@@ -1541,8 +1573,8 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
     and applies volatility-based confirmation windows. It also handles re-initialization
     of signal counts on first run by looking at historical data.
     """
-    # Force 1m timeframe for analysis
-    timeframe = "1m"
+    # Force adaptive timeframe for analysis
+    timeframe = pair_config.get('timeframe', '1m')
 
     # Try to get from cache first (updated by watch_ohlcv)
     cache_key = f"{symbol}_{timeframe}"
@@ -1762,7 +1794,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'trigger_data': trigger_data
     }
 
-def execute_buy(exchange, data_manager, engine, symbol, data, global_config, balance=None):
+def execute_buy(exchange, data_manager, engine, symbol, data, global_config, balance=None, timeframe='1m'):
     """
     Exécute un ordre d'achat pour une paire de trading spécifique.
 
@@ -1796,7 +1828,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
 
     base_curr = symbol.split('/')[1]
     amount = engine.calculate_position_size(
-        balance, current_price, base_curr, win_streak=win_streak, max_lots=max_lots
+        balance, current_price, base_curr, win_streak=win_streak, max_lots=max_lots, timeframe=timeframe
     )
     base_currency = symbol.split('/')[1]
     if amount > 0:
@@ -1998,7 +2030,8 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
 
             for i in range(min(len(potential_buys), slots_available)):
                 symbol, data = potential_buys[i]
-                if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
+                tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+                if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance, timeframe=tf):
                     with bot_lock:
                         bot_state[symbol]['position'] = data_manager.get_position(symbol)
                         bot_state[symbol]['price'] = data['price']
