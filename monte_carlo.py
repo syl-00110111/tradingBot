@@ -1,24 +1,11 @@
-# Binance Trading Bot - Monte Carlo Engine
-# Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+# Bot de Trading Binance - Moteur de Monte Carlo
+# Copyleft © 2026 Jules, Ecosia, Sylvain, le World-Wide-Web et vous
 
 """
-Monte Carlo simulation engine for probability estimation and strategy validation.
+Moteur de simulation de Monte Carlo pour l'estimation des probabilités et la validation des stratégies.
 
-This module uses Geometric Brownian Motion and PyTorch-accelerated simulations
- to assess the potential success of trading strategies.
+Ce module utilise le mouvement brownien géométrique et des simulations accélérées par PyTorch
+pour évaluer le succès potentiel des stratégies de trading.
 """
 
 import numpy as np
@@ -26,92 +13,92 @@ import torch
 
 class MonteCarloEngine:
     """
-    Monte Carlo engine for simulating future price paths and estimating probabilities.
+    Moteur de Monte Carlo pour simuler les trajectoires de prix futures et estimer les probabilités.
 
-    Uses Geometric Brownian Motion (GBM) for simulations, accelerated via PyTorch.
+    Utilise le mouvement brownien géométrique (GBM) pour les simulations, accéléré via PyTorch.
 
-    Parameters
+    Paramètres
     ----------
     num_simulations : int, optional
-        Number of paths to simulate (default is 5000).
+        Nombre de trajectoires à simuler (par défaut 5000).
     timeframe_candles : int, optional
-        Number of steps (candles) to simulate in the future (default is 100).
+        Nombre d'étapes (bougies) à simuler dans le futur (par défaut 100).
     """
     def __init__(self, num_simulations=5000, timeframe_candles=100):
         self.num_simulations = num_simulations
         self.timeframe_candles = timeframe_candles
-        # Device will be updated by the bot at runtime, but we default to CPU
+        # Le device sera mis à jour par le bot au moment de l'exécution, par défaut sur CPU
         self.device = torch.device("cpu")
 
     def set_device(self, device):
         """
-        Updates the computation device (CPU or GPU).
+        Met à jour le périphérique de calcul (CPU ou GPU).
 
-        Parameters
+        Paramètres
         ----------
         device : torch.device
-            The device to use for tensor operations.
+            Le périphérique à utiliser pour les opérations sur les tenseurs.
         """
         self.device = device
 
     def simulate_paths(self, current_price, volatility, drift=0):
         """
-        Simulate price paths using Geometric Brownian Motion.
+        Simule les trajectoires de prix en utilisant le mouvement brownien géométrique.
 
-        Vectorized with PyTorch for hardware acceleration.
+        Vectorisé avec PyTorch pour l'accélération matérielle.
 
-        Parameters
+        Paramètres
         ----------
         current_price : float
-            The starting price for simulation.
+            Le prix de départ pour la simulation.
         volatility : float
-            The standard deviation of log returns.
+            L'écart-type des rendements logarithmiques.
         drift : float, optional
-            The mean of log returns (default is 0).
+            La moyenne des rendements logarithmiques (par défaut 0).
 
-        Returns
+        Retourne
         -------
         torch.Tensor
-            A 2D tensor of shape (num_simulations, timeframe_candles + 1)
-            containing the simulated paths.
+            Un tenseur 2D de forme (num_simulations, timeframe_candles + 1)
+            contenant les trajectoires simulées.
         """
-        # Ensure inputs are tensors and moved to device
+        # S'assurer que les entrées sont des tenseurs et déplacées sur le périphérique
         curr_p = torch.tensor(current_price, device=self.device, dtype=torch.float64)
         vol = torch.tensor(volatility, device=self.device, dtype=torch.float64)
         drft = torch.tensor(drift, device=self.device, dtype=torch.float64)
 
-        # random.normal_ equivalent in torch
+        # Génération des rendements aléatoires normalement distribués
         returns = torch.randn((self.num_simulations, self.timeframe_candles), device=self.device) * vol + drft
 
-        # Cumulative sum for path simulation
+        # Somme cumulative pour la simulation de trajectoire
         price_paths = curr_p * torch.exp(torch.cumsum(returns, dim=1))
 
-        # Prepend current price
+        # Ajouter le prix actuel au début de chaque trajectoire
         ones = torch.ones((self.num_simulations, 1), device=self.device) * curr_p
         price_paths = torch.cat((ones, price_paths), dim=1)
         return price_paths
 
     def estimate_hit_probability(self, current_price, target_price, volatility, drift=0, mode="above"):
         """
-        Estimate the probability of price hitting a target within the timeframe.
+        Estime la probabilité que le prix atteigne une cible dans le délai imparti.
 
-        Parameters
+        Paramètres
         ----------
         current_price : float
-            Starting price.
+            Prix de départ.
         target_price : float
-            The price target to hit.
+            Le prix cible à atteindre.
         volatility : float
-            Log returns volatility.
+            Volatilité des rendements logarithmiques.
         drift : float, optional
-            Log returns drift.
+            Dérive des rendements logarithmiques.
         mode : str, optional
-            Whether to check if price hits "above" or "below" the target.
+            Indique s'il faut vérifier si le prix atteint une valeur "above" (au-dessus) ou "below" (en-dessous) de la cible.
 
-        Returns
+        Retourne
         -------
         float
-            The estimated probability (0.0 to 1.0).
+            La probabilité estimée (0.0 à 1.0).
         """
         if volatility == 0:
             return 1.0 if (mode == "above" and target_price <= current_price) or (mode == "below" and target_price >= current_price) else 0.0
@@ -127,20 +114,20 @@ class MonteCarloEngine:
 
     def validate_strategy(self, df):
         """
-        Validates a strategy's potential by simulating future paths.
+        Valide le potentiel d'une stratégie en simulant les trajectoires futures.
 
-        Calculates historical volatility and drift from the provided data,
-        then determines the probability of price exceeding a 0.15% profit threshold.
+        Calcule la volatilité historique et la dérive à partir des données fournies,
+        puis détermine la probabilité que le prix dépasse un seuil de profit de 0,15%.
 
-        Parameters
+        Paramètres
         ----------
         df : pandas.DataFrame
-            Historical OHLCV data.
+            Données OHLCV historiques.
 
-        Returns
+        Retourne
         -------
         float
-            A scaling factor score between 0.5 and 1.5 based on profit probability.
+            Un score de facteur d'échelle entre 0,5 et 1,5 basé sur la probabilité de profit.
         """
         if len(df) < 20: return 1.0
 
@@ -150,7 +137,7 @@ class MonteCarloEngine:
 
         if len(close) < 2: return 1.0
 
-        # Calculate returns
+        # Calcul des rendements
         price_ratios = close[1:] / close[:-1]
         price_ratios = np.where(price_ratios <= 0, 1.0, price_ratios)
         returns = np.log(price_ratios)
@@ -163,35 +150,35 @@ class MonteCarloEngine:
 
         paths = self.simulate_paths(current_price, volatility, drift)
 
-        # Validation: check how many paths end with profit > expected fees (0.15%)
+        # Validation : vérifie combien de trajectoires se terminent avec un profit > frais attendus (0,15%)
         final_prices = paths[:, -1]
         profit_prob = torch.mean((final_prices > current_price * 1.0015).double()).item()
 
-        # Transform probability into a scaling factor [0.5, 1.5]
+        # Transformation de la probabilité en un facteur d'échelle [0,5, 1,5]
         score = 0.5 + profit_prob
         return score
 
     def price_option(self, current_price, strike_price, volatility, drift=0, option_type="call"):
         """
-        Estimates an option price using Monte Carlo simulation.
+        Estime le prix d'une option en utilisant la simulation de Monte Carlo.
 
-        Parameters
+        Paramètres
         ----------
         current_price : float
-            Current asset price.
+            Prix actuel de l'actif.
         strike_price : float
-            Option strike price.
+            Prix d'exercice de l'option.
         volatility : float
-            Log returns volatility.
+            Volatilité des rendements logarithmiques.
         drift : float, optional
-            Log returns drift.
+            Dérive des rendements logarithmiques.
         option_type : str, optional
-            Type of option ("call" or "put").
+            Type d'option ("call" ou "put").
 
-        Returns
+        Retourne
         -------
         float
-            The estimated fair price of the option.
+            Le prix équitable estimé de l'option.
         """
         paths = self.simulate_paths(current_price, volatility, drift)
         final_prices = paths[:, -1]

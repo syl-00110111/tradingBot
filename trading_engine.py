@@ -2,22 +2,23 @@
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 """
-Core trading engine for position sizing and risk management.
+Moteur de trading principal pour le dimensionnement des positions et la gestion des risques.
 
-This module handles the calculation of trade amounts and the dynamic adjustment
-of technical settings based on market conditions.
+Ce module gère le calcul des montants de transaction et l'ajustement dynamique
+des paramètres techniques en fonction des conditions du marché.
 """
 
 import logging
 
 class TradingEngine:
     """
-    Main engine for trading logic, including position sizing and dynamic risk adjustment.
+    Moteur principal pour la logique de trading, y compris le dimensionnement des positions
+    et l'ajustement dynamique des risques.
 
-    Parameters
+    Paramètres
     ----------
     config : dict
-        The bot configuration.
+        La configuration du bot.
     """
     def __init__(self, config):
         self.config = config
@@ -25,23 +26,24 @@ class TradingEngine:
 
     def get_dynamic_settings(self, adx, volatility, aggr='dynamic'):
         """
-        Adjusts technical indicator parameters based on current market regimes and aggressiveness.
+        Ajuste les paramètres des indicateurs techniques en fonction des régimes de marché
+        actuels et de l'agressivité.
 
-        Parameters
+        Paramètres
         ----------
         adx : float
-            Current Average Directional Index (trend strength).
+            Indice Directionnel Moyen actuel (force de la tendance).
         volatility : float
-            Current market volatility (standard deviation of log returns).
+            Volatilité actuelle du marché (écart-type des rendements logarithmiques).
         aggr : str
-            Aggressiveness profile: 'normal', 'aggressive', or 'dynamic'.
+            Profil d'agressivité : 'normal', 'aggressive', ou 'dynamic'.
 
-        Returns
+        Retourne
         -------
         dict
-            A dictionary of technical indicator settings.
+            Un dictionnaire de paramètres d'indicateurs techniques.
         """
-        # Base settings (Normal)
+        # Paramètres de base (Normal)
         settings = {
             "ema_fast": 20, "ema_slow": 50,
             "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
@@ -66,7 +68,7 @@ class TradingEngine:
                     "rsi_buy": 20, "rsi_sell": 80
                 })
 
-        # High volatility adds an additional confirmation signal globally
+        # La haute volatilité ajoute un signal de confirmation supplémentaire globalement
         if volatility > 0.1:
             settings["confirmation_window"] = 2
 
@@ -74,77 +76,57 @@ class TradingEngine:
 
     def get_min_exit_price(self, entry_price, fee_rate=0.001):
         """
-        Calculates the minimum exit price required to break even, including fees.
+        Calcule le prix de sortie minimum requis pour atteindre le seuil de rentabilité, frais inclus.
 
-        Uses the precise formula:
-        Price_exit * (1 - f) = Price_entry * (1 + f)
-        Price_exit = Price_entry * (1 + f) / (1 - f)
+        Utilise la formule précise :
+        Prix_sortie * (1 - f) = Prix_entrée * (1 + f)
+        Prix_sortie = Prix_entrée * (1 + f) / (1 - f)
 
-        Parameters
+        Paramètres
         ----------
         entry_price : float
-            The price at which the asset was bought.
+            Le prix auquel l'actif a été acheté.
         fee_rate : float, optional
-            The exchange fee rate (default is 0.001 for 0.1%).
+            Le taux de commission de l'échange (par défaut 0.001 pour 0,1%).
 
-        Returns
+        Retourne
         -------
         float
-            The break-even exit price.
+            Le prix de sortie d'équilibre.
         """
-        # Precise break-even: Price_exit * (1 - f) = Price_entry * (1 + f)
+        # Équilibre précis : Price_exit * (1 - f) = Price_entry * (1 + f)
         # Price_exit = Price_entry * (1 + f) / (1 - f)
         return entry_price * (1 + fee_rate) / (1 - fee_rate)
 
     def is_profitable(self, current_price, entry_price, fee_rate=0.001):
         """
-        Checks if closing a position at the current price would be profitable.
+        Vérifie si la clôture d'une position au prix actuel serait profitable.
 
-        Parameters
+        Paramètres
         ----------
         current_price : float
-            The current market price.
+            Le prix actuel du marché.
         entry_price : float
-            The position's entry price.
+            Le prix d'entrée de la position.
         fee_rate : float, optional
-            The exchange fee rate.
+            Le taux de commission de l'échange.
 
-        Returns
+        Retourne
         -------
         bool
-            True if the net profit is positive after fees, False otherwise.
+            True si le profit net est positif après frais, False sinon.
         """
         return current_price > self.get_min_exit_price(entry_price, fee_rate)
 
     def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
         """
-        Alias for is_profitable.
+        Alias pour is_profitable.
         """
         return self.is_profitable(current_price, entry_price, fee_rate)
 
-    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0):
+    def calculate_position_size(self, balance, current_price, base_currency, win_streak=0, max_lots=1):
         """
-        Calculates the amount of an asset to buy based on wallet balance and risk.
-
-        Takes into account the `max_trade_percentage` (treated as a strict ceiling),
-        the `global_risk_multiplier`, and applies an optional bonus for win streaks.
-        The calculation starts from below to reach the maximum defined percentage.
-
-        Parameters
-        ----------
-        balance : dict or float
-            Current wallet balance.
-        current_price : float
-            The asset's current market price.
-        base_currency : str
-            The base currency (e.g., 'EUR') used to calculate the cost.
-        win_streak : int, optional
-            Number of consecutive winning trades for the pair.
-
-        Returns
-        -------
-        float
-            The calculated amount of asset to purchase.
+        Calcule la quantité d'un actif à acheter en fonction du solde du portefeuille et du risque.
         """
         base_balance = 0
         if isinstance(balance, dict):
@@ -152,9 +134,7 @@ class TradingEngine:
             else: base_balance = balance.get(base_currency, 0)
         else: base_balance = balance.get(base_currency, 0)
 
-        # 1. Determine the strict ceiling for this base asset
-        # Support for per-base-asset override in config
-        # Example config: "max_trade_percentage": {"BTC": 5.0, "USDT": 12.0, "default": 12.0}
+        # 1. Déterminer le plafond strict pour cet actif de base
         cfg_val = self.config.get('max_trade_percentage', 12.0)
         if isinstance(cfg_val, dict):
              max_pct = float(cfg_val.get(base_currency, cfg_val.get('default', 12.0)))
@@ -162,27 +142,29 @@ class TradingEngine:
              max_pct = float(cfg_val)
 
         ceiling_pct = max_pct / 100.0 if max_pct >= 1.0 else max_pct
-        max_allowed_base = base_balance * ceiling_pct
 
-        # 2. Calculate initial base amount starting from below
-        # We start with a base of 75% of the ceiling to leave room for multipliers
-        base_target_pct = ceiling_pct * 0.75
+        # Le plafond est divisé par le nombre de lots maximum pour cette paire
+        max_allowed_base = (base_balance * ceiling_pct) / max_lots
+
+        # 2. Calculer le montant de base initial en partant d'en bas
+        # Nous commençons avec une base de 75% du plafond autorisé par lot
+        base_target_pct = (ceiling_pct * 0.75) / max_lots
         trade_amount_base = base_balance * base_target_pct
 
-        # 3. Apply risk multiplier
+        # 3. Appliquer le multiplicateur de risque
         trade_amount_base *= self.risk_multiplier
 
-        # 4. Apply win streak bonus
+        # 4. Appliquer le bonus de série de victoires
         ws_config = self.config.get('win_streak_bonus', {})
         if ws_config.get('enabled') and win_streak >= ws_config.get('threshold', 2):
              multiplier = ws_config.get('multiplier', 1.2)
              trade_amount_base *= multiplier
-             # logging.info(f"Win streak detected ({win_streak}), applying {multiplier}x multiplier.")
+             # logging.info(f"Série de victoires détectée ({win_streak}), application d'un multiplicateur {multiplier}x.")
 
-        # 5. Enforce strict ceiling
+        # 5. Appliquer le plafond strict
         if trade_amount_base > max_allowed_base:
              trade_amount_base = max_allowed_base
-             # logging.info(f"Trade amount capped at strict ceiling: {max_pct}% of {base_currency} balance.")
+             # logging.info(f"Montant de la transaction plafonné au plafond strict : {max_pct}% du solde {base_currency}.")
 
         if trade_amount_base > base_balance: trade_amount_base = base_balance
         if current_price > 0: return trade_amount_base / current_price

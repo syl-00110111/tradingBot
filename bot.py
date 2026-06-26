@@ -716,10 +716,22 @@ def make_dashboard(global_mode, config):
             entry_str = "-"
             fee_str = "-"
             if has_position:
-                 p = data['position']
-                 amt_str = format_amt(p['amount'], precision=data.get('amount_precision'))
-                 entry_str = format_price(p['entry_price'], precision=data.get('price_precision'))
-                 fee_str = format_price(p.get('entry_fee', 0), precision=data.get('price_precision'))
+                 positions = data['position']
+                 if isinstance(positions, list):
+                      total_amount = sum(p['amount'] for p in positions)
+                      # Prix d'entrée moyen pondéré
+                      total_cost = sum(p['entry_price'] * p['amount'] for p in positions)
+                      avg_entry_price = total_cost / total_amount if total_amount > 0 else 0
+                      total_fee = sum(p.get('entry_fee', 0) for p in positions)
+
+                      amt_str = f"{format_amt(total_amount, precision=data.get('amount_precision'))} ({len(positions)})"
+                      entry_str = format_price(avg_entry_price, precision=data.get('price_precision'))
+                      fee_str = format_price(total_fee, precision=data.get('price_precision'))
+                 else:
+                      # Compatibilité pour le cas où ce n'est pas encore une liste
+                      amt_str = format_amt(positions['amount'], precision=data.get('amount_precision'))
+                      entry_str = format_price(positions['entry_price'], precision=data.get('price_precision'))
+                      fee_str = format_price(positions.get('entry_fee', 0), precision=data.get('price_precision'))
 
             tendency = data.get('tendency', 'N/A')
             tend_style = "bold green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "bold yellow" if tendency == "Range" else "white"
@@ -1168,20 +1180,21 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                 bot_state[symbol]['candles_since_last_signal'] = candles_since
 
                             if data.get('sell_triggered'):
-                                 pos = data.get('position')
-                                 # Use real fee rate for profit check if available
+                                 # Dans le cadre multi-lots, sell_triggered est vrai si SELL signal reçu
+                                 # execute_sell s'occupera de ne vendre que les lots profitables
+
+                                 # Vérifier si au moins un lot est profitable
+                                 positions = data.get('position', [])
                                  fee_rate = 0.001
                                  try:
                                       fee_rate = exchange.fetch_trading_fee(symbol)
                                  except: pass
 
-                                 if pos and not engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate):
-                                      # Profit check failed, reverse sell and trigger immediate re-scan (silent)
+                                 profitable_positions = [p for p in positions if engine.is_profitable(data['price'], p['entry_price'], fee_rate=fee_rate)]
 
-                                      # Flag to ignore sell until signal resets
+                                 if not profitable_positions:
+                                      # Aucun lot n'est profitable, on ignore le signal pour l'instant
                                       data_manager.flag_ignore_sell(symbol, value=True)
-
-                                      # Clear signal to "reverse" it
                                       data['sell'] = False
                                       data['sell_triggered'] = False
 
@@ -1206,7 +1219,10 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                           data['position'] = None
                                       play_sound("sell", config)
 
-                            if data.get('buy') and not data.get('position'):
+                            # Achat possible si signal BUY et limite de lots non atteinte
+                            max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
+                            current_lots = len(data.get('position', []) or [])
+                            if data.get('buy') and current_lots < max_lots:
                                  potential_buys.append((symbol, data))
                     except Exception as e:
                         err_msg = str(e)
@@ -1676,10 +1692,11 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         buy_threshold += 1
         sell_threshold += 1
 
-    # Monte Carlo Validation for real trades
+    # Validation Monte Carlo pour les transactions réelles
     mc_verified_buy = False
     mc_verified_sell = False
-    if consecutive_buys >= buy_threshold or (consecutive_sells >= sell_threshold and data_manager.get_position(symbol)):
+    positions = data_manager.get_position(symbol)
+    if consecutive_buys >= buy_threshold or (consecutive_sells >= sell_threshold and positions):
         mc = MonteCarloEngine(num_simulations=500, timeframe_candles=20)
         mc.set_device(device if device is not None else torch.device("cpu"))
         mc_score = mc.validate_strategy(df)
@@ -1717,7 +1734,7 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
         'consecutive_buys': consecutive_buys,
         'consecutive_sells': consecutive_sells,
         '_last_candle_ts': candle_ts,
-        'sell_triggered': mc_verified_sell and data_manager.get_position(symbol) and not data_manager.get_position(symbol).get('ignore_sell'),
+        'sell_triggered': mc_verified_sell and positions and any(not p.get('ignore_sell') for p in positions),
         'position': data_manager.get_position(symbol),
         'expected_profit': float(pair_config.get('expected_profit', 0)),
         'trigger_data': trigger_data
@@ -1725,48 +1742,23 @@ def analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, g
 
 def execute_buy(exchange, data_manager, engine, symbol, data, global_config, balance=None):
     """
-    Executes a buy order for a specific trading pair.
+    Exécute un ordre d'achat pour une paire de trading spécifique.
 
-    Calculates the position size based on balance and win streak, checks for sufficient
-    funds, and places a market buy order.
-
-    Parameters
-    ----------
-    exchange : ExchangeInterface
-        The exchange instance where the order will be placed.
-    data_manager : DataManager
-        Manager to record the new position if the order is successful.
-    engine : TradingEngine
-        Engine used to calculate the optimal position size.
-    symbol : str
-        The trading pair symbol to buy.
-    data : dict
-        Current market and signal data for the pair, including the current price.
-    global_config : dict
-        Global configuration for pair-specific settings like timeframe.
-    balance : dict, optional
-        Current wallet balance. If None, it will be fetched from the exchange.
-
-    Returns
-    -------
-    bool
-        True if the buy order was successfully executed and recorded, False otherwise.
-
-    Raises
-    ------
-    Exception
-        Any exception during order creation is logged, and the pair is added to `pair_suspensions`.
-
-    Notes
-    -----
-    If the order fails due to insufficient balance or exchange filters, the symbol
-    is added to `pair_suspensions` to prevent further attempts.
+    Calcule la taille de la position en fonction du solde et de la série de victoires,
+    vérifie les fonds disponibles et place un ordre d'achat au marché.
     """
     if balance is None:
         balance = exchange.fetch_balances()
     win_streak = data_manager.get_win_streak(symbol)
 
-    # Use the freshest price from our watched OHLCV cache
+    # Limite de lots
+    max_lots = global_config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or global_config.get('max_lots_per_symbol', 1)
+    current_positions = data_manager.get_position(symbol) or []
+    if len(current_positions) >= max_lots:
+        logging.warning(f"[{symbol}] Achat annulé : Limite de lots atteinte ({len(current_positions)}/{max_lots}).")
+        return False
+
+    # Utilise le prix le plus frais du cache OHLCV
     timeframe = global_config['pairs'].get(symbol, {}).get('timeframe', '1m')
     cache_key = f"{symbol}_{timeframe}"
 
@@ -1777,7 +1769,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
 
     base_curr = symbol.split('/')[1]
     amount = engine.calculate_position_size(
-        balance, current_price, base_curr, win_streak=win_streak
+        balance, current_price, base_curr, win_streak=win_streak, max_lots=max_lots
     )
     base_currency = symbol.split('/')[1]
     if amount > 0:
@@ -1871,64 +1863,56 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
 
 def execute_sell(exchange, data_manager, engine, symbol, data):
     """
-    Executes a sell order to close an existing position.
-
-    Determines if the position should be closed based on signals, checks for sufficient
-    asset balance (in live mode), and places a market sell order.
-
-    Parameters
-    ----------
-    exchange : ExchangeInterface
-        The exchange instance where the order will be placed.
-    data_manager : DataManager
-        Manager to record the closing of the position.
-    engine : TradingEngine
-        Engine used for profit/loss calculations.
-    symbol : str
-        The trading pair symbol to sell.
-    data : dict
-        Current market data and the position details to be closed.
-
-    Returns
-    -------
-    bool
-        True if the sell order was successfully executed and recorded, False otherwise.
-
-    Notes
-    -----
-    In simulation mode, the balance check is bypassed. If the sell fails because
-    the amount is below the dust limit, the position is flagged to ignore future
-    sell signals until manually addressed.
+    Exécute un ordre de vente pour clôturer les lots rentables.
     """
-    position = data['position']
-    should_execute = True
+    positions = data['position']
+    if not positions:
+        return False
 
-    if should_execute:
-        base_asset = symbol.split('/')[0]
+    base_asset = symbol.split('/')[0]
+    is_simulation = isinstance(exchange, MockExchange)
 
-        # Bypass balance check for simulation mode
-        # In simulation, we trust the internal DataManager state
-        is_simulation = isinstance(exchange, MockExchange)
+    # Récupérer le taux de commission
+    fee_rate = 0.001
+    try:
+        fee_rate = exchange.fetch_trading_fee(symbol)
+    except:
+        pass
 
-        balance = exchange.fetch_balances()
-        free_balance = balance.get(base_asset, {}).get('free', 0) if 'free' in balance else balance.get(base_asset, 0)
-        base_currency = symbol.split('/')[1]
+    any_sold = False
 
-        if is_simulation or free_balance >= position['amount']:
-            order = exchange.create_order(symbol, 'sell', position['amount'])
-            if isinstance(order, dict) and order.get('error') == 'dust_limit':
-                logging.warning(f"[{symbol}] Sell aborted: Balance is dust/below precision. Ignoring future sell signals for this position.")
-                data_manager.flag_ignore_sell(symbol)
-                return False
-            if order:
-                fee = order.get('calculated_fee', 0)
-                amount = position['amount']
-                total_received = (amount * data['price']) - fee
-                logging.info(f"[{symbol}] Executing sell of amount {format_amt(amount)} at {format_price(data['price'])}, final price received: {format_price(total_received)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-                profit = total_received - position.get('entry_total_base', 0)
-                data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received)
-                return True
-    return False
+    # On parcourt les lots en sens inverse pour ne pas perturber les index lors de la suppression
+    for i in range(len(positions) - 1, -1, -1):
+        pos = positions[i]
+
+        # Vérifier si le lot est profitable (Point 1 du sujet)
+        # Un lot peut être revendu dès que son prix d'acquisition est dépassé par son potentiel prix de vente
+        if engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate):
+
+            balance = exchange.fetch_balances()
+            free_balance = balance.get(base_asset, {}).get('free', 0) if 'free' in balance else balance.get(base_asset, 0)
+
+            if is_simulation or free_balance >= pos['amount']:
+                order = exchange.create_order(symbol, 'sell', pos['amount'])
+                if isinstance(order, dict) and order.get('error') == 'dust_limit':
+                    logging.warning(f"[{symbol}] Vente lot {i} annulée : Poussière. Ignoré pour ce lot.")
+                    # Marquer ce lot spécifique pour ignorer les ventes ?
+                    # Pour simplifier on passe au suivant.
+                    continue
+
+                if order:
+                    fee = order.get('calculated_fee', 0)
+                    amount = pos['amount']
+                    total_received = (amount * data['price']) - fee
+                    logging.info(f"[{symbol}] Vente profitable du lot {i} d'un montant {format_amt(amount)} à {format_price(data['price'])}")
+
+                    profit = total_received - pos.get('entry_total_base', 0)
+                    data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, lot_index=i)
+                    any_sold = True
+        else:
+            logging.info(f"[{symbol}] Le lot {i} (achat: {format_price(pos['entry_price'])}) n'est pas encore profitable.")
+
+    return any_sold
 
 def initialize_simulation(exchange, data_manager, pattern_manager, engine, config, bot_state):
     """
@@ -1962,8 +1946,11 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
     potential_buys = []
     for symbol in pair_keys:
         pair_config = pairs_dict[symbol]
-        if not data_manager.get_position(symbol):
-            # Pass pair_config to analyze_pair
+        # En simulation, on peut aussi acheter plusieurs lots au démarrage si des signaux BUY sont présents
+        max_lots = pair_config.get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
+        current_lots = len(data_manager.get_position(symbol) or [])
+
+        if current_lots < max_lots:
             data = analyze_pair(exchange, data_manager, pattern_manager, symbol, pair_config, config, engine=engine)
             if data and data.get('buy'):
                 potential_buys.append((symbol, data))

@@ -2,10 +2,10 @@
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 """
-Persistence and state management for the trading bot.
+Persistence et gestion de l'état pour le bot de trading.
 
-This module manages in-memory and potentially persistent storage for trade
-history, open positions, discovered patterns, and short-term caches.
+Ce module gère le stockage en mémoire et potentiellement persistant de l'historique
+des transactions, des positions ouvertes, des modèles découverts et des caches à court terme.
 """
 
 import json
@@ -15,48 +15,48 @@ import logging
 
 class PatternManager:
     """
-    Manager for storing and retrieving technical patterns for similarity matching.
+    Gestionnaire pour le stockage et la récupération de modèles techniques pour la correspondance de similarité.
     """
     def __init__(self):
         self.data = {}
 
     def set_patterns(self, symbol, patterns):
         """
-        Stores the top 4 successful patterns for a symbol.
+        Stocke les 4 meilleurs modèles réussis pour un symbole.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
         patterns : list of dict
-            A list of discovered patterns.
+            Une liste de modèles découverts.
         """
         self.data[symbol] = patterns[:4]
 
     def get_patterns(self, symbol):
         """
-        Retrieves stored patterns for a symbol.
+        Récupère les modèles stockés pour un symbole.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
 
-        Returns
+        Retourne
         -------
         list of dict
-            The list of stored patterns.
+            La liste des modèles stockés.
         """
         return self.data.get(symbol, [])
 
 class DataManager:
     """
-    Manager for the bot's trading state, including open positions and trade history.
+    Gestionnaire pour l'état de trading du bot, y compris les positions ouvertes et l'historique des transactions.
 
-    Parameters
+    Paramètres
     ----------
     mode : str, optional
-        The operation mode (default is 'simulation').
+        Le mode d'opération (par défaut 'simulation').
     """
     def __init__(self, mode='simulation'):
         self.mode = mode
@@ -65,7 +65,7 @@ class DataManager:
         self.load()
 
     def _save(self):
-        # Local persistence disabled (trades synced via API)
+        # Persistance locale désactivée (transactions synchronisées via API)
         pass
 
     def load(self):
@@ -73,110 +73,126 @@ class DataManager:
             try:
                 with open(self.filename, 'r') as f:
                     self.data = json.load(f)
+                    # S'assurer que les positions ouvertes sont des listes (pour la compatibilité descendante)
+                    for symbol in self.data["open_positions"]:
+                        if isinstance(self.data["open_positions"][symbol], dict):
+                            self.data["open_positions"][symbol] = [self.data["open_positions"][symbol]]
             except Exception as e:
-                logging.error(f"Failed to load trade data: {e}")
+                logging.error(f"Échec du chargement des données de transaction : {e}")
 
     def clear_history(self):
         """
-        Resets the trade history and open positions.
+        Réinitialise l'historique des transactions et les positions ouvertes.
         """
         self.data = {"open_positions": {}, "trade_history": []}
 
     def add_position(self, symbol, entry_price, amount, fee, trigger_data, timestamp, total_base=0):
         """
-        Records a new open position.
+        Enregistre un nouveau lot (position) ouvert.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
         entry_price : float
-            The price at which the asset was purchased.
+            Le prix auquel l'actif a été acheté.
         amount : float
-            The amount of asset purchased.
+            La quantité d'actif achetée.
         fee : float
-            The fee paid for the entry order.
+            Les frais payés pour l'ordre d'achat.
         trigger_data : dict
-            Technical indicator data at the time of entry.
+            Données des indicateurs techniques au moment de l'achat.
         timestamp : float
-            The entry timestamp.
+            L'horodatage de l'achat.
         total_base : float, optional
-            The total cost in base currency (default is 0).
+            Le coût total en devise de base (par défaut 0).
         """
-        self.data["open_positions"][symbol] = {
+        if symbol not in self.data["open_positions"]:
+            self.data["open_positions"][symbol] = []
+
+        self.data["open_positions"][symbol].append({
             "entry_price": entry_price, "amount": amount, "entry_fee": fee,
             "entry_total_base": total_base, "trigger_data": trigger_data,
             "timestamp": timestamp, "sell_signals_received": 0, "last_sell_signal_candle_ts": None
-        }
+        })
         self._save()
 
     def increment_sell_signals(self, symbol, candle_ts):
         """
-        Increments the count of consecutive sell signals for a position.
+        Incrémente le compte des signaux de vente consécutifs pour toutes les positions d'un symbole.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
         candle_ts : int or float
-            The timestamp of the current candle.
+            L'horodatage de la bougie actuelle.
 
-        Returns
+        Retourne
         -------
         bool
-            True if the signal count was incremented, False otherwise.
+            True si le compte de signaux a été incrémenté pour au moins une position.
         """
+        updated = False
         if symbol in self.data["open_positions"]:
-            pos = self.data["open_positions"][symbol]
-            if pos.get("last_sell_signal_candle_ts") != candle_ts:
-                pos["sell_signals_received"] = pos.get("sell_signals_received", 0) + 1
-                pos["last_sell_signal_candle_ts"] = candle_ts
-                return True
-        return False
+            for pos in self.data["open_positions"][symbol]:
+                if pos.get("last_sell_signal_candle_ts") != candle_ts:
+                    pos["sell_signals_received"] = pos.get("sell_signals_received", 0) + 1
+                    pos["last_sell_signal_candle_ts"] = candle_ts
+                    updated = True
+        return updated
 
     def flag_ignore_sell(self, symbol, value=True):
         """
-        Flags a position to ignore future sell signals.
+        Marque toutes les positions d'un symbole pour ignorer les futurs signaux de vente.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
         value : bool, optional
-            The flag value (default is True).
+            La valeur du drapeau (par défaut True).
         """
         if symbol in self.data["open_positions"]:
-            self.data["open_positions"][symbol]["ignore_sell"] = value
+            for pos in self.data["open_positions"][symbol]:
+                pos["ignore_sell"] = value
             self._save()
 
-    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0):
+    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, lot_index=0):
         """
-        Closes an open position and moves it to trade history.
+        Ferme un lot spécifique et le déplace vers l'historique des transactions.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
         exit_price : float
-            The price at which the asset was sold.
+            Le prix auquel l'actif a été vendu.
         exit_fee : float
-            The fee paid for the exit order.
+            Les frais payés pour l'ordre de vente.
         profit : float
-            The net profit/loss for the trade.
+            Le profit/perte net pour la transaction.
         trigger_data : dict
-            Technical indicator data at the time of exit.
+            Données des indicateurs techniques au moment de la vente.
         timestamp : float
-            The exit timestamp.
+            L'horodatage de la vente.
         total_base : float, optional
-            The total received in base currency (default is 0).
+            Le montant total reçu en devise de base (par défaut 0).
+        lot_index : int, optional
+            L'index du lot à fermer (par défaut 0).
 
-        Returns
+        Retourne
         -------
         dict or None
-            The recorded trade data, or None if no open position was found.
+            Les données de la transaction enregistrée, ou None si aucun lot n'a été trouvé.
         """
-        if symbol in self.data["open_positions"]:
-            position = self.data["open_positions"].pop(symbol)
+        if symbol in self.data["open_positions"] and len(self.data["open_positions"][symbol]) > lot_index:
+            position = self.data["open_positions"][symbol].pop(lot_index)
+
+            # Si plus de positions pour ce symbole, on supprime la clé
+            if not self.data["open_positions"][symbol]:
+                self.data["open_positions"].pop(symbol)
+
             trade = {
                 "symbol": symbol, "entry_price": position["entry_price"], "exit_price": exit_price,
                 "amount": position["amount"], "entry_fee": position.get("entry_fee", 0),
@@ -192,44 +208,44 @@ class DataManager:
 
     def get_open_positions(self):
         """
-        Retrieves all currently open positions.
+        Récupère toutes les positions actuellement ouvertes.
 
-        Returns
+        Retourne
         -------
         dict
-            A dictionary of open positions.
+            Un dictionnaire des positions ouvertes (listes de lots par symbole).
         """
         return self.data["open_positions"]
 
     def get_position(self, symbol):
         """
-        Retrieves a specific open position.
+        Récupère les lots ouverts pour un symbole spécifique.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
 
-        Returns
+        Retourne
         -------
-        dict or None
-            The position data, or None if not found.
+        list or None
+            La liste des lots pour ce symbole, ou None si aucun n'est trouvé.
         """
         return self.data["open_positions"].get(symbol)
 
     def get_win_streak(self, symbol):
         """
-        Calculates the current win streak for a symbol.
+        Calcule la série de victoires actuelle pour un symbole.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
 
-        Returns
+        Retourne
         -------
         int
-            The number of consecutive profitable trades.
+            Le nombre de transactions profitables consécutives.
         """
         streak = 0
         history = [t for t in self.data.get("trade_history", []) if t.get("symbol") == symbol]
@@ -240,28 +256,28 @@ class DataManager:
 
 class CacheManager:
     """
-    Manager for short-term in-memory caching of discovery results.
+    Gestionnaire pour la mise en cache à court terme en mémoire des résultats de découverte.
     """
     def __init__(self):
         self.cache = {}
 
     def get(self, symbol, timeframe, max_age_seconds):
         """
-        Retrieves cached data if it's not older than max_age_seconds.
+        Récupère les données mises en cache si elles ne sont pas plus anciennes que max_age_seconds.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
         timeframe : str
-            The timeframe.
+            L'unité de temps.
         max_age_seconds : int
-            Maximum age of the cache in seconds.
+            Âge maximum du cache en secondes.
 
-        Returns
+        Retourne
         -------
         any or None
-            The cached data, or None if not found or expired.
+            Les données mises en cache, ou None si non trouvées ou expirées.
         """
         key = f"{symbol}_{timeframe}"
         if key in self.cache:
@@ -271,16 +287,16 @@ class CacheManager:
 
     def set(self, symbol, timeframe, data):
         """
-        Stores data in the cache.
+        Stocke les données dans le cache.
 
-        Parameters
+        Paramètres
         ----------
         symbol : str
-            The trading pair symbol.
+            Le symbole de la paire de trading.
         timeframe : str
-            The timeframe.
+            L'unité de temps.
         data : any
-            The data to cache.
+            Les données à mettre en cache.
         """
         key = f"{symbol}_{timeframe}"
         self.cache[key] = {'timestamp': time.time(), 'data': data}
