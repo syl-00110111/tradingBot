@@ -517,7 +517,7 @@ def render_ascii_chart(symbol, config):
     plt_ascii.subplot(1, 1)
     plt_ascii.clf()
     plt_ascii.theme('dark')
-    plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
+    plt_ascii.title(f"K-Lines et Volume: {symbol} ({timeframe})")
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
@@ -543,15 +543,20 @@ def render_ascii_chart(symbol, config):
          plt_ascii.xticks(tick_indices, tick_labels)
 
     # Get plot size from console
+    # On utilise 100% de la largeur disponible (moins une petite marge pour le panel)
+    width = console.width - 4
     # On réduit la hauteur pour s'assurer que ça rentre dans le panel sans dépasser
-    width = console.width - 8
-    # On réduit encore la hauteur pour éviter le dépassement constaté sur certains terminaux
-    height = console.height - 26
+    height = console.height - 24
 
     if width < 20: width = 20
-    if height < 12: height = 12 # Minimum réduit
+    if height < 15: height = 15 # Minimum augmenté pour accueillir les deux subplots confortablement
 
-    plt_ascii.plotsize(width, height)
+    # Hauteur 1/3 pour le volume, 2/3 pour les k-lines
+    h_volume = max(5, height // 3)
+    h_klines = height - h_volume
+
+    plt_ascii.subplot(1, 1).plotsize(width, h_klines)
+    plt_ascii.subplot(2, 1).plotsize(width, h_volume)
     content = Text.from_ansi(plt_ascii.build())
 
     # Update cache
@@ -830,7 +835,7 @@ def make_dashboard(global_mode, config):
         help_text.append("\n[bold cyan]Keyboard Shortcuts:[/]\n", style="white")
         help_text.append("  TAB    : Switch focus between Logs and Pairs\n")
         help_text.append("  UP/DN  : Move selection / Scroll the focused panel\n")
-        help_text.append("  ENTER  : Show/Hide K-Lines for selected symbol\n")
+        help_text.append("  ENTER  : Show/Hide K-Lines et Volume for selected symbol\n")
         help_text.append("  X      : Toggle Expert Mode (Show/Hide Indicators)\n")
         help_text.append("  M      : Toggle Marquee Effect (Pause/Resume scrolling)\n")
         help_text.append("  H      : Close this help menu\n")
@@ -840,7 +845,7 @@ def make_dashboard(global_mode, config):
 
     if show_chart:
         chart_content = render_ascii_chart(chart_symbol, config)
-        pairs_panel = Panel(chart_content, title=f"[bold]K-Lines: {chart_symbol}[/]", border_style="bold magenta")
+        pairs_panel = Panel(chart_content, title=f"[bold]K-Lines et Volume: {chart_symbol}[/]", border_style="bold magenta")
 
     if not startup_complete:
          waiting_text = Text.from_markup("\n\n\n\n\n[bold blink yellow]Waiting for system initialization...[/]\n", justify="center")
@@ -1202,7 +1207,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                       fee_rate = exchange.fetch_trading_fee(symbol)
                                  except: pass
 
-                                 profitable_positions = [p for p in positions if engine.is_profitable(data['price'], p['entry_price'], fee_rate=fee_rate)]
+                                 profitable_positions = [p for p in positions if engine.is_profitable(data['price'], p['entry_price'], fee_rate=fee_rate, entry_total_base=p.get('entry_total_base', 0), amount=p['amount'])]
 
                                  if not profitable_positions:
                                       # Aucun lot n'est profitable, on ignore le signal pour l'instant
@@ -1394,7 +1399,7 @@ def main():
             console.print(f"[bold green]GPU Acceleration enabled using device: {device}[/]")
 
         db_handler.duration = 5
-        data_manager = DataManager(args.mode) if args.mode in ['live', 'simulation'] else None
+        data_manager = DataManager() if args.mode in ['live', 'simulation'] else None
         pattern_manager = PatternManager()
         engine = TradingEngine(config)
 
@@ -1478,7 +1483,7 @@ def play_sound(action, config=None):
             import winsound
             if action == "startup":
                  # Randomized sequence equal to max_open_positions - 4
-                 num_blips = max(1, (int(config.get('max_open_positions', 18)) if config else 18) - 4)
+                 num_blips = max(4, (int(config.get('max_open_positions', 26)) if config else 26) - 18)
                  for _ in range(num_blips):
                       freq = random.randint(400, 1200)
                       dur = random.randint(100, 300)
@@ -1899,7 +1904,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
 
         # Vérifier si le lot est profitable (Point 1 du sujet)
         # Un lot peut être revendu dès que son prix d'acquisition est dépassé par son potentiel prix de vente
-        if engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate):
+        if engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount']):
 
             balance = exchange.fetch_balances()
             free_balance = balance.get(base_asset, {}).get('free', 0) if 'free' in balance else balance.get(base_asset, 0)
@@ -1916,13 +1921,14 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                     fee = order.get('calculated_fee', 0)
                     amount = pos['amount']
                     total_received = (amount * data['price']) - fee
-                    logging.info(f"[{symbol}] Vente profitable du lot {i} d'un montant {format_amt(amount)} à {format_price(data['price'])}")
-
                     profit = total_received - pos.get('entry_total_base', 0)
+                    quote = symbol.split('/')[1]
+                    logging.info(f"[{symbol}] Vente profitable du lot {i + 1} d'un montant {format_amt(amount)} à {format_price(data['price'])} (profit: {profit:.2f} {quote})")
+
                     data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, lot_index=i)
                     any_sold = True
         else:
-            logging.info(f"[{symbol}] Le lot {i} (achat: {format_price(pos['entry_price'])}) n'est pas encore profitable.")
+            logging.info(f"[{symbol}] Le lot {i + 1} (achat: {format_price(pos['entry_price'])}) n'est pas encore profitable.")
 
     return any_sold
 
@@ -2484,9 +2490,6 @@ def run_scan_mode(exchange, config, args, engine=None, device=None):
     device : torch.device, optional
         Computation device.
     """
-    # Default strategy for scan
-    default_strategy = None
-
     strategy = args.strategy
     aggr = args.aggr or config.get('force_agressivity_to_all_pairs', 'normal')
     timeframe = args.timeframe or config['pairs'].get(args.symbol, {}).get('timeframe', '1m')

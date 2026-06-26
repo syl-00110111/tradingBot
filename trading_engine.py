@@ -98,7 +98,7 @@ class TradingEngine:
         # Price_exit = Price_entry * (1 + f) / (1 - f)
         return entry_price * (1 + fee_rate) / (1 - fee_rate)
 
-    def is_profitable(self, current_price, entry_price, fee_rate=0.001):
+    def is_profitable(self, current_price, entry_price, fee_rate=0.001, entry_total_base=0, amount=0):
         """
         Vérifie si la clôture d'une position au prix actuel serait profitable.
 
@@ -110,12 +110,19 @@ class TradingEngine:
             Le prix d'entrée de la position.
         fee_rate : float, optional
             Le taux de commission de l'échange.
+        entry_total_base : float, optional
+            Le coût total d'entrée en devise de base (incluant les frais).
+        amount : float, optional
+            La quantité de l'actif.
 
         Retourne
         -------
         bool
             True si le profit net est positif après frais, False sinon.
         """
+        if entry_total_base > 0 and amount > 0:
+            # Profit = (Price_exit * Amount * (1 - f)) - Entry_total_base
+            return (current_price * amount * (1 - fee_rate)) > entry_total_base
         return current_price > self.get_min_exit_price(entry_price, fee_rate)
 
     def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
