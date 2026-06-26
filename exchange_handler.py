@@ -111,6 +111,10 @@ class CCXTExchange(ExchangeInterface):
             'session': create_ccxt_session()
         }
 
+        # Increase recvWindow for Binance to handle clock drift/latency
+        if 'binance' in exchange_id:
+            config['options']['recvWindow'] = 60000
+
         if options and isinstance(options, dict):
             config['options'].update(options)
 
@@ -167,18 +171,26 @@ class CCXTExchange(ExchangeInterface):
             return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         except Exception as e:
             err_msg = str(e)
-            # Grouping and clean error reporting (Point 1)
+            # Grouping and clean error reporting
             status_code = "Error"
             import re
-            code_match = re.search(r'([45]\d{2})', err_msg)
-            if code_match: status_code = f"HTTP {code_match.group(1)}"
+            # Catch HTTP status codes (4xx, 5xx)
+            code_match = re.search(r'\b([45]\d{2})\b', err_msg)
+            if code_match:
+                status_code = f"HTTP {code_match.group(1)}"
+            elif "timeout" in err_msg.lower():
+                status_code = "Timeout"
+            elif "not found" in err_msg.lower() or "invalid symbol" in err_msg.lower():
+                status_code = "Invalid Symbol"
 
-            if "500" in err_msg or "502" in err_msg or "503" in err_msg or "504" in err_msg:
+            if any(code in err_msg for code in ["500", "502", "503", "504"]):
                  # Let it bubble up for grouping in bot.py
                  raise Exception(f"{status_code} Error Code for {symbol} on {self.exchange_id}")
 
-            # For other errors (like symbol not found 400), we still log but keep it clean
-            logging.error(f"Error fetching OHLCV for {symbol} on {self.exchange_id}: {status_code}")
+            # For other errors, we log with more context if possible
+            clean_err = err_msg.split('{"code"')[0].strip() if '{"code"' in err_msg else err_msg
+            if len(clean_err) > 100: clean_err = clean_err[:97] + "..."
+            logging.error(f"Error fetching OHLCV for {symbol} on {self.exchange_id}: {status_code} ({clean_err})")
             return None
 
     def fetch_ticker(self, symbol):
@@ -193,7 +205,12 @@ class CCXTExchange(ExchangeInterface):
     def fetch_balances(self):
         try:
             return self.exchange.fetch_balance()
-        except Exception as e: logging.error(f"Error fetching balances on {self.exchange_id}: {e}"); return None
+        except Exception as e:
+            err_msg = str(e)
+            clean_err = err_msg.split('{"code"')[0].strip() if '{"code"' in err_msg else err_msg
+            if len(clean_err) > 100: clean_err = clean_err[:97] + "..."
+            logging.error(f"Error fetching balances on {self.exchange_id}: {clean_err}")
+            return None
 
     def fetch_trades(self, symbol, limit=100):
         try: return self.exchange.fetch_trades(symbol, limit=limit)

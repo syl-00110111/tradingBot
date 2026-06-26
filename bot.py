@@ -1123,6 +1123,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             # Check USDC availability (1.5x)
                             try:
                                 balance = exchange.fetch_balances()
+                                if balance is None: continue
                                 base_curr = symbol.split('/')[1]
                                 free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
                                 if free_bal >= susp.get('amount_required', 0) * 1.5:
@@ -1260,6 +1261,10 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                      # Prioritize by signal score
                      potential_buys.sort(key=lambda x: x[1].get('score', 0), reverse=True)
                      balance = exchange.fetch_balances()
+                     if balance is None:
+                          logging.error("Failed to fetch balances for execution loop.")
+                          continue
+
                      for i in range(min(len(potential_buys), slots_available)):
                           if shutdown_event.is_set(): break
                           symbol, data = potential_buys[i]
@@ -1766,6 +1771,11 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
     """
     if balance is None:
         balance = exchange.fetch_balances()
+
+    if balance is None:
+        logging.error(f"[{symbol}] Buy aborted: balances are unavailable.")
+        return False
+
     win_streak = data_manager.get_win_streak(symbol)
 
     # Limite de lots
@@ -1907,6 +1917,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
         if engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount']):
 
             balance = exchange.fetch_balances()
+            if balance is None: continue
             free_balance = balance.get(base_asset, {}).get('free', 0) if 'free' in balance else balance.get(base_asset, 0)
 
             if is_simulation or free_balance >= pos['amount']:
@@ -1981,6 +1992,10 @@ def initialize_simulation(exchange, data_manager, pattern_manager, engine, confi
             # Prioritize by signal score
             potential_buys.sort(key=lambda x: x[1].get('score', 0), reverse=True)
             balance = exchange.fetch_balances()
+            if balance is None:
+                 logging.error("Failed to fetch balances for simulation initialization.")
+                 return
+
             for i in range(min(len(potential_buys), slots_available)):
                 symbol, data = potential_buys[i]
                 if execute_buy(exchange, data_manager, engine, symbol, data, config, balance=balance):
@@ -2154,6 +2169,9 @@ def show_balances(exchange):
     """
     console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
     balance = exchange.fetch_balances()
+    if balance is None:
+        console.print("[bold red]Error: Failed to fetch balances from exchange. Please check your connection and API keys.[/]")
+        return
 
     table = Table(title="Asset Inventory", expand=True)
     table.add_column("Asset", style="cyan")

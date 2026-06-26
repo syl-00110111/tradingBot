@@ -136,10 +136,12 @@ class TradingEngine:
         Calcule la quantité d'un actif à acheter en fonction du solde du portefeuille et du risque.
         """
         base_balance = 0
-        if isinstance(balance, dict):
-            if 'free' in balance: base_balance = balance['free'].get(base_currency, 0)
-            else: base_balance = balance.get(base_currency, 0)
-        else: base_balance = balance.get(base_currency, 0)
+        if balance and isinstance(balance, dict):
+            if 'free' in balance:
+                free_data = balance['free']
+                base_balance = free_data.get(base_currency, 0) if isinstance(free_data, dict) else 0
+            else:
+                base_balance = balance.get(base_currency, 0)
 
         # 1. Déterminer le plafond strict pour cet actif de base
         cfg_val = self.config.get('max_trade_percentage', 12.0)
