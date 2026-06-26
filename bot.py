@@ -487,8 +487,6 @@ def render_ascii_chart(symbol, config):
 
     # Subplot 1: Candlestick
     plt_ascii.subplot(1, 1)
-    # Clear subplot to avoid merging labels/scales
-    plt_ascii.clf()
     plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
