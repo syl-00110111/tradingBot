@@ -580,6 +580,16 @@ def render_ascii_chart(symbol, config):
     }
     return content
 
+def get_sorted_symbols(config):
+    """Returns the list of trading symbols sorted by timeframe priority."""
+    tf_priority = {'1s': 0, '1m': 1, '3m': 2, '5m': 3, '15m': 4, '30m': 5}
+    with bot_lock:
+        all_pairs = sorted(
+            [s for s in bot_state.keys() if not s.startswith("_")],
+            key=lambda x: (tf_priority.get(config['pairs'].get(x, {}).get('timeframe', '5m'), 99), x)
+        )
+    return all_pairs
+
 def make_dashboard(global_mode, config):
     """
     Constructs the bot's Rich dashboard layout.
@@ -612,15 +622,8 @@ def make_dashboard(global_mode, config):
          should_step = True
          last_marquee_update = now_ts
 
+    all_pairs = get_sorted_symbols(config)
     with bot_lock:
-        # Dynamically calculate max widths for specific columns
-        # Sorting by frequency (timeframe priority)
-        tf_priority = {'1s': 0, '1m': 1, '3m': 2, '5m': 3, '15m': 4, '30m': 5}
-        all_pairs = sorted(
-            [s for s in bot_state.keys() if not s.startswith("_")],
-            key=lambda x: (tf_priority.get(config['pairs'].get(x, {}).get('timeframe', '5m'), 99), x)
-        )
-
         max_pair_w = max([len(s) for s in all_pairs] + [len("Pair")])
         max_tendency_w = max([len(bot_state[s].get('tendency', 'N/A')) for s in all_pairs] + [len("Tendency")])
 
@@ -883,7 +886,7 @@ def make_dashboard(global_mode, config):
     )
     return layout
 
-def input_thread_func():
+def input_thread_func(config):
     """
     Background thread to handle user keyboard input.
 
@@ -898,10 +901,10 @@ def input_thread_func():
             if not startup_complete:
                  continue
             # Calculate heights for clamping
+            sorted_symbols = get_sorted_symbols(config)
             with bot_lock:
                  log_height = 8
                  max_logs_offset = max(0, len(all_logs) - log_height)
-                 sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
                  pairs_height = console.height - 20
                  if pairs_height < 3: pairs_height = 3
                  max_pairs_offset = max(0, len(sorted_symbols) - pairs_height)
@@ -1269,7 +1272,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                                      run_optimization_test_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
                                                      exclude_technique=(bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
                                                 )
-                                 elif execute_sell(exchange, data_manager, engine, symbol, data):
+                                 elif execute_sell(exchange, data_manager, engine, symbol, data, config):
                                       with bot_lock:
                                           bot_state[symbol]['last_action'] = 'SELL'
                                           bot_state[symbol]['position'] = None
@@ -1325,9 +1328,20 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                 global startup_complete
                 startup_complete = True
 
-            for _ in range(5):
-                 if shutdown_event.is_set(): break
-                 time.sleep(0.1)
+            # Check if any pair is on 1s timeframe
+            has_1s = any(config['pairs'][s].get('timeframe') == '1s' for s in pair_keys)
+
+            # Dynamic sleep based on fastest timeframe
+            if has_1s:
+                # 0.5s loop for 1s response
+                for _ in range(5):
+                    if shutdown_event.is_set(): break
+                    time.sleep(0.1)
+            else:
+                # 2s loop for other timeframes
+                for _ in range(20):
+                    if shutdown_event.is_set(): break
+                    time.sleep(0.1)
         except Exception as e:
             logging.error(f"Error in trading thread: {e}")
             time.sleep(5)
@@ -1498,7 +1512,7 @@ def main():
                 'expected_profit': 0
             }
 
-    threading.Thread(target=input_thread_func, daemon=True).start()
+    threading.Thread(target=input_thread_func, args=(config,), daemon=True).start()
     threading.Thread(target=trading_thread_func, args=(exchange, data_manager, pattern_manager, engine, config, args.mode), daemon=True).start()
 
     play_sound("startup")
@@ -1915,9 +1929,11 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
                 return False
             if order:
                 fee = order.get('calculated_fee', 0)
-                total_paid = (amount * current_price) + fee
-                logging.info(f"[{symbol}] Executing buy of amount {format_amt(amount)} at {format_price(current_price)}, final price paid: {format_price(total_paid)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-                data_manager.add_position(symbol, current_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
+                # Use actual price from order if available
+                final_entry_price = order.get('price') or current_price
+                total_paid = (amount * final_entry_price) + fee
+                logging.info(f"[{symbol}] Executing buy of amount {format_amt(amount)} at {format_price(final_entry_price)}, final price paid: {format_price(total_paid)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+                data_manager.add_position(symbol, final_entry_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
                 return True
             else:
                 logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}. Suspending pair.")
@@ -1929,7 +1945,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
     return False
 
-def execute_sell(exchange, data_manager, engine, symbol, data):
+def execute_sell(exchange, data_manager, engine, symbol, data, global_config):
     """
     Exécute un ordre de vente pour clôturer les lots rentables.
     """
@@ -1939,6 +1955,14 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
 
     base_asset = symbol.split('/')[0]
     is_simulation = isinstance(exchange, MockExchange)
+
+    # Refresh price from cache for maximum responsiveness
+    timeframe = global_config['pairs'].get(symbol, {}).get('timeframe', '1m')
+    cache_key = f"{symbol}_{timeframe}"
+    current_price = data['price']
+    with ohlcv_cache_lock:
+        if cache_key in ohlcv_cache and not ohlcv_cache[cache_key].empty:
+            current_price = ohlcv_cache[cache_key].iloc[-1]['close']
 
     # Récupérer le taux de commission
     fee_rate = 0.001
@@ -1955,7 +1979,7 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
 
         # Vérifier si le lot est profitable (Point 1 du sujet)
         # Un lot peut être revendu dès que son prix d'acquisition est dépassé par son potentiel prix de vente
-        if engine.is_profitable(data['price'], pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount']):
+        if engine.is_profitable(current_price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount']):
 
             balance = exchange.fetch_balances()
             if balance is None: continue
@@ -1972,12 +1996,14 @@ def execute_sell(exchange, data_manager, engine, symbol, data):
                 if order:
                     fee = order.get('calculated_fee', 0)
                     amount = pos['amount']
-                    total_received = (amount * data['price']) - fee
+                    # Use actual order price if returned, otherwise our current_price
+                    actual_price = order.get('price') or current_price
+                    total_received = (amount * actual_price) - fee
                     profit = total_received - pos.get('entry_total_base', 0)
                     quote = symbol.split('/')[1]
-                    logging.info(f"[{symbol}] Vente profitable du lot {i + 1} d'un montant {format_amt(amount)} à {format_price(data['price'])} (profit: {profit:.2f} {quote})")
+                    logging.info(f"[{symbol}] Vente profitable du lot {i + 1} d'un montant {format_amt(amount)} à {format_price(actual_price)} (profit: {profit:.2f} {quote})")
 
-                    data_manager.close_position(symbol, data['price'], fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, lot_index=i)
+                    data_manager.close_position(symbol, actual_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, lot_index=i)
                     any_sold = True
         else:
             logging.info(f"[{symbol}] Le lot {i + 1} (achat: {format_price(pos['entry_price'])}) n'est pas encore profitable.")

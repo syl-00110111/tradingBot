@@ -225,7 +225,14 @@ class CCXTExchange(ExchangeInterface):
                 if "500" in err_msg:
                     raise e
                 logging.error(f"Error in polling watch_ohlcv loop for {symbol} on {self.exchange_id}: {e}")
-            time.sleep(10 if timeframe not in ['1s', '1m', '3m', '5m'] else 2)
+
+            # Dynamic polling interval
+            if timeframe == '1s': sleep_time = 0.5
+            elif timeframe == '1m': sleep_time = 2
+            elif timeframe in ['3m', '5m']: sleep_time = 5
+            else: sleep_time = 15
+
+            time.sleep(sleep_time)
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
         try:
