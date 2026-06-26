@@ -239,6 +239,9 @@ class CCXTExchange(ExchangeInterface):
             if side == 'sell':
                 base, _ = symbol.split('/')
                 balance = self.fetch_balances()
+                if balance is None:
+                     logging.warning(f"Aborting sell of {symbol} on {self.exchange_id}: Balance unavailable.")
+                     return None
                 free_balance = balance.get(base, {}).get('free', 0)
                 if free_balance < amount:
                     if free_balance > 0 and (amount - free_balance) / amount < 0.01:
@@ -311,6 +314,7 @@ class MockExchange(ExchangeInterface):
         if self.real_exchange:
             try:
                 real_bal = self.real_exchange.fetch_balances()
+                if real_bal is None: return
                 total = real_bal.get('total', {})
                 for asset, amt in total.items():
                     if amt <= 0: continue
