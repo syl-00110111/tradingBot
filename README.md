@@ -24,12 +24,12 @@ Ce bot implémente des stratégies et une logique recommandées par des études 
 - **Tableau de Bord Interactif** : Navigation dans les paires de trading avec les flèches et visualisation des graphiques en chandeliers ASCII en temps réel en appuyant sur **ENTRÉE**.
 - **Découverte Auto des Positions** : Identifie automatiquement les actifs existants dans votre portefeuille et les peuple comme des positions gérées.
 - **Synchronisation API** : Le mode Live utilise exclusivement les données de l'API de l'échange pour les soldes et les positions.
-- **Sélection Dynamique du Timeframe** : Détermine l'unité de temps optimale (1m, 3m, 5m, 15m, 30m) pour chaque paire en fonction du volume 48h, du spread, de la volatilité et de l'activité.
+- **Sélection Dynamique du Timeframe** : Détermine l'unité de temps optimale (1m, 3m, 5m, 15m, 30m) pour chaque paire en fonction du volume 48h, du spread, de la volatilité et de l'activité, afin de tempérer chaque opportunité.
 
 ### 🛡 Gestion des Risques
 - **Logique de Confirmation** : Nécessite des signaux identiques consécutifs pour l'exécution. La fenêtre de confirmation s'élargit automatiquement en cas de haute volatilité (> 0.1).
 - **Suspension Intelligente** : Suspend automatiquement le trading pour les symboles où les ordres échouent ou si le budget est insuffisant. Reprend uniquement lorsque 1.5x le budget requis devient disponible.
-- **Résilience HTTP 500** : Implémente un refroidissement de 21 minutes pour les symboles rencontrant des erreurs serveur de l'échange.
+- **Résilience HTTP** : Implémente un refroidissement pour les symboles rencontrant des erreurs serveur lors de l'échange.
 - **Dimensionnement Dynamique** : Les tailles de position sont calculées comme un pourcentage de votre solde disponible, divisé par le nombre maximum de lots autorisés pour maintenir une exposition contrôlée.
 
 ---
@@ -51,10 +51,56 @@ Le bot propose plus de 30 stratégies distinctes, incluant :
 ### 🛠 `config.json`
 Paramètres principaux du bot.
 
-*   **`max_lots_per_symbol`** : (int) Nombre maximum de lots d'achat autorisés par symbole (par défaut : `3`).
+*   **`max_lots_per_symbol`** : (int) Nombre maximum de lots d'achat autorisés par symbole (par défaut : `1`).
 *   **`max_open_positions`** : (int) Nombre maximum de paires de trading distinctes ouvertes simultanément.
 *   **`max_trade_percentage`** : (float | object) Pourcentage maximum de votre solde total à exposer par symbole (tous lots confondus).
+*   * Attention, il s'agit de DIX pourcent par défaut ce qui peut être beaucoup !! Bien vérifier les options avant lancement live, lancer simulation !!
+*   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
+    ```json
+    "max_trade_percentage": {
+        "BTC": 5.0,
+        "USDT": 12.0,
+        "USDC": 10.0,
+        "default": 12.0
+    }
+    ```
 *   **`global_risk_multiplier`** : (float) Multiplicateur pour le dimensionnement des positions et les confirmations techniques.
+
+#### Advanced Overrides (Optional)
+*   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy for every pair.
+*   **`force_agressivity_to_all_pairs`**: (string) Force a specific aggressiveness level (e.g., `dynamic`, `normal`, `aggressive`).
+*   **`pairs`**: (Object) Allows per-pair configuration with multiple techniques.
+    Example:
+    ```json
+    "pairs": {
+        "BTC/USDC": {
+            "techniques": [
+                {"strategy": "ichimoku_cloud", "aggr": ["normal", "aggressive"]},
+                {"strategy": "bollinger_bands", "aggr": ["normal"]}
+            ]
+        }
+    }
+    ```
+### 📄 `pairs.txt`
+Define the trading pairs you want the bot to monitor (one per line).
+Example:
+```text
+BTC/USDC
+ETH/USDC
+SOL/USDC
+```
+*Base currencies (e.g., USDC) are automatically detected.*
+
+### 🔑 `api.json`
+Store your API credentials and preferred exchange.
+```json
+{
+  "api_key": "YOUR_KEY",
+  "api_secret": "YOUR_SECRET",
+  "exchange_id": "binance"
+}
+```
+*   **`exchange_id`**: The CCXT ID of the exchange (e.g., `binance`, `kraken`, `okx`, `coinbase`, `gateio`).
 
 ---
 
@@ -62,13 +108,24 @@ Paramètres principaux du bot.
 
 ### Installation
 
-1. Créer un environnement virtuel : `python -m venv venv && source venv/bin/activate`
-2. Installer les dépendances : `pip install -r requirements.txt`
+**Linux/macOS:**
+1. Créer un environnement virtuel et l'activer: `python -m venv venv && source venv/bin/activate`
 
-### Modes d'Exécution
-- **Simulation** : `python bot.py --mode simulation --exchange kraken`
-- **Live** : `python bot.py --mode live --exchange binance`
-- **Balance** : `python bot.py --mode balance`
+**Windows:**
+1. Créer un environnement virtuel: `python -m venv venv`, puis l'activer: `.\venv\Scripts\Activate.ps1`
+
+2. Installer les dépendances : `pip install --upgrade -r requirements.txt`
+
+*Note: pour Windows il faudra exécuter la commande `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` pour la sécurité, utiliser la révision **3.13** de Python, et installer le **Visual C++ 2015-2022 Redistributable (x64)** que vous pouvez trouver ici [https://aka.ms/vs/17/release/vc_redist.x64.exe] à cause de dépendances spécifiques à cette plateforme.*
+
+**Maintenance régulière:**
+
+Pour rester à jour concernant les modifications des appels API : `pip install --upgrade ccxt` ou `pip install --upgrade -r requirements.txt` pour lancer la procédure complète de mise à jour des dépendances. Assurez-vous également que **l'horloge** de votre ordinateur est synchronisée.
+
+### Modes d'exécution
+- **Simulation**: `python bot.py --mode simulation --exchange kraken`
+- **Live**: `python bot.py --mode live`
+- **Balance**: `python bot.py --mode balance --exchange binance`
 
 ---
 
