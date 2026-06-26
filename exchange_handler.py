@@ -167,11 +167,18 @@ class CCXTExchange(ExchangeInterface):
             return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         except Exception as e:
             err_msg = str(e)
-            if "500" in err_msg:
-                # Do not log HTML page here, just the error type (Point 1)
-                raise Exception(f"HTTP 500 Error Code for {symbol} on {self.exchange_id}")
-            else:
-                logging.error(f"Error fetching OHLCV for {symbol} on {self.exchange_id}: {e}")
+            # Grouping and clean error reporting (Point 1)
+            status_code = "Error"
+            import re
+            code_match = re.search(r'([45]\d{2})', err_msg)
+            if code_match: status_code = f"HTTP {code_match.group(1)}"
+
+            if "500" in err_msg or "502" in err_msg or "503" in err_msg or "504" in err_msg:
+                 # Let it bubble up for grouping in bot.py
+                 raise Exception(f"{status_code} Error Code for {symbol} on {self.exchange_id}")
+
+            # For other errors (like symbol not found 400), we still log but keep it clean
+            logging.error(f"Error fetching OHLCV for {symbol} on {self.exchange_id}: {status_code}")
             return None
 
     def fetch_ticker(self, symbol):
