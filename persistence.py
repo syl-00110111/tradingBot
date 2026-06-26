@@ -65,11 +65,8 @@ class DataManager:
         self.load()
 
     def _save(self):
-        try:
-            with open(self.filename, 'w') as f:
-                json.dump(self.data, f, indent=4)
-        except Exception as e:
-            logging.error(f"Failed to save trade data: {e}")
+        # Local persistence disabled (trades synced via API)
+        pass
 
     def load(self):
         if os.path.exists(self.filename):

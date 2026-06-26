@@ -515,8 +515,8 @@ def render_ascii_chart(symbol, config):
          plt_ascii.xticks(tick_indices, tick_labels)
 
     # Get plot size from console
-    width = console.width - 10
-    height = console.height - 15
+    width = console.width - 6
+    height = console.height - 18
     if width < 20: width = 20
     if height < 10: height = 10
 
@@ -970,6 +970,8 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     mode : str
         Bot operation mode ('live', 'simulation', etc.).
     """
+    first_analysis_done = False
+
     # Initial Optimal Timeframe Discovery (Point 3 - Background)
     for symbol in config.get('pairs', {}):
         try:
@@ -1044,6 +1046,9 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             # 2. Parallelize pair analysis
             # Prioritize pairs waiting longest (Point 4)
             sorted_pair_keys = sorted(pair_keys, key=lambda x: last_scan_time.get(x, 0))
+
+            if not first_analysis_done:
+                logging.info("Waiting for first data streams and analysis...")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(sorted_pair_keys)) as executor:
                 future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in sorted_pair_keys}
@@ -1209,6 +1214,10 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                # Update balance for next iteration
                                balance = exchange.fetch_balances()
 
+            if not first_analysis_done:
+                logging.info("First data streams acquired and analysis done.")
+                first_analysis_done = True
+
             for _ in range(5):
                  if shutdown_event.is_set(): break
                  time.sleep(0.1)
@@ -1344,11 +1353,9 @@ def main():
         if args.mode == 'live':
             exchange = CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             logging.info(f"Starting bot in LIVE mode on {exchange_id}")
-            logging.info("Waiting for first data streams and analysis...")
         elif args.mode == 'simulation':
             exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options)
             logging.info(f"Starting bot in SIMULATION mode ({exchange_id})")
-            logging.info("Waiting for first data streams and analysis...")
         elif args.mode == 'balance':
             exchange = MockExchange(api_key, api_secret, exchange_id=exchange_id, options=exchange_options) if api_key in [None, "YOUR_API_KEY"] else CCXTExchange(exchange_id, api_key, api_secret, options=exchange_options)
             exchange.load_markets()
@@ -1970,7 +1977,7 @@ def sync_live_positions(exchange, data_manager, config):
         Bot configuration for identifying base currencies and pairs.
     """
     exchange_id = getattr(exchange, 'exchange_id', 'Exchange')
-    logging.info(f"Syncing positions from {exchange_id} API")
+    logging.info(f"Syncing positions from {exchange_id} API...")
     balance = exchange.fetch_balances()
     if balance is None:
         logging.error("Failed to sync live positions: balances are unavailable. Check API credentials or if your computer's clock is synchronized.")
@@ -2094,6 +2101,8 @@ def sync_live_positions(exchange, data_manager, config):
 
     if not sellable_found and any(v > 0 for k, v in free_balances.items() if k not in base_currencies):
         logging.warning("No sellable assets found. Your wallet contains only 'dust' (amounts below exchange limits) or maybe adjust you pairs.txt file.")
+
+    logging.info(f"Syncing positions from {exchange_id} API done.")
 
 
 
