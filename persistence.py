@@ -69,16 +69,8 @@ class DataManager:
         pass
 
     def load(self):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f:
-                    self.data = json.load(f)
-                    # S'assurer que les positions ouvertes sont des listes (pour la compatibilité descendante)
-                    for symbol in self.data["open_positions"]:
-                        if isinstance(self.data["open_positions"][symbol], dict):
-                            self.data["open_positions"][symbol] = [self.data["open_positions"][symbol]]
-            except Exception as e:
-                logging.error(f"Échec du chargement des données de transaction : {e}")
+        # Désactivation du chargement (sauf config et api gérés ailleurs)
+        pass
 
     def clear_history(self):
         """

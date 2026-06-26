@@ -545,12 +545,11 @@ def render_ascii_chart(symbol, config):
     # Get plot size from console
     # On réduit la hauteur pour s'assurer que ça rentre dans le panel sans dépasser
     width = console.width - 8
-    # La hauteur totale disponible pour le panel central est environ console.height - 16
-    # On laisse de la marge pour les titres et les bordures
-    height = console.height - 22
+    # On réduit encore la hauteur pour éviter le dépassement constaté sur certains terminaux
+    height = console.height - 26
 
     if width < 20: width = 20
-    if height < 15: height = 15 # Minimum pour voir les deux subplots
+    if height < 12: height = 12 # Minimum réduit
 
     plt_ascii.plotsize(width, height)
     content = Text.from_ansi(plt_ascii.build())
@@ -1478,8 +1477,8 @@ def play_sound(action, config=None):
         if system == "windows":
             import winsound
             if action == "startup":
-                 # Randomized sequence equal to max_open_positions
-                 num_blips = int(config.get('max_open_positions', 18)) if config else 18
+                 # Randomized sequence equal to max_open_positions - 4
+                 num_blips = max(1, (int(config.get('max_open_positions', 18)) if config else 18) - 4)
                  for _ in range(num_blips):
                       freq = random.randint(400, 1200)
                       dur = random.randint(100, 300)
@@ -2486,9 +2485,9 @@ def run_scan_mode(exchange, config, args, engine=None, device=None):
         Computation device.
     """
     # Default strategy for scan
-    default_strategy = "double_ema_macd_rsi"
+    default_strategy = None
 
-    strategy = args.strategy or default_strategy
+    strategy = args.strategy
     aggr = args.aggr or config.get('force_agressivity_to_all_pairs', 'normal')
     timeframe = args.timeframe or config['pairs'].get(args.symbol, {}).get('timeframe', '1m')
 
