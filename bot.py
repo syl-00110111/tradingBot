@@ -502,8 +502,8 @@ def render_ascii_chart(symbol, config):
         A Rich Text object containing the rendered ASCII chart.
     """
     global chart_cache
-    # Force 1m timeframe for chart as well (Point 3)
-    timeframe = '1m'
+    # Use current adaptive timeframe for chart
+    timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
     cache_key = f"{symbol}_{timeframe}"
 
     with ohlcv_cache_lock:
@@ -614,7 +614,12 @@ def make_dashboard(global_mode, config):
 
     with bot_lock:
         # Dynamically calculate max widths for specific columns
-        all_pairs = sorted([s for s in bot_state.keys() if not s.startswith("_")])
+        # Sorting by frequency (timeframe priority)
+        tf_priority = {'1s': 0, '1m': 1, '3m': 2, '5m': 3, '15m': 4, '30m': 5}
+        all_pairs = sorted(
+            [s for s in bot_state.keys() if not s.startswith("_")],
+            key=lambda x: (tf_priority.get(config['pairs'].get(x, {}).get('timeframe', '5m'), 99), x)
+        )
 
         max_pair_w = max([len(s) for s in all_pairs] + [len("Pair")])
         max_tendency_w = max([len(bot_state[s].get('tendency', 'N/A')) for s in all_pairs] + [len("Tendency")])
@@ -678,6 +683,7 @@ def make_dashboard(global_mode, config):
         table = Table(expand=True, box=None, padding=(0, 1))
         if expert_mode:
             table.add_column("Pair", style="cyan", no_wrap=True, width=max_pair_w)
+            table.add_column("TF", style="yellow", no_wrap=True, width=4)
             table.add_column("EMA F/S", style="green", no_wrap=True, width=18)
             table.add_column("MACD", style="blue", no_wrap=True, width=10)
             table.add_column("RSI", style="yellow", no_wrap=True, width=7)
@@ -689,6 +695,7 @@ def make_dashboard(global_mode, config):
             table.add_column("Strategy", style="bold cyan", no_wrap=True, width=max_strat_w)
         else:
             table.add_column("Pair", style="cyan", no_wrap=True, width=max_pair_w)
+            table.add_column("TF", style="yellow", no_wrap=True, width=4)
             table.add_column("Price", style="magenta", no_wrap=True, width=10)
             table.add_column("Amt", style="cyan", no_wrap=True, width=12)
             table.add_column("Entry", style="magenta", no_wrap=True, width=10)
@@ -700,7 +707,7 @@ def make_dashboard(global_mode, config):
             table.add_column("Aggress", style="white", no_wrap=True, width=max_aggr_w)
             table.add_column("Strategy", style="bold cyan", no_wrap=True, width=max_strat_w)
 
-        sorted_symbols = sorted([s for s in bot_state.keys() if not s.startswith("_")])
+        sorted_symbols = all_pairs
         # Calculate exactly available height: Header(3) + Logs(10) + Status(3) + Panel Border(2) = 18
         # Increased to 20 to provide more margin and avoid cutting off rows.
         pairs_height = console.height - 20
@@ -775,6 +782,7 @@ def make_dashboard(global_mode, config):
 
                  row_vals = [
                       symbol,
+                      f"[yellow]{config['pairs'].get(symbol, {}).get('timeframe', '1m')}[/]",
                       f"{format_price(data.get('ema_f', 0), precision=data.get('price_precision'))}/{format_price(data.get('ema_s', 0), precision=data.get('price_precision'))}",
                       f"{data.get('macd_hist', 0):.4e}" if abs(data.get('macd_hist', 0)) < 0.001 else f"{data.get('macd_hist', 0):.4f}",
                       f"{data.get('rsi', 0):.2f}",
@@ -788,6 +796,7 @@ def make_dashboard(global_mode, config):
             else:
                  row_vals = [
                       symbol,
+                      f"[yellow]{config['pairs'].get(symbol, {}).get('timeframe', '1m')}[/]",
                       format_price(data.get('price', 0), precision=data.get('price_precision')),
                       amt_str, entry_str, fee_str,
                       f"{data.get('expected_profit', 0):.5f}" if has_position else '0.00000',
