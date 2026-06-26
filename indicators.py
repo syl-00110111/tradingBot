@@ -32,7 +32,7 @@ from monte_carlo import MonteCarloEngine
 @torch.jit.script
 def torch_ema_kernel(series: torch.Tensor, alpha: float):
     """
-    Core JIT-compiled kernel for Exponential Moving Average (EMA).
+    Noyau JIT-compilé pour la Moyenne Mobile Exponentielle (EMA).
 
     Parameters
     ----------
@@ -57,7 +57,7 @@ def torch_ema_kernel(series: torch.Tensor, alpha: float):
 
 def torch_ema(series, length):
     """
-    High-performance EMA implementation in PyTorch using JIT compilation.
+    Implémentation EMA haute performance dans PyTorch via JIT.
 
     Parameters
     ----------
@@ -76,7 +76,7 @@ def torch_ema(series, length):
 
 def torch_tema(series, length):
     """
-    High-performance Triple Exponential Moving Average (TEMA) implementation in PyTorch.
+    Implémentation TEMA haute performance dans PyTorch.
 
     TEMA = (3 * EMA1) - (3 * EMA2) + EMA3
     where EMA1 is the EMA of the price, EMA2 is the EMA of EMA1, and
@@ -101,7 +101,7 @@ def torch_tema(series, length):
 
 def torch_heikin_ashi(open_t, high_t, low_t, close_t):
     """
-    High-performance Heikin Ashi implementation in PyTorch.
+    Implémentation Heikin Ashi haute performance dans PyTorch.
 
     Parameters
     ----------
@@ -137,7 +137,7 @@ def _torch_ha_open_loop(open_t: torch.Tensor, close_t: torch.Tensor, ha_close: t
 
 def torch_sinewave(close_t):
     """
-    Simplified PyTorch implementation of Hilbert Transform SineWave.
+    Implémentation PyTorch simplifiée de la SineWave de Hilbert Transform.
     Based on Ehlers' implementation.
 
     Returns
@@ -231,7 +231,7 @@ def _torch_sinewave_kernel(close_t: torch.Tensor):
 
 def torch_rsi(series, length):
     """
-    Vectorized Relative Strength Index (RSI) implementation in PyTorch.
+    Implémentation vectorisée du RSI dans PyTorch.
 
     Calculates RSI using the Wilder's smoothing method.
 
@@ -263,7 +263,7 @@ def torch_rsi(series, length):
 
 def torch_macd(series, fast=12, slow=26, signal=9):
     """
-    Vectorized MACD implementation in PyTorch.
+    Implémentation vectorisée du MACD dans PyTorch.
 
     Parameters
     ----------
@@ -294,7 +294,7 @@ def torch_macd(series, fast=12, slow=26, signal=9):
 
 def torch_adx(high, low, close, length=14):
     """
-    High-performance Average Directional Index (ADX) implementation in PyTorch.
+    Implémentation ADX haute performance dans PyTorch.
 
     Parameters
     ----------
@@ -350,7 +350,7 @@ _mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
 
 def get_signals(df, mode_config, is_scan=False):
     """
-    Dispatcher for multiple trading strategies.
+    Répartiteur pour plusieurs stratégies de trading.
 
     Calculates common indicators (EMA, MACD, RSI, ADX) and then executes
     the specific strategy defined in `mode_config['strategy']`.
@@ -513,7 +513,7 @@ def get_signals(df, mode_config, is_scan=False):
 
 def apply_confirmation(df, window):
     """
-    Applies a rolling confirmation window to buy and sell candidates.
+    Applique une fenêtre de confirmation roulante.
 
     A signal is confirmed if it persists or appears within the specified
     rolling window.
@@ -816,7 +816,7 @@ def handle_mc_strategies(df, strategy, config, is_scan):
 
 def strategy_ichimoku(df, config):
     """
-    Ichimoku Cloud strategy.
+    Stratégie Ichimoku Cloud.
 
     Buy signal when Tenkan-sen crosses above Kijun-sen and price is above
     the Kumo (Cloud). Sell signal when Tenkan-sen crosses below Kijun-sen.
@@ -853,7 +853,7 @@ def strategy_ichimoku(df, config):
 
 def strategy_psar(df, config):
     """
-    Parabolic SAR strategy.
+    Stratégie SAR Parabolique.
 
     Buy signal when the Parabolic SAR flips from above to below the price.
     Sell signal when it flips from below to above the price.
@@ -891,7 +891,7 @@ def strategy_psar(df, config):
 
 def strategy_rsi_sr(df, config):
     """
-    RSI Support and Resistance strategy.
+    Stratégie RSI Support et Résistance.
 
     Buy signal when RSI is oversold (< 30) and price is near a 50-period support.
     Sell signal when RSI is overbought (> 70) and price is near a 50-period resistance.
@@ -927,7 +927,7 @@ def strategy_rsi_sr(df, config):
 
 def strategy_bollinger(df, config):
     """
-    Bollinger Bands strategy.
+    Stratégie Bandes de Bollinger.
 
     Buy signal when price touches or exceeds the lower band and RSI is oversold.
     Sell signal when price touches the middle band (SMA).
@@ -967,7 +967,7 @@ def strategy_bollinger(df, config):
 
 def strategy_breakout_volume(df, config):
     """
-    Breakout Volume strategy.
+    Stratégie Breakout Volume.
 
     Buy signal when price breaks a 20-period resistance with high volume
     (2x average). Exit when price crosses below the 20-period SMA.
@@ -998,7 +998,7 @@ def strategy_breakout_volume(df, config):
 
 def strategy_donchian(df, config):
     """
-    Donchian Channels strategy.
+    Stratégie Canaux de Donchian.
 
     Buy signal when price touches the upper Donchian channel.
     Sell signal when price touches the lower Donchian channel.
@@ -1033,7 +1033,7 @@ def strategy_donchian(df, config):
 
 def strategy_atr_breakout(df, config):
     """
-    ATR Breakout strategy.
+    Stratégie Breakout ATR.
 
     Buy signal when price breaks a 30-period resistance and ATR is increasing.
     Sell signal based on a trailing stop of 2x ATR.
@@ -1065,7 +1065,7 @@ def strategy_atr_breakout(df, config):
 
 def strategy_stoch_rsi(df, config):
     """
-    Stochastic RSI strategy.
+    Stratégie RSI Stochastique.
 
     Buy signal when Stochastic RSI %K is oversold (< 20) and rising.
     Sell signal when %K is overbought (> 80) and falling.
@@ -1098,7 +1098,7 @@ def strategy_stoch_rsi(df, config):
 
 def strategy_williams_r(df, config):
     """
-    Williams %R strategy.
+    Stratégie Williams %R.
 
     Buy signal when Williams %R is oversold (< -80) and rising.
     Sell signal when overbought (> -20) and falling.
@@ -1127,7 +1127,7 @@ def strategy_williams_r(df, config):
 
 def strategy_vwap_momentum(df, config):
     """
-    VWAP Momentum strategy.
+    Stratégie Momentum VWAP.
 
     Buy signal when price is above VWAP and volume is increasing.
     Sell signal when price crosses below VWAP.
@@ -1158,7 +1158,7 @@ def strategy_vwap_momentum(df, config):
 
 def strategy_order_flow_proxy(df, config):
     """
-    Order Flow Proxy strategy.
+    Stratégie Proxy Order Flow.
 
     Simulates order flow by calculating volume delta (proxied by price action
     within candles). Buy signal on high relative volume delta.
@@ -1188,7 +1188,7 @@ def strategy_order_flow_proxy(df, config):
 
 def strategy_renko_proxy(df, config):
     """
-    Renko Proxy strategy.
+    Stratégie Proxy Renko.
 
     Simulates Renko charts by detecting candles with bodies larger than ATR.
 
@@ -1217,7 +1217,7 @@ def strategy_renko_proxy(df, config):
 
 def strategy_tick_proxy(df, config):
     """
-    Tick Proxy strategy.
+    Stratégie Proxy Tick.
 
     Buy signal based on rapid price velocity spikes.
 
@@ -1247,7 +1247,7 @@ def strategy_tick_proxy(df, config):
 
 def strategy_ema_rsi_volume(df, config):
     """
-    EMA, RSI, and Volume Hybrid strategy.
+    Stratégie Hybride EMA, RSI et Volume.
 
     Buy signal when 9 EMA > 21 EMA, RSI > 50, and volume is above average.
 
@@ -1278,7 +1278,7 @@ def strategy_ema_rsi_volume(df, config):
 
 def strategy_macd_bollinger(df, config):
     """
-    MACD and Bollinger Hybrid strategy.
+    Stratégie Hybride MACD et Bollinger.
 
     Buy signal on bullish MACD crossover when price is near the lower Bollinger Band.
 
@@ -1319,7 +1319,7 @@ def strategy_macd_bollinger(df, config):
 
 def strategy_whale_detection(df, config):
     """
-    Whale Detection strategy (Proxy for On-Chain metrics).
+    Stratégie de détection de baleines (Proxy On-Chain).
 
     Detects unusual volume spikes (3 standard deviations above mean) accompanied
     by price movement to infer large player activity.
@@ -1358,7 +1358,7 @@ def strategy_whale_detection(df, config):
 
 def strategy_pump_dump(df, config):
     """
-    Pump and Dump Detection strategy.
+    Stratégie de détection de Pump and Dump.
 
     Detects extreme price-volume divergence where both price and volume
     surge suddenly. Sells when price begins to drop after a surge.
@@ -1397,7 +1397,7 @@ def strategy_pump_dump(df, config):
 
 def strategy_market_regime(df, config):
     """
-    Market Regime strategy.
+    Stratégie de régime de marché.
 
     Switches between Mean-Reversion (Bollinger) and Trend-Following (EMA)
     based on historical volatility.
@@ -1447,7 +1447,7 @@ def strategy_market_regime(df, config):
 
 def strategy_scientific_ensemble(df, config):
     """
-    Scientific Ensemble strategy (Proxy for ML models).
+    Stratégie d'ensemble scientifique (Proxy modèles ML).
 
     Combines signals from MACD, RSI, and Bollinger Bands using a weighted
     scoring approach.
@@ -1494,7 +1494,7 @@ def strategy_scientific_ensemble(df, config):
 
 def strategy_sentiment_momentum(df, config):
     """
-    Sentiment Momentum strategy (Social Media Sentiment Proxy).
+    Stratégie de momentum de sentiment (Proxy Social Media).
 
     Uses price acceleration and RSI as a proxy for market FOMO (Fear Of Missing Out)
     or Panic.
@@ -1532,7 +1532,7 @@ def strategy_sentiment_momentum(df, config):
 
 def strategy_liquidation_cascade(df, config):
     """
-    Liquidation Cascade strategy.
+    Stratégie de cascade de liquidations.
 
     Detects sharp price drops (>2%) on very high volume as long liquidation
     cascades (buying opportunity) or sharp rises as short liquidations.
@@ -1572,7 +1572,7 @@ def strategy_liquidation_cascade(df, config):
 
 def strategy_mvrv_proxy(df, config):
     """
-    MVRV Ratio Proxy strategy.
+    Stratégie Proxy ratio MVRV.
 
     Proxies the Market Value to Realized Value ratio using price vs 200-day SMA.
 
@@ -1607,7 +1607,7 @@ def strategy_mvrv_proxy(df, config):
 
 def strategy_adx_trend(df, config):
     """
-    ADX Trend Strength strategy.
+    Stratégie de force de tendance ADX.
 
     Filters signals based on ADX trend strength (> 25).
 
@@ -1646,7 +1646,7 @@ def strategy_adx_trend(df, config):
 
 def strategy_pairs_trading(df, config):
     """
-    Pairs Trading strategy (Statistical Arbitrage Proxy).
+    Stratégie Pairs Trading (Proxy Arbitrage Statistique).
 
     Simulates pairs trading by comparing price to its 50-period SMA using Z-Score.
 
@@ -1680,7 +1680,7 @@ def strategy_pairs_trading(df, config):
 
 def strategy_halving_cycle(df, config):
     """
-    Bitcoin Halving Cycle strategy.
+    Stratégie cycle de halving Bitcoin.
 
     Aligns with major market cycles by only buying when price is above 200 EMA.
 
@@ -1715,7 +1715,7 @@ def strategy_halving_cycle(df, config):
 
 def strategy_listing_surge(df, config):
     """
-    Exchange Listing Surge strategy.
+    Stratégie de pic de cotation (Listing).
 
     Detects extreme volume increases on relatively flat price history to
     front-run listing pumps.
@@ -1753,7 +1753,7 @@ def strategy_listing_surge(df, config):
 
 def strategy_tema_crossover(df, config):
     """
-    Triple Exponential Moving Average (TEMA) Crossover strategy.
+    Stratégie de croisement TEMA.
 
     Buy signal when price crosses above the TEMA.
     Sell signal when price crosses below the TEMA.
@@ -1795,7 +1795,7 @@ def strategy_tema_crossover(df, config):
 
 def strategy_sinewave(df, config):
     """
-    Hilbert Transform SineWave strategy.
+    Stratégie SineWave de Hilbert Transform.
 
     Buy when Sine crosses above LeadSine.
     Sell when Sine crosses below LeadSine.
@@ -1824,7 +1824,7 @@ def strategy_sinewave(df, config):
 
 def strategy_candle_patterns(df, config):
     """
-    Comprehensive Candlestick Pattern strategy.
+    Stratégie complète de motifs de chandeliers.
     """
     o, h, l, c = df['open'], df['high'], df['low'], df['close']
     po, ph, pl, pc = o.shift(1), h.shift(1), l.shift(1), c.shift(1)
@@ -1868,7 +1868,7 @@ def strategy_candle_patterns(df, config):
 
 def strategy_heikin_ashi(df, config):
     """
-    Heikin Ashi Strategy.
+    Stratégie Heikin Ashi.
 
     Uses Heikin Ashi "shadow" candles for noise filtering.
     Buy signal: Green HA candle (HA_Close > HA_Open) with no lower wick.
