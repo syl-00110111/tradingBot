@@ -185,11 +185,12 @@ class DashboardHandler(logging.Handler):
         expiry = datetime.now() + timedelta(seconds=self.duration)
 
         with bot_lock:
-            # Group HTTP 500 errors
-            if "HTTP 500" in msg:
-                error_type = "HTTP 500 Error Code"
+            # Group HTTP Errors (Point 1)
+            http_err_match = re.search(r'(HTTP \d{3}) Error Code', msg)
+            if http_err_match:
+                error_type = http_err_match.group(1)
                 for log in all_logs:
-                    if error_type in log['msg']:
+                    if error_type in log['msg'] and "Error fetching OHLCV" in log['msg']:
                         try:
                             parts = log['msg'].split(']')
                             times_str = parts[0][1:]
@@ -201,10 +202,10 @@ class DashboardHandler(logging.Handler):
                                 sym = new_symbol.group(1)
                                 if sym not in current_symbols: current_symbols.append(sym)
                             exchange_name = "exchange"
-                            ex_match = re.search(r'on (\w+):', rest)
+                            ex_match = re.search(r'on (\w+)', rest)
                             if ex_match: exchange_name = ex_match.group(1)
                             symbols_str = ",".join(current_symbols)
-                            log['msg'] = f"[{times_str}] Error fetching OHLCV for {symbols_str} on {exchange_name}: {error_type}"
+                            log['msg'] = f"[{times_str}] Error fetching OHLCV for {symbols_str} on {exchange_name} {error_type}"
                             log['expiry'] = expiry
                             return
                         except: pass
@@ -477,6 +478,7 @@ def render_ascii_chart(symbol, config):
     if chart_cache["symbol"] == symbol and chart_cache["last_update"] == last_ts:
          return chart_cache["content"]
 
+    plt_ascii.clear_figure()
     plt_ascii.clf()
     plt_ascii.theme('dark')
 
@@ -501,6 +503,8 @@ def render_ascii_chart(symbol, config):
 
     # Subplot 2: Volume
     plt_ascii.subplot(2, 1)
+    # Clear subplot to avoid merging labels/scales
+    plt_ascii.clf()
     volumes = df['volume'].tolist()
     plt_ascii.bar(indices, volumes, color='blue', label='Volume')
     plt_ascii.title("Volume")
@@ -985,6 +989,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     pair_keys = priority_order if priority_order else list(pairs_dict.keys())
 
     active_scans = {} # symbol -> future
+    last_scan_time = {sym: 0 for sym in pair_keys}
 
     time.sleep(5)
     markets = exchange.load_markets()
@@ -1034,8 +1039,11 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             potential_buys = []
 
             # 2. Parallelize pair analysis
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(pair_keys)) as executor:
-                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pair_keys}
+            # Prioritize pairs waiting longest (Point 4)
+            sorted_pair_keys = sorted(pair_keys, key=lambda x: last_scan_time.get(x, 0))
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(sorted_pair_keys)) as executor:
+                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in sorted_pair_keys}
                 for future in concurrent.futures.as_completed(future_to_sym):
                     if shutdown_event.is_set(): break
                     symbol = future_to_sym[future]
@@ -1079,11 +1087,16 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                 candles_since = 0
 
                             # 3. Handle re-scaning triggers (Asynchronous)
+                            # Prioritize pairs waiting longest and skip if has signal (Point 4)
                             if candles_since >= no_signal_thresh and symbol not in active_scans:
-                                # logging.info(f"[{symbol}] No signal for {no_signal_thresh} candles. Scheduling background re-scan...")
-                                candles_since = 0
+                                if data.get('buy') or data.get('sell'):
+                                     # Pause/skip scanning if there is a signal
+                                     candles_since = 0
+                                else:
+                                    last_scan_time[symbol] = now_ts
+                                    candles_since = 0
 
-                                # Use cached OHLCV data instead of blocking network call
+                                    # Use cached OHLCV data instead of blocking network call
                                 timeframe = config['pairs'][symbol].get('timeframe', '1m')
                                 cache_key = f"{symbol}_{timeframe}"
                                 df_bench = None
@@ -1163,10 +1176,12 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                  potential_buys.append((symbol, data))
                     except Exception as e:
                         err_msg = str(e)
-                        if "500" in err_msg:
-                            logging.error(f"Error analyzing {symbol}: HTTP 500 Error Code")
+                        http_err = re.search(r'(HTTP \d{3}) Error Code', err_msg)
+                        if http_err:
+                            status_code = http_err.group(1)
+                            logging.error(f"Error analyzing {symbol}: {status_code} Error Code")
                             # Suspend for 21 minutes
-                            pair_suspensions[symbol] = {'until': time.time() + 21 * 60, 'reason': 'http_500'}
+                            pair_suspensions[symbol] = {'until': time.time() + 21 * 60, 'reason': 'http_error'}
                         else:
                             logging.error(f"Error analyzing {symbol}: {e}")
 
@@ -1231,9 +1246,6 @@ def main():
             device = torch.device('cpu')
             use_mkldnn = True
             torch.backends.mkldnn.enabled = True
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['MKL_NUM_THREADS'] = '1'
-            torch.set_num_threads(1)
             gpu_enabled = True
         elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
             device = torch.device('vulkan')
