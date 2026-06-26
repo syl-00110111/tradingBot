@@ -133,7 +133,12 @@ def format_price(price, precision=None):
         return f"{price:.10f}".rstrip('0').rstrip('.')
     else:
         p_int = precision_to_int(precision)
-        return f"{price:.{p_int}f}".rstrip('0').rstrip('.')
+        formatted = f"{price:.{p_int}f}".rstrip('0').rstrip('.')
+        if (formatted == "" or formatted == "0") and price != 0:
+             # Fallback if precision is too low for the value
+             if abs(price) < 0.000001: return f"{price:.4e}"
+             return f"{price:.10f}".rstrip('0').rstrip('.')
+        return formatted if formatted != "" else "0"
 
 def format_amt(amt, precision=None):
     """
@@ -159,7 +164,11 @@ def format_amt(amt, precision=None):
         return f"{amt:.10f}".rstrip('0').rstrip('.')
     else:
         p_int = precision_to_int(precision)
-        return f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
+        formatted = f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
+        if (formatted == "" or formatted == "0") and amt != 0:
+             if abs(amt) < 0.000001: return f"{amt:.4e}"
+             return f"{amt:.10f}".rstrip('0').rstrip('.')
+        return formatted if formatted != "" else "0"
 
 class DashboardHandler(logging.Handler):
     """
@@ -534,10 +543,14 @@ def render_ascii_chart(symbol, config):
          plt_ascii.xticks(tick_indices, tick_labels)
 
     # Get plot size from console
-    width = console.width - 6
-    height = console.height - 18
+    # On réduit la hauteur pour s'assurer que ça rentre dans le panel sans dépasser
+    width = console.width - 8
+    # La hauteur totale disponible pour le panel central est environ console.height - 16
+    # On laisse de la marge pour les titres et les bordures
+    height = console.height - 22
+
     if width < 20: width = 20
-    if height < 10: height = 10
+    if height < 15: height = 15 # Minimum pour voir les deux subplots
 
     plt_ascii.plotsize(width, height)
     content = Text.from_ansi(plt_ascii.build())
