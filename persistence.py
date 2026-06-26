@@ -52,25 +52,9 @@ class PatternManager:
 class DataManager:
     """
     Gestionnaire pour l'état de trading du bot, y compris les positions ouvertes et l'historique des transactions.
-
-    Paramètres
-    ----------
-    mode : str, optional
-        Le mode d'opération (par défaut 'simulation').
     """
-    def __init__(self, mode='simulation'):
-        self.mode = mode
-        self.filename = f"trades_{mode}.json"
+    def __init__(self):
         self.data = {"open_positions": {}, "trade_history": []}
-        self.load()
-
-    def _save(self):
-        # Persistance locale désactivée (transactions synchronisées via API)
-        pass
-
-    def load(self):
-        # Désactivation du chargement (sauf config et api gérés ailleurs)
-        pass
 
     def clear_history(self):
         """
@@ -107,7 +91,6 @@ class DataManager:
             "entry_total_base": total_base, "trigger_data": trigger_data,
             "timestamp": timestamp, "sell_signals_received": 0, "last_sell_signal_candle_ts": None
         })
-        self._save()
 
     def increment_sell_signals(self, symbol, candle_ts):
         """
@@ -148,7 +131,6 @@ class DataManager:
         if symbol in self.data["open_positions"]:
             for pos in self.data["open_positions"][symbol]:
                 pos["ignore_sell"] = value
-            self._save()
 
     def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, lot_index=0):
         """
@@ -194,7 +176,6 @@ class DataManager:
                 "sell_signals_received": position.get("sell_signals_received", 0)
             }
             self.data["trade_history"].append(trade)
-            self._save()
             return trade
         return None
 
