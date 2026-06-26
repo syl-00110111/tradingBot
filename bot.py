@@ -1246,6 +1246,9 @@ def main():
             device = torch.device('cpu')
             use_mkldnn = True
             torch.backends.mkldnn.enabled = True
+            os.environ['OMP_NUM_THREADS'] = '1'
+            os.environ['MKL_NUM_THREADS'] = '1'
+            torch.set_num_threads(1)
             gpu_enabled = True
         elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
             device = torch.device('vulkan')
