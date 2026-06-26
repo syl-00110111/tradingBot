@@ -1133,6 +1133,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                             if new_tf != old_tf:
                                 with bot_lock:
                                     config['pairs'][sym]['timeframe'] = new_tf
+                                config['pairs'][sym]['_last_processed_ts'] = None
                                 # ohlcv_watcher_thread will detect this and restart
                         except: pass
 
@@ -1148,8 +1149,27 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             if not first_analysis_done:
                 logging.info("Waiting for first data streams and analysis...")
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(sorted_pair_keys)) as executor:
-                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in sorted_pair_keys}
+            # Determine which pairs need analysis based on their timeframe
+            pairs_to_analyze = []
+            for sym in sorted_pair_keys:
+                tf = config['pairs'][sym].get('timeframe', '1m')
+                cache_key = f"{sym}_{tf}"
+
+                new_candle = False
+                with ohlcv_cache_lock:
+                    if cache_key in ohlcv_cache and not ohlcv_cache[cache_key].empty:
+                        latest_ts = ohlcv_cache[cache_key].index[-1]
+                        last_processed_ts = config['pairs'][sym].get('_last_processed_ts')
+
+                        if last_processed_ts is None or latest_ts > last_processed_ts:
+                            new_candle = True
+                            config['pairs'][sym]['_last_processed_ts'] = latest_ts
+
+                if new_candle or not first_analysis_done:
+                    pairs_to_analyze.append(sym)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(pairs_to_analyze))) as executor:
+                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pairs_to_analyze}
                 for future in concurrent.futures.as_completed(future_to_sym):
                     if shutdown_event.is_set(): break
                     symbol = future_to_sym[future]
