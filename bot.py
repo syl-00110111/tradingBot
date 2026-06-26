@@ -831,8 +831,8 @@ def make_dashboard(global_mode, config):
         pairs_panel = Panel(chart_content, title=f"[bold]K-Lines: {chart_symbol}[/]", border_style="bold magenta")
 
     if not startup_complete:
-         waiting_text = Text("\n\n\n\n\n[bold blink yellow]Waiting for system initialization...[/]\n", justify="center")
-         waiting_text.append("[dim]Fetching market data and calculating first signals...[/]\n", style="white")
+         waiting_text = Text.from_markup("\n\n\n\n\n[bold blink yellow]Waiting for system initialization...[/]\n", justify="center")
+         waiting_text.append_text(Text.from_markup("[dim]Fetching market data and calculating first signals...[/]\n", style="white"))
          pairs_panel = Panel(waiting_text, title="[bold]System Startup[/]", border_style="bold yellow")
 
     layout = Layout()
@@ -2028,11 +2028,13 @@ def sync_live_positions(exchange, data_manager, config):
                 break
         if not symbol: continue
 
-        # Check if we already know this position to avoid redundant history fetch
-        existing_pos = data_manager.get_position(symbol)
-        if existing_pos and abs(existing_pos['amount'] - amount) / amount < 0.001:
-            sellable_found = True
-            continue
+        # Vérifie si nous connaissons déjà cette position pour éviter une récupération redondante de l'historique
+        existing_pos_list = data_manager.get_position(symbol)
+        if existing_pos_list:
+            total_existing_amount = sum(p['amount'] for p in existing_pos_list)
+            if abs(total_existing_amount - amount) / amount < 0.001:
+                sellable_found = True
+                continue
 
         # Check if it's dust
         is_dust = False
