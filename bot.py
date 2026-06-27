@@ -296,6 +296,89 @@ class DashboardHandler(logging.Handler):
                            log['expiry'] = expiry
                            return
 
+            # Grouping for "Cost is below min notional"
+            if "is below min notional" in msg:
+                 for log in all_logs:
+                      if "is below min notional" in log['msg'] or "<" in log['msg'] and "(Adjusted)" in log['msg']:
+                           try:
+                                parts = log['msg'].split(']')
+                                times_str = parts[0][1:]
+                                if timestamp not in times_str: times_str += f",{timestamp}"
+
+                                current_content = re.findall(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) (?:is below min notional|<) ([\d.]+)', log['msg'])
+                                new_content = re.search(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) is below min notional ([\d.]+)', msg)
+
+                                if new_content:
+                                     sym, cost, min_n = new_content.groups()
+                                     found = False
+                                     for i, (csym, ccost, cmin) in enumerate(current_content):
+                                          if csym == sym:
+                                               current_content[i] = (sym, cost, min_n)
+                                               found = True
+                                               break
+                                     if not found:
+                                          current_content.append((sym, cost, min_n))
+
+                                     merged_entries = " | ".join([f"[{s}] Cost {c} < {m}" for s, c, m in current_content])
+                                     log['msg'] = f"[{times_str}] {merged_entries} (Adjusted)"
+                                     log['expiry'] = expiry
+                                     return
+                           except: pass
+
+            # Grouping for "Executing buy"
+            if "Executing buy" in msg:
+                 for log in all_logs:
+                      if "Executing buy" in log['msg'] or "Executing buys:" in log['msg']:
+                           try:
+                                parts = log['msg'].split(']')
+                                times_str = parts[0][1:]
+                                if timestamp not in times_str: times_str += f",{timestamp}"
+
+                                current_content = re.findall(r'\[([A-Z0-9/]+)\] (?:Executing buy of amount [\d.]+ at |)([\d.]+)(?:, final price paid:|) \(Cost: ([\d.]+)\)', log['msg'])
+                                if not current_content:
+                                     # Fallback for the very first message which is not yet merged
+                                     current_content = re.findall(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', log['msg'])
+
+                                new_content = re.search(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', msg)
+
+                                if new_content:
+                                     sym, price, total = new_content.groups()
+                                     found = False
+                                     for i, item in enumerate(current_content):
+                                          if item[0] == sym:
+                                               current_content[i] = (sym, price, total)
+                                               found = True
+                                               break
+                                     if not found:
+                                          current_content.append((sym, price, total))
+
+                                     merged_entries = " | ".join([f"[{s}] {p} (Cost: {t})" for s, p, t in current_content])
+                                     log['msg'] = f"[{times_str}] Executing buys: {merged_entries}"
+                                     log['expiry'] = expiry
+                                     return
+                           except: pass
+
+            # Grouping for "Buy aborted: Insufficient balance"
+            if "Buy aborted: Insufficient" in msg:
+                 for log in all_logs:
+                      if "Buy aborted: Insufficient" in log['msg']:
+                           try:
+                                parts = log['msg'].split(']')
+                                times_str = parts[0][1:]
+                                if timestamp not in times_str: times_str += f",{timestamp}"
+
+                                current_symbols = re.findall(r'\[([A-Z0-9/]+)\]', log['msg'])
+                                new_symbol = re.search(r'\[([A-Z0-9/]+)\]', msg)
+                                if new_symbol:
+                                     sym = new_symbol.group(1)
+                                     if sym not in current_symbols: current_symbols.append(sym)
+
+                                symbols_str = ",".join(current_symbols)
+                                log['msg'] = f"[{times_str}] [{symbols_str}] Buy aborted: Insufficient balance. Suspending pairs."
+                                log['expiry'] = expiry
+                                return
+                           except: pass
+
             # Deduplication for specific log types (Profitability check or Stop-loss)
             dedup_triggers = ["Profitability check failed", "Stop-loss triggered", "SELL signal received at non-profitable price"]
             matching_trigger = next((t for t in dedup_triggers if t in msg), None)
@@ -952,39 +1035,49 @@ def input_thread_func(config):
             break
         except Exception: pass
 
-def ohlcv_watcher_thread(exchange, symbol, config):
+def ohlcv_timeframe_watcher_thread(exchange, symbols, timeframe, config):
     """
-    Background thread to watch OHLCV updates for a symbol.
-    Supports adaptive timeframe changes.
+    Background thread to watch OHLCV updates for multiple symbols sharing the same timeframe.
+    Uses watch_ohlcv_for_symbols for high efficiency and lower latency.
     """
-    current_tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+    active_symbols = set(symbols)
 
-    while not shutdown_event.is_set():
+    while not shutdown_event.is_set() and active_symbols:
         try:
-            # 1. Fetch initial historical data for the current timeframe
-            ohlcv = exchange.fetch_ohlcv(symbol, current_tf, limit=500)
-            if ohlcv:
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
-                with ohlcv_cache_lock:
-                    ohlcv_cache[f"{symbol}_{current_tf}"] = df
+            # 1. Initial historical fetch for all symbols
+            for symbol in active_symbols:
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+                if ohlcv:
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df = df.drop_duplicates(subset=['timestamp']).set_index('timestamp', drop=False)
+                    with ohlcv_cache_lock:
+                        ohlcv_cache[f"{symbol}_{timeframe}"] = df
+                        # Update Price in bot_state immediately
+                        if symbol in bot_state:
+                            with bot_lock:
+                                bot_state[symbol]['price'] = df.iloc[-1]['close']
 
-            # 2. Watch for real-time updates
-            for candle in exchange.watch_ohlcv(symbol, current_tf):
+            # 2. Watch for real-time updates (Multi-symbol)
+            for candle_with_symbol in exchange.watch_ohlcv_for_symbols(list(active_symbols), timeframe):
                 if shutdown_event.is_set(): break
 
-                # Check if timeframe needs to change
-                with bot_lock:
-                    new_tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+                # candle_with_symbol is [ts, o, h, l, c, v, symbol]
+                candle = candle_with_symbol[:6]
+                symbol = candle_with_symbol[6]
 
-                if new_tf != current_tf:
-                    logging.info(f"[{symbol}] Timeframe changing from {current_tf} to {new_tf}. Restarting watcher.")
-                    current_tf = new_tf
-                    break # Restart loop with new timeframe
+                # Check if timeframe changed for this symbol
+                with bot_lock:
+                    target_tf = config['pairs'].get(symbol, {}).get('timeframe', timeframe)
+
+                if target_tf != timeframe:
+                    logging.info(f"[{symbol}] Timeframe changed to {target_tf}. Removing from {timeframe} watcher.")
+                    active_symbols.remove(symbol)
+                    if not active_symbols: break
+                    continue
 
                 with ohlcv_cache_lock:
-                    cache_key = f"{symbol}_{current_tf}"
+                    cache_key = f"{symbol}_{timeframe}"
                     if cache_key in ohlcv_cache:
                         df = ohlcv_cache[cache_key]
                         new_row = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -993,13 +1086,12 @@ def ohlcv_watcher_thread(exchange, symbol, config):
                         # Check for gaps
                         if not df.empty:
                             last_ts = df.index[-1]
-                            # Adaptive delta based on timeframe
                             delta_map = {'1s': timedelta(seconds=1), '1m': timedelta(minutes=1), '3m': timedelta(minutes=3), '5m': timedelta(minutes=5), '15m': timedelta(minutes=15), '30m': timedelta(minutes=30)}
-                            period_delta = delta_map.get(current_tf, timedelta(minutes=1))
+                            period_delta = delta_map.get(timeframe, timedelta(minutes=1))
 
                             if new_ts > last_ts + period_delta:
                                 since_ms = int(last_ts.timestamp() * 1000) + 1
-                                missing_ohlcv = exchange.fetch_ohlcv(symbol, current_tf, since=since_ms)
+                                missing_ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms)
                                 if missing_ohlcv:
                                     m_df = pd.DataFrame(missing_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                                     m_df['timestamp'] = pd.to_datetime(m_df['timestamp'], unit='ms')
@@ -1016,14 +1108,21 @@ def ohlcv_watcher_thread(exchange, symbol, config):
 
                         df = df[~df.index.duplicated(keep='last')].sort_index()
                         ohlcv_cache[cache_key] = df
+                        # Update Price in bot_state immediately for 1s response
+                        if symbol in bot_state:
+                            with bot_lock:
+                                bot_state[symbol]['price'] = candle[4] # close
                     else:
                         df = pd.DataFrame([candle], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                         df.set_index('timestamp', drop=False, inplace=True)
                         ohlcv_cache[cache_key] = df
+                        if symbol in bot_state:
+                            with bot_lock:
+                                bot_state[symbol]['price'] = candle[4]
         except Exception as e:
             if not shutdown_event.is_set():
-                logging.error(f"Error in OHLCV watcher for {symbol}: {e}")
+                logging.error(f"Error in multi-OHLCV watcher for {timeframe}: {e}")
                 time.sleep(5)
 
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
@@ -1063,9 +1162,19 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             config['pairs'][symbol]['optimal_tf_score'] = 0
             config['pairs'][symbol]['timeframe'] = '1m'
 
-    # Start watchers for all pairs
-    for symbol in config.get('pairs', {}):
-        threading.Thread(target=ohlcv_watcher_thread, args=(exchange, symbol, config), daemon=True).start()
+    # Group symbols by timeframe to use multi-watchers
+    tf_groups = {}
+    for symbol, p_cfg in config.get('pairs', {}).items():
+        tf = p_cfg.get('timeframe', '1m')
+        if tf not in tf_groups: tf_groups[tf] = []
+        tf_groups[tf].append(symbol)
+
+    active_watchers = {} # timeframe -> Thread
+
+    for tf, symbols in tf_groups.items():
+        t = threading.Thread(target=ohlcv_timeframe_watcher_thread, args=(exchange, symbols, tf, config), daemon=True)
+        t.start()
+        active_watchers[tf] = t
 
     priority_order = config.get('_priority_pairs')
     pairs_dict = config.get('pairs', {})
@@ -1134,7 +1243,13 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                                 with bot_lock:
                                     config['pairs'][sym]['timeframe'] = new_tf
                                 config['pairs'][sym]['_last_processed_ts'] = None
-                                # ohlcv_watcher_thread will detect this and restart
+                                # ohlcv_timeframe_watcher_thread will detect this and remove symbol from its group
+                                # We start a new watcher thread for the migrated symbol.
+                                # Multiple threads for the same TF are OK and safer for dynamic migration.
+                                t = threading.Thread(target=ohlcv_timeframe_watcher_thread, args=(exchange, [sym], new_tf, config), daemon=True)
+                                t.start()
+                                if new_tf not in active_watchers or not active_watchers[new_tf].is_alive():
+                                     active_watchers[new_tf] = t
                         except: pass
 
             for sym in completed_symbols:
@@ -1191,14 +1306,24 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             for symbol, data in analyzed_data.items():
                 with bot_lock:
                     if symbol in bot_state:
-                        # Update all fields including Price for dashboard
+                        # Update all fields
+                        # For Price, we only update if it's not already being updated by 1s watcher
+                        # or if the analyzed price is actually different (fallback)
                         data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
                         if symbol in markets:
                              m = markets[symbol]
                              if 'precision' in m:
                                   data['price_precision'] = m['precision'].get('price')
                                   data['amount_precision'] = m['precision'].get('amount')
+
+                        # Preserve the price if it was updated by the faster watcher thread
+                        new_price = data.pop('price', None)
                         bot_state[symbol].update(data)
+                        if new_price is not None:
+                             # If timeframe is NOT 1s, we use the analyzed price as primary
+                             # If it IS 1s, we trust the watcher thread more, but keep this as fallback if price is 0
+                             if config['pairs'].get(symbol, {}).get('timeframe') != '1s' or bot_state[symbol].get('price', 0) == 0:
+                                  bot_state[symbol]['price'] = new_price
 
             # Step 2: Handle benchmarking/re-scanning for pairs WITHOUT signals
             for symbol, data in analyzed_data.items():
@@ -1892,6 +2017,8 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             if market and 'limits' in market and 'cost' in market['limits'] and market['limits']['cost']['min']:
                 min_notional = float(market['limits']['cost']['min'])
                 if cost < min_notional:
+                    old_cost = cost
+                    old_amount = amount
                     # Attempt to increase trade size to minimum allowed
                     new_amount = min_notional / current_price
 
@@ -1921,6 +2048,7 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
                                    new_amount = float(exchange.amount_to_precision(symbol, new_amount))
                               new_cost = new_amount * current_price
 
+                    logging.info(f"[{symbol}] Cost {old_cost:.2f} is below min notional {min_notional:.2f}. Adjusting amount from {old_amount:.6f} to {new_amount:.6f} (New cost: {new_cost:.2f})")
                     amount = new_amount
                     cost = new_cost
         except Exception as ne:

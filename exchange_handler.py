@@ -83,6 +83,7 @@ class ExchangeInterface:
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
     def watch_ohlcv(self, symbol, timeframe): raise NotImplementedError
+    def watch_ohlcv_for_symbols(self, symbols, timeframe): raise NotImplementedError
     def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
     def fetch_balances(self): raise NotImplementedError
     def fetch_ticker(self, symbol): raise NotImplementedError
@@ -175,6 +176,63 @@ class CCXTExchange(ExchangeInterface):
             yield from self._watch_websocket(symbol, timeframe)
         else:
             yield from self._watch_polling(symbol, timeframe)
+
+    def watch_ohlcv_for_symbols(self, symbols, timeframe):
+        """
+        Watches OHLCV for multiple symbols using CCXT Pro watchOHLCVForSymbols if available.
+        """
+        if timeframe in ['1s', '1m'] and hasattr(self.pro_exchange, 'watchOHLCVForSymbols'):
+            yield from self._watch_websocket_multi(symbols, timeframe)
+        else:
+            # Fallback to polling for each symbol in a loop
+            # To avoid a busy loop, we calculate a sleep time
+            if timeframe == '1s': sleep_time = 0.5
+            elif timeframe == '1m': sleep_time = 2
+            elif timeframe in ['3m', '5m']: sleep_time = 5
+            else: sleep_time = 15
+
+            while True:
+                for symbol in symbols:
+                    try:
+                        ohlcv = self.fetch_ohlcv(symbol, timeframe, limit=1)
+                        if ohlcv:
+                            yield ohlcv[0] + [symbol]
+                    except Exception as e:
+                        logging.error(f"Error polling OHLCV for {symbol} ({timeframe}): {e}")
+                time.sleep(sleep_time)
+
+    def _watch_websocket_multi(self, symbols, timeframe):
+        """Watches OHLCV for multiple symbols via CCXT Pro WebSocket."""
+        q = queue.Queue()
+
+        async def _watcher():
+            try:
+                while True:
+                    # symbols should be a list
+                    ohlcv_dict = await self.pro_exchange.watch_ohlcv_for_symbols(symbols, timeframe)
+                    if ohlcv_dict:
+                        q.put(ohlcv_dict)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                q.put(e)
+
+        task = asyncio.run_coroutine_threadsafe(_watcher(), self.loop)
+
+        try:
+            while True:
+                item = q.get()
+                if isinstance(item, Exception):
+                    logging.error(f"Multi-WebSocket error for {symbols} ({timeframe}): {item}")
+                    raise item
+
+                # watchOHLCVForSymbols returns a dict: { symbol: [candles] }
+                for symbol, candles in item.items():
+                    for candle in candles:
+                        # Append symbol to candle for identification: [ts, o, h, l, c, v, symbol]
+                        yield candle + [symbol]
+        finally:
+            task.cancel()
 
     def _watch_websocket(self, symbol, timeframe):
         """Watches OHLCV via CCXT Pro WebSocket."""
@@ -414,6 +472,16 @@ class MockExchange(ExchangeInterface):
              while True:
                  ohlcv = self.fetch_ohlcv(symbol, timeframe, limit=1)
                  if ohlcv: yield ohlcv[0]
+                 time.sleep(10)
+
+    def watch_ohlcv_for_symbols(self, symbols, timeframe):
+        if self.real_exchange:
+             yield from self.real_exchange.watch_ohlcv_for_symbols(symbols, timeframe)
+        else:
+             while True:
+                 for symbol in symbols:
+                     ohlcv = self.fetch_ohlcv(symbol, timeframe, limit=1)
+                     if ohlcv: yield ohlcv[0] + [symbol]
                  time.sleep(10)
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
