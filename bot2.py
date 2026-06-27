@@ -76,8 +76,14 @@ class AsyncDashboardHandler(logging.Handler):
 
 db_handler = AsyncDashboardHandler()
 db_handler.setFormatter(logging.Formatter("%(message)s"))
-logging.getLogger().setLevel(logging.INFO)
-logging.getLogger().addHandler(db_handler)
+
+rich_handler = RichHandler(console=console, rich_tracebacks=True)
+rich_handler.setFormatter(logging.Formatter("%(message)s"))
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(db_handler)
+root_logger.addHandler(rich_handler)
 
 def load_config():
     path = 'config.json' if os.path.exists('config.json') else 'config.default.json'
@@ -175,12 +181,24 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         async with ohlcv_lock:
             df = ohlcv_cache[symbol].copy()
 
+        if df.empty or len(df) < 20: return
+
+        # Base technical analysis for regime detection
+        df = get_signals(df, {'device': device})
+        latest = df.iloc[-1]
+
         pair_config = config['pairs'].get(symbol, {})
         strategy = pair_config.get('strategy', 'tema_crossover')
-        mode_settings = engine.get_dynamic_settings(20, 0.001)
+
+        # Dynamic risk settings based on current market state
+        mode_settings = engine.get_dynamic_settings(
+            latest.get('adx', 20),
+            latest.get('volatility', 0.001)
+        )
         mode_settings['strategy'] = strategy
         mode_settings['device'] = device
 
+        # Strategy-specific analysis
         df = get_signals(df, mode_settings)
         latest = df.iloc[-1]
 
@@ -258,12 +276,14 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config):
 
 async def watch_balance_task(exchange, data_manager):
     global current_balances
+    logging.info("WebSocket: watch_balance task started.")
     async for balance in exchange.watch_balance():
         async with bot_lock:
             current_balances = balance
         logging.debug("Balance updated via WebSocket")
 
 async def watch_orders_task(exchange, data_manager):
+    logging.info("WebSocket: watch_orders task started.")
     async for orders in exchange.watch_orders():
         for order in orders:
             if order['status'] == 'closed':
@@ -316,12 +336,21 @@ def make_dashboard(mode, config):
 
 async def run_dashboard(mode, config):
     try:
+        # Avoid screen=True during startup to see console.log
+        while not startup_complete and not shutdown_event.is_set():
+            await asyncio.sleep(1)
+
         with Live(make_dashboard(mode, config), refresh_per_second=4, screen=True) as live:
             while not shutdown_event.is_set():
                 live.update(make_dashboard(mode, config))
                 await asyncio.sleep(0.25)
-    except Exception:
-        pass
+    except Exception as e:
+        console.log(f"[red]Dashboard error: {e}")
+
+async def heartbeat_task():
+    while not shutdown_event.is_set():
+        logging.info("Bot heartbeat: alive and watching...")
+        await asyncio.sleep(30)
 
 async def main():
     parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot v2')
@@ -342,8 +371,18 @@ async def main():
     else:
         exchange = CCXTExchange2(exchange_id, api_creds.get('api_key'), api_creds.get('api_secret'))
 
-    logging.info(f"Connecting to {exchange_id}...")
+    console.log(f"Connecting to {exchange_id}...")
     await exchange.load_markets()
+
+    # Pre-initialize balances from REST
+    try:
+        console.log("Fetching initial balances...")
+        initial_balance = await exchange.fetch_balance()
+        async with bot_lock:
+            global current_balances
+            current_balances = initial_balance
+    except Exception as e:
+        console.log(f"[yellow]Warning: Could not fetch initial balances: {e}")
 
     data_manager = DataManager()
     pattern_manager = PatternManager()
@@ -359,7 +398,7 @@ async def main():
         logging.error("No pairs found in config or pairs.txt")
         return
 
-    # Start UI early
+    # Start UI task (it will wait for startup_complete to start Live)
     global ui_task, background_tasks, startup_complete
     mode = args.mode if args.mode else config.get('mode', 'simulation')
     ui_task = asyncio.create_task(run_dashboard(mode, config))
@@ -369,15 +408,19 @@ async def main():
         bot_state[symbol] = {'price': 0, 'rsi': 0, 'tendency': 'Neutral', 'last_signal': 'Init', 'position': None}
 
     if args.fast_start:
-        logging.info("Fast start enabled: Skipping 10,000 candles fetch.")
+        console.log("[bold yellow]Fast start enabled: Skipping 10,000 candles fetch.")
         for symbol in pairs:
             ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
     else:
-        logging.info(f"Fetching 10,000 initial candles (1s) for {len(pairs)} pairs in parallel...")
+        console.log(f"[bold cyan]Fetching 10,000 initial candles (1s) for {len(pairs)} pairs...")
+
+        semaphore = asyncio.Semaphore(5) # Limit concurrency
 
         async def init_symbol(symbol):
-            try:
-                ohlcv = await exchange.fetch_ohlcv_10k(symbol, '1s', 10000)
+            async with semaphore:
+                try:
+                    console.log(f"Fetching candles for {symbol}...")
+                    ohlcv = await exchange.fetch_ohlcv_10k(symbol, '1s', 10000)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
@@ -390,10 +433,12 @@ async def main():
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
     # Start WebSocket Tasks
+    console.log("[bold green]Starting WebSocket tasks...")
     background_tasks = [
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager)),
-        asyncio.create_task(input_task())
+        asyncio.create_task(input_task()),
+        asyncio.create_task(heartbeat_task())
     ]
 
     for symbol in pairs:
@@ -408,14 +453,20 @@ async def main():
         logging.error(f"Main loop error: {e}")
     finally:
         shutdown_event.set()
-        for t in tasks: t.cancel()
-        ui_task.cancel()
+        for t in background_tasks: t.cancel()
+        if ui_task: ui_task.cancel()
         await exchange.close()
         logging.info("Graceful shutdown complete.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt: pass
+    except KeyboardInterrupt:
+        pass
     except Exception as e:
-        logging.exception(f"Fatal error: {e}")
+        # Final emergency log
+        with open("fatal_error.log", "a") as f:
+            f.write(f"{datetime.now()} - FATAL ERROR: {str(e)}\n")
+            import traceback
+            f.write(traceback.format_exc())
+        console.print_exception()

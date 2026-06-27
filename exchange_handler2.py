@@ -48,7 +48,10 @@ class CCXTExchange2(ExchangeInterface2):
 
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
         try:
-            return await self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            return await asyncio.wait_for(
+                self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit),
+                timeout=30
+            )
         except Exception as e:
             logging.error(f"Error fetching OHLCV for {symbol}: {e}")
             return []
@@ -62,7 +65,10 @@ class CCXTExchange2(ExchangeInterface2):
         while len(all_ohlcv) < limit:
             fetch_limit = min(1000, limit - len(all_ohlcv))
             try:
-                chunk = await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit=fetch_limit)
+                chunk = await asyncio.wait_for(
+                    self.exchange.fetch_ohlcv(symbol, timeframe, since, limit=fetch_limit),
+                    timeout=30
+                )
                 if not chunk:
                     break
                 all_ohlcv.extend(chunk)
