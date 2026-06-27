@@ -153,6 +153,12 @@ class CCXTExchange(ExchangeInterface):
     def load_markets(self):
         try:
             self.markets = self.exchange.load_markets()
+            # Synchronously wait for Pro markets to load to ensure symbols are resolved correctly in async context
+            try:
+                future = asyncio.run_coroutine_threadsafe(self.pro_exchange.load_markets(), self.loop)
+                future.result(timeout=15)
+            except Exception as e:
+                logging.warning(f"Failed to load Pro markets for {self.exchange_id}: {e}")
             return self.markets
         except Exception as e: logging.error(f"Failed to load markets for {self.exchange_id}: {e}"); return {}
 
@@ -181,8 +187,18 @@ class CCXTExchange(ExchangeInterface):
         """
         Watches OHLCV for multiple symbols using CCXT Pro watchOHLCVForSymbols if available.
         """
-        if timeframe in ['1s', '1m'] and hasattr(self.pro_exchange, 'watchOHLCVForSymbols'):
-            yield from self._watch_websocket_multi(symbols, timeframe)
+        if not symbols: return
+        # Ensure symbols is a clean list of strings for CCXT compatibility
+        symbol_list = [str(s) for s in list(symbols)]
+
+        # Check if CCXT Pro supports multi-symbol watching for this exchange
+        has_multi = self.pro_exchange.has.get('watchOHLCVForSymbols', False)
+
+        if timeframe in ['1s', '1m'] and has_multi:
+            yield from self._watch_websocket_multi(symbol_list, timeframe)
+        elif timeframe in ['1s', '1m']:
+            # Fallback to multiple individual websocket watchers
+            yield from self._watch_websocket_individual_multi(symbol_list, timeframe)
         else:
             # Fallback to polling for each symbol in a loop
             # To avoid a busy loop, we calculate a sleep time
@@ -207,9 +223,30 @@ class CCXTExchange(ExchangeInterface):
 
         async def _watcher():
             try:
+                if not self.pro_exchange.markets:
+                    await self.pro_exchange.load_markets()
+
+                # Resolve symbols to exchange-recognized formats
+                valid_symbols = []
+                for s in symbols:
+                    if s in self.pro_exchange.markets:
+                        valid_symbols.append(s)
+                    else:
+                        found = False
+                        for m_sym in self.pro_exchange.markets:
+                            if m_sym.replace('/', '') == s.replace('/', ''):
+                                valid_symbols.append(m_sym)
+                                found = True
+                                break
+                        if not found:
+                            logging.warning(f"[{self.exchange_id}] Symbol {s} not found in Pro markets. Skipping from multi-watcher.")
+
+                if not valid_symbols:
+                    return
+
                 while True:
-                    # symbols should be a list
-                    ohlcv_dict = await self.pro_exchange.watch_ohlcv_for_symbols(symbols, timeframe)
+                    # Use snake_case unified method and ensure it gets a list
+                    ohlcv_dict = await self.pro_exchange.watch_ohlcv_for_symbols(list(valid_symbols), timeframe)
                     if ohlcv_dict:
                         q.put(ohlcv_dict)
             except asyncio.CancelledError:
@@ -229,10 +266,40 @@ class CCXTExchange(ExchangeInterface):
                 # watchOHLCVForSymbols returns a dict: { symbol: [candles] }
                 for symbol, candles in item.items():
                     for candle in candles:
-                        # Append symbol to candle for identification: [ts, o, h, l, c, v, symbol]
-                        yield candle + [symbol]
+                        # Append symbol to candle for identification
+                        yield list(candle) + [symbol]
         finally:
             task.cancel()
+
+    def _watch_websocket_individual_multi(self, symbols, timeframe):
+        """Fallback: Watches OHLCV for multiple symbols using multiple individual WebSocket tasks."""
+        q = queue.Queue()
+        tasks = []
+
+        async def _single_watcher(symbol):
+            try:
+                while True:
+                    candles = await self.pro_exchange.watchOHLCV(symbol, timeframe)
+                    if candles:
+                        q.put((symbol, candles))
+            except asyncio.CancelledError: pass
+            except Exception as e: q.put(e)
+
+        for sym in symbols:
+            tasks.append(asyncio.run_coroutine_threadsafe(_single_watcher(sym), self.loop))
+
+        try:
+            while True:
+                item = q.get()
+                if isinstance(item, Exception):
+                    logging.error(f"Individual Multi-WebSocket error: {item}")
+                    raise item
+
+                symbol, candles = item
+                for candle in candles:
+                    yield list(candle) + [symbol]
+        finally:
+            for t in tasks: t.cancel()
 
     def _watch_websocket(self, symbol, timeframe):
         """Watches OHLCV via CCXT Pro WebSocket."""
