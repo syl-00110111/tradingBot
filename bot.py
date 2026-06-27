@@ -185,110 +185,13 @@ class DashboardHandler(logging.Handler):
         super().__init__()
         self.duration = duration
 
-    def _update_grouped_log(self, log, timestamp, expiry, new_symbols=None, custom_content_updater=None):
-        """Helper to update a grouped log with unique timestamps and symbols."""
-        parts = log['msg'].split(']')
-        times_str = parts[0][1:]
-
-        # Keep only the unique latest timestamps (max 3)
-        t_list = [t.strip() for t in times_str.split(',')]
-        if timestamp not in t_list: t_list.append(timestamp)
-        times_str = ",".join(t_list[-3:])
-
-        if custom_content_updater:
-            log['msg'] = f"[{times_str}] {custom_content_updater(log['msg'])}"
-        elif new_symbols:
-            current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', log['msg'])
-            for s in new_symbols:
-                if s not in current_symbols: current_symbols.append(s)
-
-            # Extract the rest of the message after the symbols or timestamps
-            msg_rest = log['msg'].split(']')[-1].strip()
-            # If the log already had symbol groups like [BTC/USDC, ETH/USDC], preserve that
-            if '[' in msg_rest and ']' in msg_rest:
-                log['msg'] = f"[{times_str}] [{','.join(current_symbols)}] {msg_rest.split(']')[-1].strip()}"
-            else:
-                log['msg'] = f"[{times_str}] {msg_rest} (Symbols: {','.join(current_symbols)})"
-
-        log['expiry'] = expiry
-        return True
-
     def emit(self, record):
         msg = self.format(record)
-        # Avoid displaying HTML error pages for HTTP 500
-        if "HTTP 500" in msg and "<html" in msg.upper():
-            msg = msg.split("<html")[0].strip()
 
         timestamp = datetime.now().strftime("%H:%M:%S")
         expiry = datetime.now() + timedelta(seconds=self.duration)
 
         with bot_lock:
-            # Group HTTP Errors (Point 1)
-            http_err_match = re.search(r'(HTTP \d{3}) Error Code', msg)
-            if http_err_match:
-                error_type = http_err_match.group(1)
-                for log in all_logs:
-                    if error_type in log['msg'] and "Error fetching OHLCV" in log['msg']:
-                        try:
-                            new_sym_match = re.search(r'([A-Z0-9]+/[A-Z0-9]+)', msg)
-                            new_syms = [new_sym_match.group(1)] if new_sym_match else []
-
-                            def _update_http_msg(old_msg):
-                                current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', old_msg)
-                                for s in new_syms:
-                                    if s not in current_symbols: current_symbols.append(s)
-                                exchange_name = "exchange"
-                                ex_match = re.search(r'on (\w+)', old_msg)
-                                if ex_match: exchange_name = ex_match.group(1)
-                                return f"Error fetching OHLCV for {','.join(current_symbols)} on {exchange_name} {error_type}"
-
-                            return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_http_msg)
-                        except: pass
-
-            # Transform raw CCXT errors into the requested grouped format (Point 2)
-            # Raw example: "Error during buy order on MEGA/USDC via binance {"code":-1013,"msg":"Filter failure: NOTIONAL"}"
-            if "Error during buy order" in msg:
-                 err_match = re.search(r'Error during buy order on ([A-Z0-9/]+) via (\w+) (\{.*\})', msg)
-                 if err_match:
-                      symbol, exchange, err_json = err_match.groups()
-                      try:
-                           err_data = json.loads(err_json)
-                           code = err_data.get('code', 'N/A')
-                           m_msg = err_data.get('msg', 'N/A')
-                           # Use temporary format that will be caught by the grouper below
-                           msg = f"[{symbol}] Buy execution failed: Exchange rejected order ({code}, {m_msg}). Suspending pair."
-                      except: pass
-
-            # Group Buy execution failed errors by error code
-            if "Buy execution failed" in msg:
-                 code_match = re.search(r'\((\-?\d+)', msg)
-                 if code_match:
-                      code = code_match.group(1)
-                      for log in all_logs:
-                           if "Buy execution failed" in log['msg'] and f"({code}" in log['msg']:
-                                try:
-                                     new_sym_match = re.search(r'\[([A-Z0-9/]+)\]', msg)
-                                     new_syms = [new_sym_match.group(1)] if new_sym_match else []
-
-                                     def _update_fail_msg(old_msg):
-                                          current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', old_msg)
-                                          for s in new_syms:
-                                               if s not in current_symbols: current_symbols.append(s)
-                                          err_details = re.search(r'\(.*\)', old_msg).group(0)
-                                          return f"[{','.join(current_symbols)}] Buy execution failed: Exchange rejected order {err_details}. Suspending pair."
-
-                                     return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_fail_msg)
-                                except: pass
-
-            # Connection pool log filtering (generic)
-            pool_msg = "Connection pool is full, discarding connection"
-            if pool_msg in msg:
-                 for log in all_logs:
-                      if pool_msg in log['msg']:
-                           log['msg'] = f"[{timestamp}] {msg}"
-                           log['expiry'] = expiry
-                           return
-
             # Status update merging (Point 2)
             # 1. Syncing positions
             if "Syncing positions from" in msg and "done." in msg:
@@ -303,91 +206,6 @@ class DashboardHandler(logging.Handler):
             if "First data streams acquired and analysis done." in msg:
                  for log in all_logs:
                       if "Waiting for first data streams and analysis..." in log['msg']:
-                           log['msg'] = f"[{timestamp}] {msg}"
-                           log['expiry'] = expiry
-                           return
-
-            # Simulation init replacement
-            if "Simulation initialization complete" in msg or "Initialization of the simulation positions completed" in msg:
-                 replacement = "Initialization of the simulation positions completed."
-                 for log in all_logs:
-                      if "Initializing Simulation positions" in log['msg']:
-                           log['msg'] = f"[{timestamp}] {replacement}"
-                           log['expiry'] = expiry
-                           return
-
-            # Grouping for "Cost is below min notional"
-            if "is below min notional" in msg:
-                 for log in all_logs:
-                      if "is below min notional" in log['msg'] or "<" in log['msg'] and "(Adjusted)" in log['msg']:
-                           try:
-                                new_content_match = re.search(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) is below min notional ([\d.]+)', msg)
-                                if new_content_match:
-                                     sym, cost, min_n = new_content_match.groups()
-
-                                     def _update_notional_msg(old_msg):
-                                          current_content = re.findall(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) (?:is below min notional|<) ([\d.]+)', old_msg)
-                                          found = False
-                                          for i, (csym, ccost, cmin) in enumerate(current_content):
-                                               if csym == sym:
-                                                    current_content[i] = (sym, cost, min_n)
-                                                    found = True
-                                                    break
-                                          if not found:
-                                               current_content.append((sym, cost, min_n))
-                                          merged_entries = " | ".join([f"[{s}] Cost {c} < {m}" for s, c, m in current_content])
-                                          return f"{merged_entries} (Adjusted)"
-
-                                     return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_notional_msg)
-                           except: pass
-
-            # Grouping for "Executing buy"
-            if "Executing buy" in msg:
-                 for log in all_logs:
-                      if "Executing buy" in log['msg'] or "Executing buys:" in log['msg']:
-                           try:
-                                new_content_match = re.search(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', msg)
-                                if new_content_match:
-                                     sym, price, total = new_content_match.groups()
-
-                                     def _update_buy_msg(old_msg):
-                                          current_content = re.findall(r'\[([A-Z0-9/]+)\] (?:Executing buy of amount [\d.]+ at |)([\d.]+)(?:, final price paid:|) \(Cost: ([\d.]+)\)', old_msg)
-                                          if not current_content:
-                                               current_content = re.findall(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', old_msg)
-
-                                          found = False
-                                          for i, item in enumerate(current_content):
-                                               if item[0] == sym:
-                                                    current_content[i] = (sym, price, total)
-                                                    found = True
-                                                    break
-                                          if not found:
-                                               current_content.append((sym, price, total))
-                                          merged_entries = " | ".join([f"[{s}] {p} (Cost: {t})" for s, p, t in current_content])
-                                          return f"Executing buys: {merged_entries}"
-
-                                     return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_buy_msg)
-                           except: pass
-
-            # Grouping for "Buy aborted: Insufficient balance"
-            if "Buy aborted: Insufficient" in msg:
-                 for log in all_logs:
-                      if "Buy aborted: Insufficient" in log['msg']:
-                           try:
-                                new_sym_match = re.search(r'\[([A-Z0-9/]+)\]', msg)
-                                new_syms = [new_sym_match.group(1)] if new_sym_match else []
-                                return self._update_grouped_log(log, timestamp, expiry, new_symbols=new_syms)
-                           except: pass
-
-            # Deduplication for specific log types (Profitability check or Stop-loss)
-            dedup_triggers = ["Profitability check failed", "Stop-loss triggered", "SELL signal received at non-profitable price"]
-            matching_trigger = next((t for t in dedup_triggers if t in msg), None)
-
-            if matching_trigger:
-                 symbol_tag = msg.split(']')[0] + ']' if ']' in msg else ""
-                 # Find existing and update
-                 for log in all_logs:
-                      if matching_trigger in log['msg'] and symbol_tag in log['msg']:
                            log['msg'] = f"[{timestamp}] {msg}"
                            log['expiry'] = expiry
                            return
