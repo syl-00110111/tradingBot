@@ -154,21 +154,11 @@ async def watch_ohlcv_all_symbols_task(exchange, symbols, timeframe):
     async for data in exchange.watch_ohlcv_for_symbols(symbols, timeframe):
         if shutdown_event.is_set(): break
 
-        # Normalize data from watch_ohlcv_for_symbols
-        # Some exchanges return (symbol, candles), others [[ts,o,h,l,c,v], symbol]
+        # Handler now consistently returns (symbol, candles)
         if isinstance(data, tuple) and len(data) == 2:
             symbol, candles = data
-        elif isinstance(data, list) and len(data) > 0:
-            # Check for [[ts,o,h,l,c,v], symbol]
-            if isinstance(data[-1], str):
-                symbol = data[-1]
-                candles = data[:-1]
-                if not isinstance(candles[0], list): candles = [candles]
-            else:
-                # Direct list of candles? Should have been handled in handler
-                logging.warning(f"Unexpected OHLCV data format: {type(data)}")
-                continue
         else:
+            logging.warning(f"Unexpected OHLCV data format: {type(data)}")
             continue
 
         async with ohlcv_lock:

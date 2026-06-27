@@ -93,40 +93,27 @@ class CCXTExchange2(ExchangeInterface2):
                 await asyncio.sleep(1)
 
     async def watch_ohlcv_for_symbols(self, symbols, timeframe):
-        # Fallback to individual watchers if the exchange doesn't support multi-symbol watch
-        if hasattr(self.exchange, 'has') and self.exchange.has.get('watchOHLCVForSymbols'):
-            while True:
-                try:
-                    # CCXT Pro watchOHLCVForSymbols returns a dict or list depending on exchange
-                    data = await self.exchange.watch_ohlcv_for_symbols(symbols, timeframe)
-                    if data:
-                        # Normalize to yield (symbol, candles)
-                        if isinstance(data, dict):
-                            for symbol, candles in data.items():
-                                yield symbol, candles
-                        else:
-                            # Assume it's a single update or list of updates
-                            # If it's a list, some exchanges return [[ts,o,h,l,c,v], symbol]
-                            # We check the structure.
-                            yield data
-                except Exception as e:
-                    logging.error(f"Error in watch_ohlcv_for_symbols: {e}")
-                    await asyncio.sleep(1)
-        else:
-            # Run multiple watch_ohlcv in parallel and yield results
-            queue = asyncio.Queue()
+        if not isinstance(symbols, list):
+            symbols = list(symbols)
 
-            async def _worker(symbol):
+        # Multiplexed individual watchers is often more reliable than watchOHLCVForSymbols
+        # for high-frequency 1s updates across various exchanges.
+        queue = asyncio.Queue()
+
+        async def _worker(symbol):
+            try:
                 async for candles in self.watch_ohlcv(symbol, timeframe):
                     await queue.put((symbol, candles))
+            except Exception as e:
+                logging.error(f"Worker error for {symbol}: {e}")
 
-            tasks = [asyncio.create_task(_worker(s)) for s in symbols]
-            try:
-                while True:
-                    yield await queue.get()
-            finally:
-                for t in tasks:
-                    t.cancel()
+        tasks = [asyncio.create_task(_worker(s)) for s in symbols]
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            for t in tasks:
+                t.cancel()
 
     async def watch_balance(self):
         while True:
