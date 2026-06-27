@@ -187,7 +187,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         df = get_signals(df, {'device': device})
         latest = df.iloc[-1]
 
-        pair_config = config['pairs'].get(symbol, {})
+        pair_config = config.get('pairs', {}).get(symbol, {})
         strategy = pair_config.get('strategy', 'tema_crossover')
 
         # Dynamic risk settings based on current market state
@@ -219,7 +219,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
 async def execute_buy(exchange, symbol, data, data_manager, engine, config):
     async with bot_lock:
         pos = data_manager.get_position(symbol)
-        max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
+        max_lots = config.get('pairs', {}).get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
         if pos and len(pos) >= max_lots:
             return
 
@@ -323,7 +323,7 @@ def make_dashboard(mode, config):
         sig = data.get('last_signal', 'Waiting')
         pos = data.get('position')
         lots = str(len(pos)) if pos else "0"
-        strat = config['pairs'].get(symbol, {}).get('strategy', 'tema')
+        strat = config.get('pairs', {}).get(symbol, {}).get('strategy', 'tema')
         table.add_row(symbol, price, rsi, tend, sig, lots, strat, style=style)
     layout["main"].split_row(
         Layout(Panel(log_content, title="Live Logs (H for Help)", border_style="green" if focused_panel=="logs" else "blue"), ratio=1),
@@ -388,12 +388,19 @@ async def main():
     pattern_manager = PatternManager()
     engine = TradingEngine(config)
 
-    pairs = list(config.get('pairs', {}).keys())
-    if not pairs:
-        if os.path.exists('pairs.txt'):
-            with open('pairs.txt', 'r') as f:
-                pairs = [line.strip() for line in f if line.strip()]
+    if 'pairs' not in config:
+        config['pairs'] = {}
 
+    pairs_from_file = []
+    if os.path.exists('pairs.txt'):
+        with open('pairs.txt', 'r') as f:
+            pairs_from_file = [line.strip() for line in f if line.strip()]
+
+    for p in pairs_from_file:
+        if p not in config['pairs']:
+            config['pairs'][p] = {}
+
+    pairs = list(config['pairs'].keys())
     if not pairs:
         logging.error("No pairs found in config or pairs.txt")
         return
