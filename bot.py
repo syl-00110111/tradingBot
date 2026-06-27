@@ -1149,9 +1149,14 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
             if not first_analysis_done:
                 logging.info("Waiting for first data streams and analysis...")
 
-            # Determine which pairs need analysis based on their timeframe
+            # Determine which pairs need analysis based on their timeframe (Ultra-Priority: Price updates)
             pairs_to_analyze = []
-            for sym in sorted_pair_keys:
+            tf_priority_map = {'1s': 0, '1m': 1, '3m': 2, '5m': 3, '15m': 4, '30m': 5}
+
+            # Sort by TF priority for analysis too
+            sorted_analysis_keys = sorted(pair_keys, key=lambda x: (tf_priority_map.get(config['pairs'][x].get('timeframe', '1m'), 99), x))
+
+            for sym in sorted_analysis_keys:
                 tf = config['pairs'][sym].get('timeframe', '1m')
                 cache_key = f"{sym}_{tf}"
 
@@ -1168,153 +1173,146 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                 if new_candle or not first_analysis_done:
                     pairs_to_analyze.append(sym)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(pairs_to_analyze))) as executor:
-                future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pairs_to_analyze}
-                for future in concurrent.futures.as_completed(future_to_sym):
-                    if shutdown_event.is_set(): break
-                    symbol = future_to_sym[future]
-
-                    # Check suspensions
-                    now_ts = time.time()
-                    if symbol in pair_suspensions:
-                        susp = pair_suspensions[symbol]
-                        if now_ts < susp.get('until', 0):
-                            continue
-
-                        # Special check for budget suspension
-                        if susp.get('reason') == 'budget':
-                            # Check USDC availability (1.5x)
-                            try:
-                                balance = exchange.fetch_balances()
-                                if balance is None: continue
-                                base_curr = symbol.split('/')[1]
-                                free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
-                                if free_bal >= susp.get('amount_required', 0) * 1.5:
-                                    logging.info(f"[{symbol}] Budget recovered (1.5x available). Resuming pair.")
-                                    del pair_suspensions[symbol]
-                                else:
-                                    continue
-                            except: continue
-                        else:
-                            # Time-based suspension (e.g. HTTP 500)
-                            logging.info(f"[{symbol}] Suspension expired. Resuming pair.")
-                            del pair_suspensions[symbol]
-
-                    try:
-                        data = future.result()
-                        if data:
-                            no_signal_thresh = config.get('no_signal_threshold', 8)
-
-                            with bot_lock:
-                                candles_since = bot_state[symbol].get('candles_since_last_signal', 0)
-
-                            if not data.get('buy') and not data.get('sell'):
-                                candles_since += 1
-                            else:
-                                candles_since = 0
-
-                            # 3. Handle re-scaning triggers (Asynchronous)
-                            # Prioritize pairs waiting longest and skip if has signal (Point 4)
-                            if candles_since >= no_signal_thresh and symbol not in active_scans:
-                                if data.get('buy') or data.get('sell'):
-                                     # Pause/skip scanning if there is a signal
-                                     candles_since = 0
-                                else:
-                                    last_scan_time[symbol] = now_ts
-                                    candles_since = 0
-
-                                    # Use cached OHLCV data instead of blocking network call
-                                timeframe = config['pairs'][symbol].get('timeframe', '1m')
-                                cache_key = f"{symbol}_{timeframe}"
-                                df_bench = None
-                                with ohlcv_cache_lock:
-                                    if cache_key in ohlcv_cache:
-                                        df_bench = ohlcv_cache[cache_key].copy()
-
-                                if df_bench is not None and not df_bench.empty:
-                                    global_aggr = config.get('force_agressivity_to_all_pairs')
-                                    global_strat = config.get('force_strategy_to_all_pairs')
-                                    aggrs = [global_aggr] if global_aggr else ['dynamic']
-                                    strategies = [global_strat] if global_strat else STRATEGIES
-
-                                    # Submit re-scan task to ProcessPoolExecutor
-                                    # Determine current technique to exclude (rotation rule)
-                                    exclude = None
-                                    with bot_lock:
-                                         if symbol in bot_state:
-                                              exclude = (bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
-
-                                    active_scans[symbol] = bench_executor.submit(
-                                        run_optimization_test_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device, exclude_technique=exclude
-                                    )
-
-                            with bot_lock:
-                                data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
-                                # Inject precision from markets
-                                if symbol in markets:
-                                     m = markets[symbol]
-                                     if 'precision' in m:
-                                          data['price_precision'] = m['precision'].get('price')
-                                          data['amount_precision'] = m['precision'].get('amount')
-
-                                bot_state[symbol].update(data)
-                                bot_state[symbol]['candles_since_last_signal'] = candles_since
-
-                            if data.get('sell_triggered'):
-                                 # Dans le cadre multi-lots, sell_triggered est vrai si SELL signal reçu
-                                 # execute_sell s'occupera de ne vendre que les lots profitables
-
-                                 # Vérifier si au moins un lot est profitable
-                                 positions = data.get('position', [])
-                                 fee_rate = 0.001
-                                 try:
-                                      fee_rate = exchange.fetch_trading_fee(symbol)
-                                 except: pass
-
-                                 profitable_positions = [p for p in positions if engine.is_profitable(data['price'], p['entry_price'], fee_rate=fee_rate, entry_total_base=p.get('entry_total_base', 0), amount=p['amount'])]
-
-                                 if not profitable_positions:
-                                      # Aucun lot n'est profitable, on ignore le signal pour l'instant
-                                      data_manager.flag_ignore_sell(symbol, value=True)
-                                      data['sell'] = False
-                                      data['sell_triggered'] = False
-
-                                      # Trigger re-scan
-                                      if symbol not in active_scans:
-                                           timeframe = config['pairs'][symbol].get('timeframe', '1m')
-                                           cache_key = f"{symbol}_{timeframe}"
-                                           df_bench = None
-                                           with ohlcv_cache_lock:
-                                                if cache_key in ohlcv_cache:
-                                                     df_bench = ohlcv_cache[cache_key].copy()
-                                           if df_bench is not None and not df_bench.empty:
-                                                active_scans[symbol] = bench_executor.submit(
-                                                     run_optimization_test_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
-                                                     exclude_technique=(bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
-                                                )
-                                 elif execute_sell(exchange, data_manager, engine, symbol, data, config):
-                                      with bot_lock:
-                                          bot_state[symbol]['last_action'] = 'SELL'
-                                          bot_state[symbol]['position'] = None
-                                          data['last_action'] = 'SELL'
-                                          data['position'] = None
-                                      play_sound("sell", config)
-
-                            # Achat possible si signal BUY et limite de lots non atteinte
-                            max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
-                            current_lots = len(data.get('position', []) or [])
-                            if data.get('buy') and current_lots < max_lots:
-                                 potential_buys.append((symbol, data))
-                    except Exception as e:
-                        err_msg = str(e)
-                        http_err = re.search(r'(HTTP \d{3}) Error Code', err_msg)
-                        if http_err:
-                            status_code = http_err.group(1)
-                            logging.error(f"Error analyzing {symbol}: {status_code} Error Code")
-                            # Suspend for 21 minutes
-                            pair_suspensions[symbol] = {'until': time.time() + 21 * 60, 'reason': 'http_error'}
-                        else:
+            # Execution logic grouped by priority
+            analyzed_data = {}
+            if pairs_to_analyze:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(pairs_to_analyze))) as executor:
+                    future_to_sym = {executor.submit(analyze_pair, exchange, data_manager, pattern_manager, sym, pairs_dict[sym], config, engine=engine): sym for sym in pairs_to_analyze}
+                    for future in concurrent.futures.as_completed(future_to_sym):
+                        if shutdown_event.is_set(): break
+                        symbol = future_to_sym[future]
+                        try:
+                            data = future.result()
+                            if data: analyzed_data[symbol] = data
+                        except Exception as e:
                             logging.error(f"Error analyzing {symbol}: {e}")
+
+            # Step 1: ULTRA-PRIORITY - Update bot state with fresh analyzed data (Prices updated here)
+            for symbol, data in analyzed_data.items():
+                with bot_lock:
+                    if symbol in bot_state:
+                        # Update all fields including Price for dashboard
+                        data['last_action'] = bot_state[symbol].get('last_action', 'WAITING')
+                        if symbol in markets:
+                             m = markets[symbol]
+                             if 'precision' in m:
+                                  data['price_precision'] = m['precision'].get('price')
+                                  data['amount_precision'] = m['precision'].get('amount')
+                        bot_state[symbol].update(data)
+
+            # Step 2: Handle benchmarking/re-scanning for pairs WITHOUT signals
+            for symbol, data in analyzed_data.items():
+                # Check suspensions
+                if symbol in pair_suspensions:
+                    susp = pair_suspensions[symbol]
+                    if now_ts < susp.get('until', 0):
+                        continue
+
+                    # Special check for budget suspension
+                    if susp.get('reason') == 'budget':
+                        try:
+                            balance = exchange.fetch_balances()
+                            if balance is None: continue
+                            base_curr = symbol.split('/')[1]
+                            free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
+                            if free_bal >= susp.get('amount_required', 0) * 1.5:
+                                logging.info(f"[{symbol}] Budget recovered (1.5x available). Resuming pair.")
+                                del pair_suspensions[symbol]
+                            else: continue
+                        except: continue
+                    else:
+                        logging.info(f"[{symbol}] Suspension expired. Resuming pair.")
+                        del pair_suspensions[symbol]
+
+                no_signal_thresh = config.get('no_signal_threshold', 8)
+                with bot_lock:
+                    candles_since = bot_state[symbol].get('candles_since_last_signal', 0)
+
+                if not data.get('buy') and not data.get('sell'):
+                    candles_since += 1
+                else:
+                    candles_since = 0
+
+                if candles_since >= no_signal_thresh and symbol not in active_scans:
+                    if not (data.get('buy') or data.get('sell')):
+                        last_scan_time[symbol] = now_ts
+                        candles_since = 0
+                        timeframe = config['pairs'][symbol].get('timeframe', '1m')
+                        cache_key = f"{symbol}_{timeframe}"
+                        df_bench = None
+                        with ohlcv_cache_lock:
+                            if cache_key in ohlcv_cache: df_bench = ohlcv_cache[cache_key].copy()
+
+                        if df_bench is not None and not df_bench.empty:
+                            global_aggr = config.get('force_agressivity_to_all_pairs')
+                            global_strat = config.get('force_strategy_to_all_pairs')
+                            aggrs = [global_aggr] if global_aggr else ['dynamic']
+                            strategies = [global_strat] if global_strat else STRATEGIES
+                            exclude = None
+                            with bot_lock:
+                                 if symbol in bot_state: exclude = (bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
+                            active_scans[symbol] = bench_executor.submit(
+                                run_optimization_test_for_symbol, symbol, config, timeframe, aggrs, strategies, df_bench, engine, device, exclude_technique=exclude
+                            )
+                    else:
+                        candles_since = 0
+
+                with bot_lock:
+                    bot_state[symbol]['candles_since_last_signal'] = candles_since
+
+            # Step 3: Treatment of signals (Sales then Buys, sorted by TF)
+            # Collect all pairs with signals
+            all_with_signals = []
+            with bot_lock:
+                for sym in pair_keys:
+                    if bot_state[sym].get('buy') or bot_state[sym].get('sell_triggered'):
+                        all_with_signals.append((sym, bot_state[sym]))
+
+            # Sort by TF priority (shortest first)
+            all_with_signals.sort(key=lambda x: (tf_priority_map.get(config['pairs'][x[0]].get('timeframe', '1m'), 99), x[0]))
+
+            # 3a. Process SALES first
+            for symbol, data in all_with_signals:
+                if shutdown_event.is_set(): break
+                if data.get('sell_triggered'):
+                     positions = data.get('position', [])
+                     fee_rate = 0.001
+                     try: fee_rate = exchange.fetch_trading_fee(symbol)
+                     except: pass
+
+                     profitable_positions = [p for p in positions if engine.is_profitable(data['price'], p['entry_price'], fee_rate=fee_rate, entry_total_base=p.get('entry_total_base', 0), amount=p['amount'])]
+
+                     if not profitable_positions:
+                          data_manager.flag_ignore_sell(symbol, value=True)
+                          # Trigger re-scan immediately if not profitable
+                          if symbol not in active_scans:
+                               timeframe = config['pairs'][symbol].get('timeframe', '1m')
+                               cache_key = f"{symbol}_{timeframe}"
+                               df_bench = None
+                               with ohlcv_cache_lock:
+                                    if cache_key in ohlcv_cache: df_bench = ohlcv_cache[cache_key].copy()
+                               if df_bench is not None and not df_bench.empty:
+                                    active_scans[symbol] = bench_executor.submit(
+                                         run_optimization_test_for_symbol, symbol, config, timeframe, ['dynamic'], STRATEGIES, df_bench, engine, device,
+                                         exclude_technique=(bot_state[symbol].get('strategy'), bot_state[symbol].get('aggr'))
+                                    )
+                     elif execute_sell(exchange, data_manager, engine, symbol, data, config):
+                          with bot_lock:
+                              bot_state[symbol]['last_action'] = 'SELL'
+                              bot_state[symbol]['position'] = None
+                          play_sound("sell", config)
+
+            # 3b. Process BUYS second
+            potential_buys = []
+            for symbol, data in all_with_signals:
+                try:
+                    if data.get('buy'):
+                        max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
+                        current_lots = len(data.get('position', []) or [])
+                        if current_lots < max_lots:
+                            potential_buys.append((symbol, data))
+                except Exception as e:
+                    logging.error(f"Error processing buy for {symbol}: {e}")
 
             if potential_buys and not shutdown_event.is_set():
                 max_open = int(config.get('max_open_positions', 18))
@@ -1923,7 +1921,6 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
                                    new_amount = float(exchange.amount_to_precision(symbol, new_amount))
                               new_cost = new_amount * current_price
 
-                    logging.info(f"[{symbol}] Cost {cost:.2f} is below min notional {min_notional:.2f}. Adjusting amount from {amount:.6f} to {new_amount:.6f} (New cost: {new_cost:.2f})")
                     amount = new_amount
                     cost = new_cost
         except Exception as ne:

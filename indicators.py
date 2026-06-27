@@ -332,15 +332,14 @@ def torch_adx(high, low, close, length=14):
     adx = torch_ema(dx, 2 * length - 1)
     return adx
 STRATEGIES = [
-    'ichimoku_cloud', 'parabolic_sar', 'rsi_support_resistance',
-    'bollinger_bands', 'breakout_volume', 'donchian_channels',
-    'atr_breakout', 'stochastic_rsi', 'williams_r', 'vwap_momentum',
-    'order_flow_proxy', 'renko_proxy', 'tick_proxy', 'ema_rsi_volume',
-    'macd_bollinger_bands',
+    'ichimoku_cloud', 'parabolic_sar',
+    'bollinger_bands', 'donchian_channels',
+    'stochastic_rsi', 'williams_r', 'vwap_momentum',
+    'renko_proxy', 'ema_rsi_volume',
     'mc_mean_reversion', 'mc_momentum', 'mc_dynamic_allocation', 'mc_market_making',
     'mc_stop_loss_eval', 'mc_options_pricing',
-    'whale_detection_proxy', 'pump_dump_proxy', 'market_regime_proxy', 'scientific_ensemble',
-    'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'mvrv_proxy', 'adx_trend_strength',
+    'whale_detection_proxy', 'pump_dump_proxy', 'scientific_ensemble',
+    'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'adx_trend_strength',
     'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy', 'tema_crossover',
     'heikin_ashi', 'candle_patterns', 'sinewave_cycle'
 ]
@@ -448,48 +447,32 @@ def get_signals(df, mode_config, is_scan=False):
         df = strategy_ichimoku(df, mode_config)
     elif strategy == 'parabolic_sar':
         df = strategy_psar(df, mode_config)
-    elif strategy == 'rsi_support_resistance':
-        df = strategy_rsi_sr(df, mode_config)
     elif strategy == 'bollinger_bands':
         df = strategy_bollinger(df, mode_config)
-    elif strategy == 'breakout_volume':
-        df = strategy_breakout_volume(df, mode_config)
     elif strategy == 'donchian_channels':
         df = strategy_donchian(df, mode_config)
-    elif strategy == 'atr_breakout':
-        df = strategy_atr_breakout(df, mode_config)
     elif strategy == 'stochastic_rsi':
         df = strategy_stoch_rsi(df, mode_config)
     elif strategy == 'williams_r':
         df = strategy_williams_r(df, mode_config)
     elif strategy == 'vwap_momentum':
         df = strategy_vwap_momentum(df, mode_config)
-    elif strategy == 'order_flow_proxy':
-        df = strategy_order_flow_proxy(df, mode_config)
     elif strategy == 'renko_proxy':
         df = strategy_renko_proxy(df, mode_config)
-    elif strategy == 'tick_proxy':
-        df = strategy_tick_proxy(df, mode_config)
     elif strategy == 'ema_rsi_volume':
         df = strategy_ema_rsi_volume(df, mode_config)
-    elif strategy == 'macd_bollinger_bands':
-        df = strategy_macd_bollinger(df, mode_config)
     elif strategy and strategy.startswith('mc_'):
         df = handle_mc_strategies(df, strategy, mode_config, is_scan)
     elif strategy == 'whale_detection_proxy':
         df = strategy_whale_detection(df, mode_config)
     elif strategy == 'pump_dump_proxy':
         df = strategy_pump_dump(df, mode_config)
-    elif strategy == 'market_regime_proxy':
-        df = strategy_market_regime(df, mode_config)
     elif strategy == 'scientific_ensemble':
         df = strategy_scientific_ensemble(df, mode_config)
     elif strategy == 'sentiment_momentum_proxy':
         df = strategy_sentiment_momentum(df, mode_config)
     elif strategy == 'liquidation_cascade_proxy':
         df = strategy_liquidation_cascade(df, mode_config)
-    elif strategy == 'mvrv_proxy':
-        df = strategy_mvrv_proxy(df, mode_config)
     elif strategy == 'adx_trend_strength':
         df = strategy_adx_trend(df, mode_config)
     elif strategy == 'pairs_trading_proxy':
@@ -889,42 +872,6 @@ def strategy_psar(df, config):
 
 # --- 2. RANGE ---
 
-def strategy_rsi_sr(df, config):
-    """
-    Stratégie RSI Support et Résistance.
-
-    Buy signal when RSI is oversold (< 30) and price is near a 50-period support.
-    Sell signal when RSI is overbought (> 70) and price is near a 50-period resistance.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['support'] = df['low'].rolling(window=50).min()
-    df['resistance'] = df['high'].rolling(window=50).max()
-
-    # Fill defaults
-    df['rsi'] = df['rsi'].fillna(50)
-    df['support'] = df['support'].fillna(df['low'])
-    df['resistance'] = df['resistance'].fillna(df['high'])
-
-    df['buy_candidate'] = (df['rsi'] < 30) & (df['close'] <= df['support'] * 1.01)
-    df['sell_candidate'] = (df['rsi'] > 70) & (df['close'] >= df['resistance'] * 0.99)
-
-    df['score'] = np.where(df['rsi'] < 30, 1, np.where(df['rsi'] > 70, -1, 0))
-    df['tendency'] = np.where(df['rsi'] > 50, "Bullish", np.where(df['rsi'] < 50, "Bearish", "Neutral"))
-
-    return apply_confirmation(df, config.get('confirmation_window', 3))
-
 def strategy_bollinger(df, config):
     """
     Stratégie Bandes de Bollinger.
@@ -965,37 +912,6 @@ def strategy_bollinger(df, config):
 
 # --- 3. BREAKOUT ---
 
-def strategy_breakout_volume(df, config):
-    """
-    Stratégie Breakout Volume.
-
-    Buy signal when price breaks a 20-period resistance with high volume
-    (2x average). Exit when price crosses below the 20-period SMA.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    df['resistance'] = df['high'].rolling(window=20).max().shift(1)
-    df['vol_ma'] = ta.sma(df['volume'], length=20)
-
-    df['buy_candidate'] = (df['close'] > df['resistance']) & (df['volume'] > df['vol_ma'] * 2)
-    df['ma_20'] = ta.sma(df['close'], length=20)
-    df['sell_candidate'] = (df['close'] < df['ma_20'])
-
-    df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
-    df['tendency'] = np.where(df['close'] > df['ma_20'], "Bullish", np.where(df['close'] < df['ma_20'], "Bearish", "Neutral"))
-
-    return apply_confirmation(df, config.get('confirmation_window', 3))
-
 def strategy_donchian(df, config):
     """
     Stratégie Canaux de Donchian.
@@ -1030,38 +946,6 @@ def strategy_donchian(df, config):
     df['tendency'] = np.where(df['close'] > (df['dc_upper'] + df['dc_lower'])/2, "Bullish", "Bearish")
 
     return apply_confirmation(df, config.get('confirmation_window', 3))
-
-def strategy_atr_breakout(df, config):
-    """
-    Stratégie Breakout ATR.
-
-    Buy signal when price breaks a 30-period resistance and ATR is increasing.
-    Sell signal based on a trailing stop of 2x ATR.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    df['resistance'] = df['high'].rolling(window=30).max().shift(1)
-
-    df['buy_candidate'] = (df['close'] > df['resistance']) & (df['atr'] > df['atr'].shift(1))
-    df['sell_candidate'] = (df['close'] < (df['close'].shift(1) - 2 * df['atr']))
-
-    df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
-    df['tendency'] = np.where(df['buy_candidate'], "Bullish", np.where(df['sell_candidate'], "Bearish", "Neutral"))
-
-    return apply_confirmation(df, config.get('confirmation_window', 3))
-
-# --- 4. MOMENTUM ---
 
 def strategy_stoch_rsi(df, config):
     """
@@ -1156,36 +1040,6 @@ def strategy_vwap_momentum(df, config):
 
 # --- 5. SCALPING (Proxies) ---
 
-def strategy_order_flow_proxy(df, config):
-    """
-    Stratégie Proxy Order Flow.
-
-    Simulates order flow by calculating volume delta (proxied by price action
-    within candles). Buy signal on high relative volume delta.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    df['vol_delta'] = df['volume'] * (df['close'] - df['open']) / (df['high'] - df['low'] + 0.000001)
-    df['vol_delta_ma'] = df['vol_delta'].rolling(window=10).mean()
-
-    df['buy_candidate'] = (df['vol_delta'] > df['vol_delta_ma'] * 1.5) & (df['close'] > df['open'])
-    df['sell_candidate'] = (df['vol_delta'] < 0)
-
-    df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
-    df['tendency'] = np.where(df['vol_delta'] > 0, "Bullish", "Bearish")
-
-    return apply_confirmation(df, config.get('confirmation_window', 2))
-
 def strategy_renko_proxy(df, config):
     """
     Stratégie Proxy Renko.
@@ -1214,36 +1068,6 @@ def strategy_renko_proxy(df, config):
     df['tendency'] = np.where(df['close'] > df['open'], "Bullish", "Bearish")
 
     return apply_confirmation(df, config.get('confirmation_window', 2))
-
-def strategy_tick_proxy(df, config):
-    """
-    Stratégie Proxy Tick.
-
-    Buy signal based on rapid price velocity spikes.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    df['velocity'] = (df['close'] - df['close'].shift(5)) / 5
-
-    df['buy_candidate'] = (df['velocity'] > df['velocity'].rolling(window=20).std() * 2)
-    df['sell_candidate'] = (df['close'] < df['close'].shift(1))
-
-    df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
-    df['tendency'] = np.where(df['velocity'] > 0, "Bullish", "Bearish")
-
-    return apply_confirmation(df, config.get('confirmation_window', 2))
-
-# --- 6. HYBRIDS ---
 
 def strategy_ema_rsi_volume(df, config):
     """
@@ -1275,47 +1099,6 @@ def strategy_ema_rsi_volume(df, config):
     df['tendency'] = np.where(df['ema_9'] > df['ema_21'], "Bullish", "Bearish")
 
     return apply_confirmation(df, config.get('confirmation_window', 3))
-
-def strategy_macd_bollinger(df, config):
-    """
-    Stratégie Hybride MACD et Bollinger.
-
-    Buy signal on bullish MACD crossover when price is near the lower Bollinger Band.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    if macd is not None:
-        df['macd_val'] = macd.iloc[:, 0]
-        df['macd_sig'] = macd.iloc[:, 1]
-    else:
-        df['macd_val'] = df['macd_sig'] = 0
-
-    bb = ta.bbands(df['close'], length=20, std=2)
-    if bb is not None:
-        df['bb_low'] = bb.iloc[:, 0]
-    else:
-        df['bb_low'] = df['close']
-
-    df['buy_candidate'] = (df['macd_val'] > df['macd_sig']) & (df['close'] <= df['bb_low'] * 1.01)
-    df['sell_candidate'] = (df['macd_val'] < df['macd_sig'])
-
-    df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
-    df['tendency'] = np.where(df['macd_val'] > df['macd_sig'], "Bullish", "Bearish")
-
-    return apply_confirmation(df, config.get('confirmation_window', 3))
-
-# --- SCIENTIFIC PROXIES ---
 
 def strategy_whale_detection(df, config):
     """
@@ -1394,56 +1177,6 @@ def strategy_pump_dump(df, config):
     df['tendency'] = np.where(df['price_change'] > 0, "Bullish", "Bearish")
 
     return apply_confirmation(df, 1)
-
-def strategy_market_regime(df, config):
-    """
-    Stratégie de régime de marché.
-
-    Switches between Mean-Reversion (Bollinger) and Trend-Following (EMA)
-    based on historical volatility.
-
-    References
-    ----------
-    Baur, D. G., & Dimpfl, T. (2021). "The volatility of Bitcoin and its role
-    as a medium of exchange and a store of value."
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    df['returns'] = np.log(df['close'] / df['close'].shift(1))
-    df['volatility'] = df['returns'].rolling(window=20).std()
-    df['vol_ma'] = df['volatility'].rolling(window=50).mean()
-
-    # High volatility regime -> Mean Reversion (Bollinger Bands)
-    bb = ta.bbands(df['close'], length=20, std=2)
-    df['bb_low'] = bb.iloc[:, 0] if bb is not None else df['close']
-    df['bb_high'] = bb.iloc[:, 2] if bb is not None else df['close']
-
-    # Low volatility regime -> Trend Following (EMA)
-    df['ema_9'] = ta.ema(df['close'], length=9).fillna(df['close'])
-    df['ema_21'] = ta.ema(df['close'], length=21).fillna(df['close'])
-
-    # Vectorized market regime switching
-    df['buy_candidate'] = np.where(df['volatility'] > df['vol_ma'],
-                                   df['close'] < df['bb_low'],
-                                   df['ema_9'] > df['ema_21'])
-    df['sell_candidate'] = np.where(df['volatility'] > df['vol_ma'],
-                                    df['close'] > df['bb_high'],
-                                    df['ema_9'] < df['ema_21'])
-
-    df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
-    df['tendency'] = np.where(df['volatility'] > df['vol_ma'], "Range", np.where(df['ema_9'] > df['ema_21'], "Bullish", "Bearish"))
-
-    return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_scientific_ensemble(df, config):
     """
@@ -1569,41 +1302,6 @@ def strategy_liquidation_cascade(df, config):
     df['tendency'] = np.where(df['close'] > df['close'].shift(1), "Bullish", "Bearish")
 
     return apply_confirmation(df, 1)
-
-def strategy_mvrv_proxy(df, config):
-    """
-    Stratégie Proxy ratio MVRV.
-
-    Proxies the Market Value to Realized Value ratio using price vs 200-day SMA.
-
-    References
-    ----------
-    Ciaian, P., et al. (2018). "The economics of BitCoin price formation and
-    electrum wallet transactions."
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    config : dict
-        Strategy configuration.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Updated dataframe with buy/sell signals.
-    """
-    df['realized_proxy'] = ta.sma(df['close'], length=200).fillna(df['close'])
-    df['mvrv_proxy'] = df['close'] / df['realized_proxy']
-
-    # Buy when undervalued (MVRV < 0.8), sell when overvalued (MVRV > 2.0)
-    df['buy_candidate'] = df['mvrv_proxy'] < 0.95
-    df['sell_candidate'] = df['mvrv_proxy'] > 1.05
-
-    df['score'] = np.where(df['mvrv_proxy'] < 1.0, 1, -1)
-    df['tendency'] = np.where(df['mvrv_proxy'] > 1.0, "Bullish", "Bearish")
-
-    return apply_confirmation(df, config.get('confirmation_window', 3))
 
 def strategy_adx_trend(df, config):
     """
