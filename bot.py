@@ -1888,33 +1888,18 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
             pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
             return False
 
-        try:
-            order = exchange.create_order(symbol, 'buy', amount)
-            if isinstance(order, dict) and 'insufficient balance' in str(order.get('message', '')).lower():
-                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Insufficient balance"}')
-                pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
-                return False
-            if isinstance(order, dict) and 'code' in str(order) and 'Filter failure: NOTIONAL' in str(order):
-                logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')} " + '{"code":-1013,"msg":"Filter failure: NOTIONAL"}')
-                pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
-                return False
-            if order:
-                fee = order.get('calculated_fee', 0)
-                # Use actual price from order if available
-                final_entry_price = order.get('price') or current_price
-                total_paid = (amount * final_entry_price) + fee
-                logging.info(f"[{symbol}] Executing buy of amount {format_amt(amount)} at {format_price(final_entry_price)}, final price paid: {format_price(total_paid)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
-                data_manager.add_position(symbol, final_entry_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
-                return True
-            else:
-                logging.warning(f"[{symbol}] Buy execution failed: Exchange rejected order for amount {amount:.6f}. Suspending pair.")
-        except Exception as e:
-            logging.error(f"Error during buy order on {symbol} via {getattr(exchange, 'exchange_id', 'exchange')} {e}")
+        order = exchange.create_order(symbol, 'buy', amount)
+        if order:
+            fee = order.get('calculated_fee', 0)
+            # Use actual price from order if available
+            final_entry_price = order.get('price') or current_price
+            total_paid = (amount * final_entry_price) + fee
+            logging.info(f"[{symbol}] Executing buy of amount {format_amt(amount)} at {format_price(final_entry_price)}, final price paid: {format_price(total_paid)} {symbol.split('/')[1] if '/' in symbol else 'EUR'}")
+            data_manager.add_position(symbol, final_entry_price, amount, fee, data.get('trigger_data', {}), time.time(), total_base=total_paid)
+            return True
+        else:
             pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
             return False
-    else:
-        logging.warning(f"[{symbol}] Buy aborted: Calculated amount is zero or negative.")
-    return False
 
 def execute_sell(exchange, data_manager, engine, symbol, data, global_config):
     """
