@@ -1511,15 +1511,15 @@ def play_sound(action, config=None):
         if system == "windows":
             import winsound
             if action == "startup":
-                 # Randomized sequence equal to max_open_positions - 4
-                 num_blips = max(4, (int(config.get('max_open_positions', 26)) if config else 26) - 18)
+                 # Randomized sequence of 3 to 7 sounds
+                 num_blips = max(3, 7)
                  for _ in range(num_blips):
-                      freq = random.randint(400, 1200)
-                      dur = random.randint(100, 300)
+                      freq = random.randint(200, 1400)
+                      dur = random.randint(50, 400)
                       winsound.Beep(freq, dur)
                  return
-            frequency = 1000 if action == "buy" else 1500
-            winsound.Beep(frequency, 200)
+            frequency = 800 if action == "buy" else 1800
+            winsound.Beep(frequency, 240)
         else:
             if action == "startup":
                  sys.stdout.write("\a"); sys.stdout.flush()
