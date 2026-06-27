@@ -1314,9 +1314,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
                     if shutdown_event.is_set(): break
                     time.sleep(0.1)
         except Exception as e:
-            logging.error(f"Error in trading thread: {e}")
-            time.sleep(5)
-
+            pass
 
 def main():
     """
