@@ -895,7 +895,6 @@ def ohlcv_timeframe_watcher_thread(exchange, symbols, timeframe, config):
 
                 if target_tf != timeframe or symbol not in active_symbols:
                     if symbol in active_symbols:
-                         logging.info(f"[{symbol}] Timeframe changed to {target_tf}. Removing from {timeframe} watcher.")
                          active_symbols.remove(symbol)
                     if not active_symbols: break
                     continue
@@ -1977,8 +1976,6 @@ def execute_sell(exchange, data_manager, engine, symbol, data, global_config):
 
                     data_manager.close_position(symbol, actual_price, fee, profit, data.get('trigger_data', {}), time.time(), total_base=total_received, lot_index=i)
                     any_sold = True
-        else:
-            logging.info(f"[{symbol}] Le lot {i + 1} (achat: {format_price(pos['entry_price'])}) n'est pas encore profitable.")
 
     return any_sold
 
