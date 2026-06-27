@@ -185,6 +185,34 @@ class DashboardHandler(logging.Handler):
         super().__init__()
         self.duration = duration
 
+    def _update_grouped_log(self, log, timestamp, expiry, new_symbols=None, custom_content_updater=None):
+        """Helper to update a grouped log with unique timestamps and symbols."""
+        parts = log['msg'].split(']')
+        times_str = parts[0][1:]
+
+        # Keep only the unique latest timestamps (max 3)
+        t_list = [t.strip() for t in times_str.split(',')]
+        if timestamp not in t_list: t_list.append(timestamp)
+        times_str = ",".join(t_list[-3:])
+
+        if custom_content_updater:
+            log['msg'] = f"[{times_str}] {custom_content_updater(log['msg'])}"
+        elif new_symbols:
+            current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', log['msg'])
+            for s in new_symbols:
+                if s not in current_symbols: current_symbols.append(s)
+
+            # Extract the rest of the message after the symbols or timestamps
+            msg_rest = log['msg'].split(']')[-1].strip()
+            # If the log already had symbol groups like [BTC/USDC, ETH/USDC], preserve that
+            if '[' in msg_rest and ']' in msg_rest:
+                log['msg'] = f"[{times_str}] [{','.join(current_symbols)}] {msg_rest.split(']')[-1].strip()}"
+            else:
+                log['msg'] = f"[{times_str}] {msg_rest} (Symbols: {','.join(current_symbols)})"
+
+        log['expiry'] = expiry
+        return True
+
     def emit(self, record):
         msg = self.format(record)
         # Avoid displaying HTML error pages for HTTP 500
@@ -202,22 +230,19 @@ class DashboardHandler(logging.Handler):
                 for log in all_logs:
                     if error_type in log['msg'] and "Error fetching OHLCV" in log['msg']:
                         try:
-                            parts = log['msg'].split(']')
-                            times_str = parts[0][1:]
-                            rest = parts[1]
-                            if timestamp not in times_str: times_str += f",{timestamp}"
-                            current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', rest)
-                            new_symbol = re.search(r'([A-Z0-9]+/[A-Z0-9]+)', msg)
-                            if new_symbol:
-                                sym = new_symbol.group(1)
-                                if sym not in current_symbols: current_symbols.append(sym)
-                            exchange_name = "exchange"
-                            ex_match = re.search(r'on (\w+)', rest)
-                            if ex_match: exchange_name = ex_match.group(1)
-                            symbols_str = ",".join(current_symbols)
-                            log['msg'] = f"[{times_str}] Error fetching OHLCV for {symbols_str} on {exchange_name} {error_type}"
-                            log['expiry'] = expiry
-                            return
+                            new_sym_match = re.search(r'([A-Z0-9]+/[A-Z0-9]+)', msg)
+                            new_syms = [new_sym_match.group(1)] if new_sym_match else []
+
+                            def _update_http_msg(old_msg):
+                                current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', old_msg)
+                                for s in new_syms:
+                                    if s not in current_symbols: current_symbols.append(s)
+                                exchange_name = "exchange"
+                                ex_match = re.search(r'on (\w+)', old_msg)
+                                if ex_match: exchange_name = ex_match.group(1)
+                                return f"Error fetching OHLCV for {','.join(current_symbols)} on {exchange_name} {error_type}"
+
+                            return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_http_msg)
                         except: pass
 
             # Transform raw CCXT errors into the requested grouped format (Point 2)
@@ -242,22 +267,17 @@ class DashboardHandler(logging.Handler):
                       for log in all_logs:
                            if "Buy execution failed" in log['msg'] and f"({code}" in log['msg']:
                                 try:
-                                     parts = log['msg'].split(']')
-                                     times_str = parts[0][1:]
-                                     rest = parts[1]
-                                     if timestamp not in times_str: times_str += f",{timestamp}"
-                                     current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', log['msg'])
-                                     new_symbol = re.search(r'\[([A-Z0-9/]+)\]', msg)
-                                     if new_symbol:
-                                          sym = new_symbol.group(1)
-                                          if sym not in current_symbols: current_symbols.append(sym)
+                                     new_sym_match = re.search(r'\[([A-Z0-9/]+)\]', msg)
+                                     new_syms = [new_sym_match.group(1)] if new_sym_match else []
 
-                                     symbols_str = ",".join(current_symbols)
-                                     # Extract original error details
-                                     err_details = re.search(r'\(.*\)', log['msg']).group(0)
-                                     log['msg'] = f"[{times_str}] [{symbols_str}] Buy execution failed: Exchange rejected order {err_details}. Suspending pair."
-                                     log['expiry'] = expiry
-                                     return
+                                     def _update_fail_msg(old_msg):
+                                          current_symbols = re.findall(r'([A-Z0-9]+/[A-Z0-9]+)', old_msg)
+                                          for s in new_syms:
+                                               if s not in current_symbols: current_symbols.append(s)
+                                          err_details = re.search(r'\(.*\)', old_msg).group(0)
+                                          return f"[{','.join(current_symbols)}] Buy execution failed: Exchange rejected order {err_details}. Suspending pair."
+
+                                     return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_fail_msg)
                                 except: pass
 
             # Connection pool log filtering (generic)
@@ -301,28 +321,24 @@ class DashboardHandler(logging.Handler):
                  for log in all_logs:
                       if "is below min notional" in log['msg'] or "<" in log['msg'] and "(Adjusted)" in log['msg']:
                            try:
-                                parts = log['msg'].split(']')
-                                times_str = parts[0][1:]
-                                if timestamp not in times_str: times_str += f",{timestamp}"
+                                new_content_match = re.search(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) is below min notional ([\d.]+)', msg)
+                                if new_content_match:
+                                     sym, cost, min_n = new_content_match.groups()
 
-                                current_content = re.findall(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) (?:is below min notional|<) ([\d.]+)', log['msg'])
-                                new_content = re.search(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) is below min notional ([\d.]+)', msg)
+                                     def _update_notional_msg(old_msg):
+                                          current_content = re.findall(r'\[([A-Z0-9/]+)\] Cost ([\d.]+) (?:is below min notional|<) ([\d.]+)', old_msg)
+                                          found = False
+                                          for i, (csym, ccost, cmin) in enumerate(current_content):
+                                               if csym == sym:
+                                                    current_content[i] = (sym, cost, min_n)
+                                                    found = True
+                                                    break
+                                          if not found:
+                                               current_content.append((sym, cost, min_n))
+                                          merged_entries = " | ".join([f"[{s}] Cost {c} < {m}" for s, c, m in current_content])
+                                          return f"{merged_entries} (Adjusted)"
 
-                                if new_content:
-                                     sym, cost, min_n = new_content.groups()
-                                     found = False
-                                     for i, (csym, ccost, cmin) in enumerate(current_content):
-                                          if csym == sym:
-                                               current_content[i] = (sym, cost, min_n)
-                                               found = True
-                                               break
-                                     if not found:
-                                          current_content.append((sym, cost, min_n))
-
-                                     merged_entries = " | ".join([f"[{s}] Cost {c} < {m}" for s, c, m in current_content])
-                                     log['msg'] = f"[{times_str}] {merged_entries} (Adjusted)"
-                                     log['expiry'] = expiry
-                                     return
+                                     return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_notional_msg)
                            except: pass
 
             # Grouping for "Executing buy"
@@ -330,32 +346,27 @@ class DashboardHandler(logging.Handler):
                  for log in all_logs:
                       if "Executing buy" in log['msg'] or "Executing buys:" in log['msg']:
                            try:
-                                parts = log['msg'].split(']')
-                                times_str = parts[0][1:]
-                                if timestamp not in times_str: times_str += f",{timestamp}"
+                                new_content_match = re.search(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', msg)
+                                if new_content_match:
+                                     sym, price, total = new_content_match.groups()
 
-                                current_content = re.findall(r'\[([A-Z0-9/]+)\] (?:Executing buy of amount [\d.]+ at |)([\d.]+)(?:, final price paid:|) \(Cost: ([\d.]+)\)', log['msg'])
-                                if not current_content:
-                                     # Fallback for the very first message which is not yet merged
-                                     current_content = re.findall(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', log['msg'])
+                                     def _update_buy_msg(old_msg):
+                                          current_content = re.findall(r'\[([A-Z0-9/]+)\] (?:Executing buy of amount [\d.]+ at |)([\d.]+)(?:, final price paid:|) \(Cost: ([\d.]+)\)', old_msg)
+                                          if not current_content:
+                                               current_content = re.findall(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', old_msg)
 
-                                new_content = re.search(r'\[([A-Z0-9/]+)\] Executing buy of amount [\d.]+ at ([\d.]+), final price paid: ([\d.]+)', msg)
+                                          found = False
+                                          for i, item in enumerate(current_content):
+                                               if item[0] == sym:
+                                                    current_content[i] = (sym, price, total)
+                                                    found = True
+                                                    break
+                                          if not found:
+                                               current_content.append((sym, price, total))
+                                          merged_entries = " | ".join([f"[{s}] {p} (Cost: {t})" for s, p, t in current_content])
+                                          return f"Executing buys: {merged_entries}"
 
-                                if new_content:
-                                     sym, price, total = new_content.groups()
-                                     found = False
-                                     for i, item in enumerate(current_content):
-                                          if item[0] == sym:
-                                               current_content[i] = (sym, price, total)
-                                               found = True
-                                               break
-                                     if not found:
-                                          current_content.append((sym, price, total))
-
-                                     merged_entries = " | ".join([f"[{s}] {p} (Cost: {t})" for s, p, t in current_content])
-                                     log['msg'] = f"[{times_str}] Executing buys: {merged_entries}"
-                                     log['expiry'] = expiry
-                                     return
+                                     return self._update_grouped_log(log, timestamp, expiry, custom_content_updater=_update_buy_msg)
                            except: pass
 
             # Grouping for "Buy aborted: Insufficient balance"
@@ -363,20 +374,9 @@ class DashboardHandler(logging.Handler):
                  for log in all_logs:
                       if "Buy aborted: Insufficient" in log['msg']:
                            try:
-                                parts = log['msg'].split(']')
-                                times_str = parts[0][1:]
-                                if timestamp not in times_str: times_str += f",{timestamp}"
-
-                                current_symbols = re.findall(r'\[([A-Z0-9/]+)\]', log['msg'])
-                                new_symbol = re.search(r'\[([A-Z0-9/]+)\]', msg)
-                                if new_symbol:
-                                     sym = new_symbol.group(1)
-                                     if sym not in current_symbols: current_symbols.append(sym)
-
-                                symbols_str = ",".join(current_symbols)
-                                log['msg'] = f"[{times_str}] [{symbols_str}] Buy aborted: Insufficient balance. Suspending pairs."
-                                log['expiry'] = expiry
-                                return
+                                new_sym_match = re.search(r'\[([A-Z0-9/]+)\]', msg)
+                                new_syms = [new_sym_match.group(1)] if new_sym_match else []
+                                return self._update_grouped_log(log, timestamp, expiry, new_symbols=new_syms)
                            except: pass
 
             # Deduplication for specific log types (Profitability check or Stop-loss)
@@ -1295,6 +1295,9 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
                 if new_candle or not first_analysis_done:
                     pairs_to_analyze.append(sym)
+                    # Reset suspensions on new candle interval (Point 2)
+                    if sym in pair_suspensions:
+                         del pair_suspensions[sym]
 
             # Execution logic grouped by priority
             analyzed_data = {}
