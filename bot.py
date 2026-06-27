@@ -1059,10 +1059,15 @@ def ohlcv_timeframe_watcher_thread(exchange, symbols, timeframe, config):
                                 bot_state[symbol]['price'] = df.iloc[-1]['close']
 
             # 2. Watch for real-time updates (Multi-symbol)
-            for candle_with_symbol in exchange.watch_ohlcv_for_symbols(list(active_symbols), timeframe):
+            # Ensure we pass a stable list of active symbols
+            symbols_to_watch = list(active_symbols)
+            for candle_with_symbol in exchange.watch_ohlcv_for_symbols(symbols_to_watch, timeframe):
                 if shutdown_event.is_set(): break
 
                 # candle_with_symbol is [ts, o, h, l, c, v, symbol]
+                if not isinstance(candle_with_symbol, list) or len(candle_with_symbol) < 7:
+                     continue
+
                 candle = candle_with_symbol[:6]
                 symbol = candle_with_symbol[6]
 
@@ -1070,9 +1075,10 @@ def ohlcv_timeframe_watcher_thread(exchange, symbols, timeframe, config):
                 with bot_lock:
                     target_tf = config['pairs'].get(symbol, {}).get('timeframe', timeframe)
 
-                if target_tf != timeframe:
-                    logging.info(f"[{symbol}] Timeframe changed to {target_tf}. Removing from {timeframe} watcher.")
-                    active_symbols.remove(symbol)
+                if target_tf != timeframe or symbol not in active_symbols:
+                    if symbol in active_symbols:
+                         logging.info(f"[{symbol}] Timeframe changed to {target_tf}. Removing from {timeframe} watcher.")
+                         active_symbols.remove(symbol)
                     if not active_symbols: break
                     continue
 
