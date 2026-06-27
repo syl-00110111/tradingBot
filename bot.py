@@ -1120,6 +1120,8 @@ def ohlcv_timeframe_watcher_thread(exchange, symbols, timeframe, config):
                         if symbol in bot_state:
                             with bot_lock:
                                 bot_state[symbol]['price'] = candle[4]
+            # Generator finished? Prevent tight loop
+            time.sleep(1)
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"Error in multi-OHLCV watcher for {timeframe}: {e}")
