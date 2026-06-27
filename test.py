@@ -19,7 +19,8 @@ console = Console()
 class TradingBot:
     def __init__(self, config, pairs):
         self.config = config
-        self.pairs = pairs
+        self.raw_pairs = pairs
+        self.pairs = [] # Will be populated after filtering
         self.exchange_id = config.get('exchange_id', 'binance')
 
         # Supporting both CCXT and api.json naming conventions
@@ -34,28 +35,42 @@ class TradingBot:
         })
 
         self.balances = {}  # asset -> free balance
-        self.lots = {pair: [] for pair in pairs}  # pair -> list of {'amount': float, 'price': float}
-        self.last_action_prices = {pair: None for pair in pairs} # pair -> float
-
-        # Pairs and assets tracking
-        self.base_assets = [p.split('/')[0] for p in pairs]
-        # Map each symbol to its specific quote asset
-        self.symbol_to_quote = {p: p.split('/')[1] for p in pairs}
-        self.fees = {pair: 0.001 for pair in pairs} # Default 0.1%
+        self.lots = {}  # pair -> list of {'amount': float, 'price': float}
+        self.last_action_prices = {} # pair -> float
+        self.symbol_to_quote = {}
+        self.base_assets = []
+        self.fees = {} # symbol -> float
 
     async def initialize(self):
-        log.info("Initialisation des marchés et des frais...")
+        log.info(f"Initialisation de l'échange {self.exchange_id}...")
         await self.exchange.load_markets()
+
+        # Filtrer les paires valides
+        for p in self.raw_pairs:
+            if p in self.exchange.markets:
+                self.pairs.append(p)
+                self.symbol_to_quote[p] = p.split('/')[1]
+                self.base_assets.append(p.split('/')[0])
+                self.lots[p] = []
+                self.last_action_prices[p] = None
+                self.fees[p] = 0.001
+            else:
+                log.warning(f"La paire {p} n'existe pas sur {self.exchange_id}. Ignorée.")
+
+        if not self.pairs:
+            raise Exception("Aucune paire valide à surveiller.")
+
+        log.info(f"Initialisation des frais pour {len(self.pairs)} paires...")
         for symbol in self.pairs:
             try:
-                if self.exchange.apiKey:
+                if self.exchange.apiKey and "YOUR_API_KEY" not in self.exchange.apiKey:
                     fees = await self.exchange.fetch_trading_fee(symbol)
                     self.fees[symbol] = fees.get('taker', 0.001)
-            except:
-                pass
+            except Exception as e:
+                log.debug(f"Impossible de récupérer les frais pour {symbol}: {e}")
 
         # Initial balance fetch
-        if self.exchange.apiKey:
+        if self.exchange.apiKey and "YOUR_API_KEY" not in self.exchange.apiKey:
             try:
                 balance = await self.exchange.fetch_balance()
                 self.update_local_balances(balance)
@@ -65,12 +80,15 @@ class TradingBot:
     def update_local_balances(self, balance):
         if 'free' in balance:
             self.balances = {asset: amt for asset, amt in balance['free'].items() if amt > 0}
-            # Log base asset balances specifically as requested
             relevant_assets = set(self.base_assets + list(self.symbol_to_quote.values()))
             relevant_balances = {asset: self.balances.get(asset, 0) for asset in relevant_assets}
             log.debug(f"Balances pertinentes: {relevant_balances}")
 
     async def watch_balance_loop(self):
+        if not self.exchange.apiKey or "YOUR_API_KEY" in self.exchange.apiKey:
+            log.warning("Mode Simulation: watchBalance désactivé (pas de clés API).")
+            return
+
         log.info("Démarrage de la boucle watchBalance...")
         while True:
             try:
@@ -81,10 +99,11 @@ class TradingBot:
                 await asyncio.sleep(5)
 
     async def watch_ohlcv_loop(self):
-        log.info(f"Démarrage de la boucle watchOHLCVForSymbols pour {self.pairs}...")
+        log.info(f"Démarrage de la boucle watchOHLCV pour {len(self.pairs)} paires...")
         timeframe = '1m'
         while True:
             try:
+                # CCXT watchOHLCVForSymbols return format can vary
                 ohlcv_dict = await self.exchange.watch_ohlcv_for_symbols(self.pairs, timeframe)
 
                 for symbol, candles in ohlcv_dict.items():
@@ -92,9 +111,7 @@ class TradingBot:
                         continue
 
                     latest_candle = candles[-1]
-                    # [timestamp, open, high, low, close, volume]
                     current_price = latest_candle[4]
-
                     await self.process_price_update(symbol, current_price)
 
             except Exception as e:
@@ -114,6 +131,13 @@ class TradingBot:
         if current_price < last_price:
             # BUY Logic: 1/10th of available quote asset
             quote_balance = self.balances.get(quote_asset, 0)
+
+            # For simulation, if quote balance is 0, let's assume a virtual 1000 balance
+            if quote_balance == 0 and (not self.exchange.apiKey or "YOUR_API_KEY" in self.exchange.apiKey):
+                 quote_balance = 1000.0
+                 self.balances[quote_asset] = 1000.0
+                 log.info(f"Mode Simulation: Balance virtuelle de 1000 {quote_asset} initialisée.")
+
             amount_to_spend = quote_balance / 10.0
 
             if amount_to_spend > 0:
@@ -122,9 +146,7 @@ class TradingBot:
                 try:
                     raw_amount = amount_to_spend / current_price
 
-                    # Place real order if API keys are present
                     if self.exchange.apiKey and "YOUR_API_KEY" not in self.exchange.apiKey:
-                        # Apply exchange precision
                         amount_to_buy = float(self.exchange.amount_to_precision(symbol, raw_amount))
                         if amount_to_buy > 0:
                             order = await self.exchange.create_market_buy_order(symbol, amount_to_buy)
@@ -135,10 +157,11 @@ class TradingBot:
                             log.warning(f"[{symbol}] Montant calculé trop petit après précision.")
                             return
                     else:
-                        # Simulation
                         executed_price = current_price
                         executed_amount = raw_amount
                         cost = amount_to_spend
+                        # Deduct from virtual balance
+                        self.balances[quote_asset] -= cost
 
                     self.lots[symbol].append({'amount': executed_amount, 'price': executed_price})
                     self.last_action_prices[symbol] = executed_price
@@ -155,7 +178,6 @@ class TradingBot:
 
             remaining_lots = []
             for lot in self.lots[symbol]:
-                # Profitability check: 1% minimum profit AFTER fees
                 sell_net = current_price * (1 - fee_rate)
                 buy_total = lot['price'] * (1 + fee_rate)
                 profit_pct = (sell_net - buy_total) / buy_total
@@ -164,7 +186,6 @@ class TradingBot:
                     log.info(f"[{symbol}] Lot profitable ({profit_pct:.2%}). Tentative de vente...")
                     try:
                         if self.exchange.apiKey and "YOUR_API_KEY" not in self.exchange.apiKey:
-                            # Apply exchange precision
                             amount_to_sell = float(self.exchange.amount_to_precision(symbol, lot['amount']))
                             if amount_to_sell > 0:
                                 order = await self.exchange.create_market_sell_order(symbol, amount_to_sell)
@@ -175,9 +196,10 @@ class TradingBot:
                                 remaining_lots.append(lot)
                                 continue
                         else:
-                            # Simulation
                             executed_price = current_price
                             revenue = current_price * lot['amount']
+                            # Add to virtual balance
+                            self.balances[quote_asset] += (revenue * (1 - fee_rate))
 
                         any_sold = True
                         console.print(f"[bold red][{symbol}] VENTE effectuée. Prix encaissé: {executed_price} (Profit: {revenue - (lot['price'] * lot['amount']):.2f} {quote_asset})[/]")
@@ -219,7 +241,7 @@ async def main():
     bot = TradingBot(config, pairs)
     try:
         await bot.initialize()
-        log.info(f"Bot démarré sur {bot.exchange_id} avec {len(pairs)} paires.")
+        log.info(f"Bot démarré sur {bot.exchange_id} avec {len(bot.pairs)} paires valides.")
         await asyncio.gather(
             bot.watch_balance_loop(),
             bot.watch_ohlcv_loop()
