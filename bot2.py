@@ -217,6 +217,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         logging.error(f"Analysis error for {symbol}: {e}")
 
 async def execute_buy(exchange, symbol, data, data_manager, engine, config):
+    global current_balances
     async with bot_lock:
         pos = data_manager.get_position(symbol)
         max_lots = config.get('pairs', {}).get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
