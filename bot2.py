@@ -332,7 +332,12 @@ def make_dashboard(mode, config):
     )
     if show_help:
         help_text = Text("\nTAB: Switch Panels\nArrows: Navigate\nENTER: Chart\nX: Expert Mode\nCtrl+C: Quit", justify="center")
-        layout["main"] = Panel(help_text, title="Help", border_style="bold yellow")
+        layout["main"].update(Panel(help_text, title="Help", border_style="bold yellow"))
+
+    if show_chart and chart_symbol:
+        # Placeholder for chart implementation
+        layout["main"].update(Panel(Text(f"Chart for {chart_symbol} goes here...\n(Press ENTER to return)", justify="center"), title=f"Chart: {chart_symbol}", border_style="bold magenta"))
+
     return layout
 
 async def run_dashboard(mode, config):
