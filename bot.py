@@ -1877,7 +1877,6 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
                                    new_amount = float(exchange.amount_to_precision(symbol, new_amount))
                               new_cost = new_amount * current_price
 
-                    logging.info(f"[{symbol}] Cost {old_cost:.2f} is below min notional {min_notional:.2f}. Adjusting amount from {old_amount:.6f} to {new_amount:.6f} (New cost: {new_cost:.2f})")
                     amount = new_amount
                     cost = new_cost
         except Exception as ne:
@@ -1887,7 +1886,6 @@ def execute_buy(exchange, data_manager, engine, symbol, data, global_config, bal
         free_balance = balance.get(base_asset, {}).get('free', 0) if isinstance(balance.get(base_asset), dict) else balance.get(base_asset, 0)
 
         if free_balance < cost:
-            logging.warning(f"[{symbol}] Buy aborted: Insufficient {base_asset} balance ({format_price(free_balance)} < {format_price(cost)}). Suspending pair until 1.5x budget available.")
             pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
             return False
 
