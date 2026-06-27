@@ -33,6 +33,9 @@ from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
 
+# Analysis Queue
+analysis_queue = asyncio.Queue()
+
 # Global controls for dashboard
 pairs_scroll_offset = 0
 selected_pair_index = 0
@@ -146,15 +149,30 @@ async def input_task():
             logging.error(f"Input error: {e}")
         await asyncio.sleep(0.1)
 
-async def watch_ohlcv_task(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device):
-    logging.info(f"Starting OHLCV watcher for {symbol}")
-    async for candles in exchange.watch_ohlcv(symbol, timeframe):
+async def watch_ohlcv_all_symbols_task(exchange, symbols, timeframe):
+    logging.info(f"Starting single OHLCV watcher for all {len(symbols)} symbols")
+    async for data in exchange.watch_ohlcv_for_symbols(symbols, timeframe):
         if shutdown_event.is_set(): break
 
-        if not isinstance(candles[0], list):
-            candles = [candles]
+        # Normalize data from watch_ohlcv_for_symbols
+        # Some exchanges return (symbol, candles), others [[ts,o,h,l,c,v], symbol]
+        if isinstance(data, tuple) and len(data) == 2:
+            symbol, candles = data
+        elif isinstance(data, list) and len(data) > 0:
+            # Check for [[ts,o,h,l,c,v], symbol]
+            if isinstance(data[-1], str):
+                symbol = data[-1]
+                candles = data[:-1]
+                if not isinstance(candles[0], list): candles = [candles]
+            else:
+                # Direct list of candles? Should have been handled in handler
+                logging.warning(f"Unexpected OHLCV data format: {type(data)}")
+                continue
+        else:
+            continue
 
         async with ohlcv_lock:
+            if symbol not in ohlcv_cache: continue
             df = ohlcv_cache[symbol]
             new_data = []
             for candle in candles:
@@ -172,17 +190,45 @@ async def watch_ohlcv_task(exchange, symbol, timeframe, config, data_manager, pa
 
             ohlcv_cache[symbol] = df
 
-        asyncio.create_task(analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device))
+        # Put symbol in queue for dedicated analysis task
+        await analysis_queue.put(symbol)
 
-async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device):
+async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
+    logging.info("Dedicated analysis and trade task started.")
+    # Use ThreadPoolExecutor for CPU-bound technical analysis
+    # This fulfills the requirement of having a dedicated "thread" for analysis
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+
+    while not shutdown_event.is_set():
+        try:
+            # Get next symbol that received an update
+            symbol = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
+
+            # Run analysis and trading logic
+            await analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor)
+
+            analysis_queue.task_done()
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            logging.error(f"Error in dedicated analysis task: {e}")
+
+async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor=None):
     try:
         async with ohlcv_lock:
             df = ohlcv_cache[symbol].copy()
 
         if df.empty or len(df) < 20: return
 
+        loop = asyncio.get_event_loop()
+
         # Base technical analysis for regime detection
-        df = get_signals(df, {'device': device})
+        # Offload to executor if provided to keep event loop responsive
+        if executor:
+            df = await loop.run_in_executor(executor, get_signals, df, {'device': device})
+        else:
+            df = get_signals(df, {'device': device})
+
         latest = df.iloc[-1]
 
         pair_config = config.get('pairs', {}).get(symbol, {})
@@ -197,7 +243,11 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         mode_settings['device'] = device
 
         # Strategy-specific analysis
-        df = get_signals(df, mode_settings)
+        if executor:
+            df = await loop.run_in_executor(executor, get_signals, df, mode_settings)
+        else:
+            df = get_signals(df, mode_settings)
+
         latest = df.iloc[-1]
 
         async with bot_lock:
@@ -472,8 +522,11 @@ async def main():
         asyncio.create_task(heartbeat_task())
     ]
 
-    for symbol in pairs:
-        background_tasks.append(asyncio.create_task(watch_ohlcv_task(exchange, symbol, '1s', config, data_manager, pattern_manager, engine, device)))
+    # Single watcher for all symbols
+    background_tasks.append(asyncio.create_task(watch_ohlcv_all_symbols_task(exchange, pairs, '1s')))
+
+    # Dedicated analysis/trade worker
+    background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
 
     startup_complete = True
     logging.info("Bot v2 fully operational.")
