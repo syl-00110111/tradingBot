@@ -421,14 +421,14 @@ async def main():
                 try:
                     console.log(f"Fetching candles for {symbol}...")
                     ohlcv = await exchange.fetch_ohlcv_10k(symbol, '1s', 10000)
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.set_index('timestamp', inplace=True)
-                ohlcv_cache[symbol] = df
-                logging.info(f"[{symbol}] Loaded {len(df)} candles.")
-            except Exception as e:
-                logging.error(f"Failed to load candles for {symbol}: {e}")
-                ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df.set_index('timestamp', inplace=True)
+                    ohlcv_cache[symbol] = df
+                    logging.info(f"[{symbol}] Loaded {len(df)} candles.")
+                except Exception as e:
+                    logging.error(f"Failed to load candles for {symbol}: {e}")
+                    ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
