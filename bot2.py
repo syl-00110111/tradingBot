@@ -70,20 +70,18 @@ class AsyncDashboardHandler(logging.Handler):
         timestamp = datetime.now().strftime("%H:%M:%S")
         expiry = datetime.now() + timedelta(seconds=self.duration)
 
-        all_logs.append({'msg': f"[{timestamp}] {msg}", 'expiry': expiry})
+        # Capture the raw message including markup
+        all_logs.append({'msg': msg, 'timestamp': timestamp, 'expiry': expiry})
         if len(all_logs) > 500:
             all_logs.pop(0)
 
 db_handler = AsyncDashboardHandler()
 db_handler.setFormatter(logging.Formatter("%(message)s"))
 
-rich_handler = RichHandler(console=console, rich_tracebacks=True)
-rich_handler.setFormatter(logging.Formatter("%(message)s"))
-
+# root_logger will only use db_handler to avoid clearing console
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.addHandler(db_handler)
-root_logger.addHandler(rich_handler)
 
 def load_config():
     path = 'config.json' if os.path.exists('config.json') else 'config.default.json'
@@ -301,11 +299,22 @@ def make_dashboard(mode, config):
         Layout(Panel(Text(f"Mode: {mode.upper()} | Update: {now.strftime('%H:%M:%S')} | Symbols: {len(bot_state)}", justify="center"), title="Status", border_style="cyan"), size=3)
     )
     log_content = Text()
-    start_log = max(0, len(all_logs) - 10 - logs_scroll_offset)
+    start_log = max(0, len(all_logs) - 15 - logs_scroll_offset)
     end_log = max(0, len(all_logs) - logs_scroll_offset)
     for log in all_logs[start_log:end_log]:
-        style = "bold green" if log['expiry'] > now else "dim green"
-        log_content.append(log['msg'] + "\n", style=style)
+        try:
+            msg_text = Text.from_markup(f"[{log['timestamp']}] {log['msg']}")
+        except:
+            msg_text = Text(f"[{log['timestamp']}] {log['msg']}")
+
+        if log['expiry'] < now:
+            msg_text.stylize("dim green")
+        else:
+            if not any(span.style for span in msg_text.spans):
+                msg_text.stylize("bold green")
+
+        log_content.append_text(msg_text)
+        log_content.append("\n")
     table = Table(expand=True, box=None)
     table.add_column("Pair", style="cyan")
     table.add_column("Price", style="magenta")
@@ -342,16 +351,25 @@ def make_dashboard(mode, config):
 
 async def run_dashboard(mode, config):
     try:
-        # Avoid screen=True during startup to see console.log
-        while not startup_complete and not shutdown_event.is_set():
-            await asyncio.sleep(1)
+        # Start Live immediately but without screen=True to allow startup logs to be visible
+        # or use a simplified layout during startup.
+        with Live(make_dashboard(mode, config), refresh_per_second=4, screen=False) as live:
+            while not startup_complete and not shutdown_event.is_set():
+                live.update(make_dashboard(mode, config))
+                await asyncio.sleep(0.5)
+
+            # Switch to screen mode once startup is complete
+            # We have to close the old live and start a new one to change screen=True
+            pass
+
+        if shutdown_event.is_set(): return
 
         with Live(make_dashboard(mode, config), refresh_per_second=4, screen=True) as live:
             while not shutdown_event.is_set():
                 live.update(make_dashboard(mode, config))
                 await asyncio.sleep(0.25)
     except Exception as e:
-        console.log(f"[red]Dashboard error: {e}")
+        logging.info(f"[red]Dashboard error: {e}")
 
 async def heartbeat_task():
     while not shutdown_event.is_set():
@@ -377,18 +395,18 @@ async def main():
     else:
         exchange = CCXTExchange2(exchange_id, api_creds.get('api_key'), api_creds.get('api_secret'))
 
-    console.log(f"Connecting to {exchange_id}...")
+    logging.info(f"Connecting to {exchange_id}...")
     await exchange.load_markets()
 
     # Pre-initialize balances from REST
     try:
-        console.log("Fetching initial balances...")
+        logging.info("Fetching initial balances...")
         initial_balance = await exchange.fetch_balance()
         async with bot_lock:
             global current_balances
             current_balances = initial_balance
     except Exception as e:
-        console.log(f"[yellow]Warning: Could not fetch initial balances: {e}")
+        logging.info(f"[yellow]Warning: Could not fetch initial balances: {e}")
 
     data_manager = DataManager()
     pattern_manager = PatternManager()
@@ -421,18 +439,18 @@ async def main():
         bot_state[symbol] = {'price': 0, 'rsi': 0, 'tendency': 'Neutral', 'last_signal': 'Init', 'position': None}
 
     if args.fast_start:
-        console.log("[bold yellow]Fast start enabled: Skipping 10,000 candles fetch.")
+        logging.info("[bold yellow]Fast start enabled: Skipping 10,000 candles fetch.")
         for symbol in pairs:
             ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
     else:
-        console.log(f"[bold cyan]Fetching 10,000 initial candles (1s) for {len(pairs)} pairs...")
+        logging.info(f"[bold cyan]Fetching 10,000 initial candles (1s) for {len(pairs)} pairs...")
 
         semaphore = asyncio.Semaphore(5) # Limit concurrency
 
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    console.log(f"Fetching candles for {symbol}...")
+                    logging.info(f"Fetching candles for {symbol}...")
                     ohlcv = await exchange.fetch_ohlcv_10k(symbol, '1s', 10000)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -446,7 +464,7 @@ async def main():
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
     # Start WebSocket Tasks
-    console.log("[bold green]Starting WebSocket tasks...")
+    logging.info("[bold green]Starting WebSocket tasks...")
     background_tasks = [
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager)),
