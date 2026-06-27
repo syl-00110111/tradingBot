@@ -1,3 +1,6 @@
+# CCXT Pro Trading Bot v2 (Asynchronous)
+# Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
+
 import asyncio
 import json
 import time
@@ -45,6 +48,8 @@ show_help = False
 startup_complete = False
 marquee_enabled = False
 shutdown_event = asyncio.Event()
+ui_task = None
+background_tasks = []
 
 # State shared between tasks
 bot_state = {}
@@ -101,8 +106,6 @@ async def input_task():
 
     while not shutdown_event.is_set():
         try:
-            # Non-blocking read would be better, but readchar is blocking.
-            # Using loop.run_in_executor to avoid blocking the event loop.
             loop = asyncio.get_event_loop()
             key = await loop.run_in_executor(None, readchar.readkey)
 
@@ -112,7 +115,6 @@ async def input_task():
 
             if not startup_complete: continue
 
-            # Basic interaction logic from original bot.py
             if key == readchar.key.TAB:
                 focused_panel = "logs" if focused_panel == "pairs" else "pairs"
             elif key == readchar.key.UP:
@@ -173,19 +175,12 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         async with ohlcv_lock:
             df = ohlcv_cache[symbol].copy()
 
-        # Optimized Analysis (similar to analyze_pair in bot.py)
-        # We use a ThreadPoolExecutor for heavy technical analysis if needed,
-        # but indicators2.py is already quite fast with PyTorch.
         pair_config = config['pairs'].get(symbol, {})
-
-        # Use get_signals from indicators2
-        # For simplicity in this rebuilt version, we'll use a single strategy per pair as configured
         strategy = pair_config.get('strategy', 'tema_crossover')
-        mode_settings = engine.get_dynamic_settings(20, 0.001) # Default values
+        mode_settings = engine.get_dynamic_settings(20, 0.001)
         mode_settings['strategy'] = strategy
         mode_settings['device'] = device
 
-        # Analyze
         df = get_signals(df, mode_settings)
         latest = df.iloc[-1]
 
@@ -195,7 +190,6 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             bot_state[symbol]['tendency'] = latest.get('tendency', 'Neutral')
             bot_state[symbol]['last_signal'] = 'Buy' if latest.get('buy_signal') else ('Sell' if latest.get('sell_signal') else 'Waiting')
 
-        # Real-time Execution
         if latest.get('buy_signal'):
             await execute_buy(exchange, symbol, latest, data_manager, engine, config)
         elif latest.get('sell_signal'):
@@ -236,13 +230,12 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config):
         logging.error(f"Buy failed for {symbol}: {e}")
 
 async def execute_sell(exchange, symbol, data, data_manager, engine, config):
-    # Simplified selective profitable exit
     async with bot_lock:
         positions = data_manager.get_position(symbol)
         if not positions: return
 
     price = data['close']
-    fee_rate = 0.001 # Default
+    fee_rate = 0.001
 
     any_sold = False
     for i in range(len(positions) - 1, -1, -1):
@@ -275,27 +268,23 @@ async def watch_orders_task(exchange, data_manager):
         for order in orders:
             if order['status'] == 'closed':
                 logging.info(f"Order Completed: {order['symbol']} {order['side']} @ {order['price']}")
+                # We could sync positions with data_manager here if we wanted to be
+                # fully WebSocket-driven for fills.
 
 def make_dashboard(mode, config):
     now = datetime.now()
     layout = Layout()
-
-    # Header
     layout.split(
         Layout(Panel(Text("🛸 CCXT Pro Trading Bot v2 (Async/1s)", style="bold magenta", justify="center"), border_style="blue"), size=3),
         Layout(name="main"),
         Layout(Panel(Text(f"Mode: {mode.upper()} | Update: {now.strftime('%H:%M:%S')} | Symbols: {len(bot_state)}", justify="center"), title="Status", border_style="cyan"), size=3)
     )
-
-    # Logs Panel
     log_content = Text()
     start_log = max(0, len(all_logs) - 10 - logs_scroll_offset)
     end_log = max(0, len(all_logs) - logs_scroll_offset)
     for log in all_logs[start_log:end_log]:
         style = "bold green" if log['expiry'] > now else "dim green"
         log_content.append(log['msg'] + "\n", style=style)
-
-    # Pairs Panel
     table = Table(expand=True, box=None)
     table.add_column("Pair", style="cyan")
     table.add_column("Price", style="magenta")
@@ -304,38 +293,40 @@ def make_dashboard(mode, config):
     table.add_column("Signal", style="bold")
     table.add_column("Lots", style="yellow", justify="center")
     table.add_column("Strategy", style="dim cyan")
-
     symbols = sorted(bot_state.keys())
     for i, symbol in enumerate(symbols):
         data = bot_state[symbol]
         style = "bold reverse" if i == selected_pair_index else ""
-
         price = format_price(data.get('price'))
         rsi = f"{data.get('rsi', 0):.2f}"
         tend = data.get('tendency', 'Neutral')
         sig = data.get('last_signal', 'Waiting')
-
         pos = data.get('position')
         lots = str(len(pos)) if pos else "0"
-
         strat = config['pairs'].get(symbol, {}).get('strategy', 'tema')
-
         table.add_row(symbol, price, rsi, tend, sig, lots, strat, style=style)
-
     layout["main"].split_row(
         Layout(Panel(log_content, title="Live Logs (H for Help)", border_style="green" if focused_panel=="logs" else "blue"), ratio=1),
         Layout(Panel(table, title="Trading Pairs (1s Interval)", border_style="green" if focused_panel=="pairs" else "blue"), ratio=2)
     )
-
     if show_help:
         help_text = Text("\nTAB: Switch Panels\nArrows: Navigate\nENTER: Chart\nX: Expert Mode\nCtrl+C: Quit", justify="center")
         layout["main"] = Panel(help_text, title="Help", border_style="bold yellow")
-
     return layout
+
+async def run_dashboard(mode, config):
+    try:
+        with Live(make_dashboard(mode, config), refresh_per_second=4, screen=True) as live:
+            while not shutdown_event.is_set():
+                live.update(make_dashboard(mode, config))
+                await asyncio.sleep(0.25)
+    except Exception:
+        pass
 
 async def main():
     parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot v2')
     parser.add_argument('--mode', choices=['live', 'simulation'], default='simulation')
+    parser.add_argument('--fast-start', action='store_true', help='Skip fetching 10,000 candles')
     args = parser.parse_args()
 
     config = load_config()
@@ -358,10 +349,6 @@ async def main():
     pattern_manager = PatternManager()
     engine = TradingEngine(config)
 
-    # Sync initial positions (Auto-discovery)
-    # This part should be adapted from bot.py's sync_live_positions
-    # For now, start clean or rely on watch_balance/orders
-
     pairs = list(config.get('pairs', {}).keys())
     if not pairs:
         if os.path.exists('pairs.txt'):
@@ -372,48 +359,57 @@ async def main():
         logging.error("No pairs found in config or pairs.txt")
         return
 
-    # 10,000 Candles Initial Batch
-    logging.info(f"Fetching 10,000 initial candles (1s) for {len(pairs)} pairs...")
+    # Start UI early
+    global ui_task, background_tasks, startup_complete
+    mode = args.mode if args.mode else config.get('mode', 'simulation')
+    ui_task = asyncio.create_task(run_dashboard(mode, config))
+
+    # Initial Batch
     for symbol in pairs:
-        bot_state[symbol] = {
-            'price': 0, 'rsi': 0, 'tendency': 'Neutral',
-            'last_signal': 'Init', 'position': None
-        }
-        try:
-            ohlcv = await exchange.fetch_ohlcv_10k(symbol, '1s', 10000)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            ohlcv_cache[symbol] = df
-            logging.info(f"[{symbol}] Loaded {len(df)} candles.")
-        except Exception as e:
-            logging.error(f"Failed to load candles for {symbol}: {e}")
+        bot_state[symbol] = {'price': 0, 'rsi': 0, 'tendency': 'Neutral', 'last_signal': 'Init', 'position': None}
+
+    if args.fast_start:
+        logging.info("Fast start enabled: Skipping 10,000 candles fetch.")
+        for symbol in pairs:
             ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+    else:
+        logging.info(f"Fetching 10,000 initial candles (1s) for {len(pairs)} pairs in parallel...")
+
+        async def init_symbol(symbol):
+            try:
+                ohlcv = await exchange.fetch_ohlcv_10k(symbol, '1s', 10000)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                ohlcv_cache[symbol] = df
+                logging.info(f"[{symbol}] Loaded {len(df)} candles.")
+            except Exception as e:
+                logging.error(f"Failed to load candles for {symbol}: {e}")
+                ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+
+        await asyncio.gather(*[init_symbol(s) for s in pairs])
 
     # Start WebSocket Tasks
-    tasks = [
+    background_tasks = [
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager)),
         asyncio.create_task(input_task())
     ]
 
     for symbol in pairs:
-        tasks.append(asyncio.create_task(watch_ohlcv_task(exchange, symbol, '1s', config, data_manager, pattern_manager, engine, device)))
+        background_tasks.append(asyncio.create_task(watch_ohlcv_task(exchange, symbol, '1s', config, data_manager, pattern_manager, engine, device)))
 
-    global startup_complete
     startup_complete = True
     logging.info("Bot v2 fully operational.")
 
     try:
-        with Live(make_dashboard(args.mode, config), refresh_per_second=4, screen=True) as live:
-            while not shutdown_event.is_set():
-                live.update(make_dashboard(args.mode, config))
-                await asyncio.sleep(0.25)
+        await shutdown_event.wait()
     except Exception as e:
-        logging.error(f"Dashboard error: {e}")
+        logging.error(f"Main loop error: {e}")
     finally:
         shutdown_event.set()
         for t in tasks: t.cancel()
+        ui_task.cancel()
         await exchange.close()
         logging.info("Graceful shutdown complete.")
 
