@@ -948,7 +948,7 @@ def ohlcv_timeframe_watcher_thread(exchange, symbols, timeframe, config):
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"Error in multi-OHLCV watcher for {timeframe}: {e}")
-                time.sleep(5)
+                time.sleep(1)
 
 def trading_thread_func(exchange, data_manager, pattern_manager, engine, config, mode):
     """
@@ -1008,7 +1008,7 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
     active_scans = {} # symbol -> future
     last_scan_time = {sym: 0 for sym in pair_keys}
 
-    time.sleep(5)
+    time.sleep(1)
     markets = exchange.load_markets()
 
     # Initial sync happens exactly once at the start (Point 1)
@@ -1304,13 +1304,13 @@ def trading_thread_func(exchange, data_manager, pattern_manager, engine, config,
 
             # Dynamic sleep based on fastest timeframe
             if has_1s:
-                # 0.5s loop for 1s response
-                for _ in range(5):
+                # 0.4s loop for 1s response
+                for _ in range(4):
                     if shutdown_event.is_set(): break
                     time.sleep(0.1)
             else:
-                # 2s loop for other timeframes
-                for _ in range(20):
+                # 1s loop for other timeframes
+                for _ in range(10):
                     if shutdown_event.is_set(): break
                     time.sleep(0.1)
         except Exception as e:
@@ -2957,7 +2957,7 @@ def run_optimization_test(exchange, config, args, status=None, data_manager=None
     # If we are in optimization mode for live/sim, return the map
     if status: status.update('[bold green]Discovery complete.')
     if best_per_symbol:
-        time.sleep(3)
+        time.sleep(1)
 
     if args.mode in ['live', 'simulation']:
         return optimization_map
