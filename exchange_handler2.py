@@ -97,9 +97,18 @@ class CCXTExchange2(ExchangeInterface2):
         if hasattr(self.exchange, 'has') and self.exchange.has.get('watchOHLCVForSymbols'):
             while True:
                 try:
-                    candles = await self.exchange.watch_ohlcv_for_symbols(symbols, timeframe)
-                    if candles:
-                        yield candles
+                    # CCXT Pro watchOHLCVForSymbols returns a dict or list depending on exchange
+                    data = await self.exchange.watch_ohlcv_for_symbols(symbols, timeframe)
+                    if data:
+                        # Normalize to yield (symbol, candles)
+                        if isinstance(data, dict):
+                            for symbol, candles in data.items():
+                                yield symbol, candles
+                        else:
+                            # Assume it's a single update or list of updates
+                            # If it's a list, some exchanges return [[ts,o,h,l,c,v], symbol]
+                            # We check the structure.
+                            yield data
                 except Exception as e:
                     logging.error(f"Error in watch_ohlcv_for_symbols: {e}")
                     await asyncio.sleep(1)
