@@ -70,18 +70,18 @@ def play_sound(action, config=None):
         if system == "windows":
             import winsound
             if action == "startup":
-                 num_blips = 5
-                 for _ in range(num_blips):
-                      freq = random.randint(200, 1400)
-                      dur = random.randint(50, 400)
-                      winsound.Beep(freq, dur)
-                 return
+                num_blips = 5
+                for _ in range(num_blips):
+                    freq = random.randint(200, 1400)
+                    dur = random.randint(50, 400)
+                    winsound.Beep(freq, dur)
+                return
             frequency = 800 if action == "buy" else 1800
             winsound.Beep(frequency, 240)
         else:
             if action == "startup":
-                 sys.stdout.write("\a"); sys.stdout.flush()
-                 return
+                sys.stdout.write("\a"); sys.stdout.flush()
+                return
             bell_char = "\a" if action == "buy" else "\a\a"
             sys.stdout.write(bell_char)
             sys.stdout.flush()
@@ -108,21 +108,21 @@ class AsyncDashboardHandler(logging.Handler):
 
         # Status update merging
         if "Syncing positions from" in msg and "done." in msg:
-             base_msg = msg.replace(" done.", "")
-             for log in all_logs:
-                  if base_msg in log['msg'] and "done." not in log['msg']:
-                       log['msg'] = msg
-                       log['timestamp'] = timestamp
-                       log['expiry'] = expiry
-                       return
+            base_msg = msg.replace(" done.", "")
+            for log in all_logs:
+                if base_msg in log['msg'] and "done." not in log['msg']:
+                    log['msg'] = msg
+                    log['timestamp'] = timestamp
+                    log['expiry'] = expiry
+                    return
 
         if "Bot v2 fully operational." in msg:
-             for log in all_logs:
-                  if "Waiting for system initialization..." in log['msg']:
-                       log['msg'] = msg
-                       log['timestamp'] = timestamp
-                       log['expiry'] = expiry
-                       return
+            for log in all_logs:
+                if "Waiting for system initialization..." in log['msg']:
+                    log['msg'] = msg
+                    log['timestamp'] = timestamp
+                    log['expiry'] = expiry
+                    return
 
         all_logs.append({'msg': msg, 'timestamp': timestamp, 'expiry': expiry})
         if len(all_logs) > 500:
@@ -184,8 +184,8 @@ def format_price(price, precision=None):
         p_int = precision_to_int(precision)
         formatted = f"{price:.{p_int}f}".rstrip('0').rstrip('.')
         if (formatted == "" or formatted == "0") and price != 0:
-             if abs(price) < 0.000001: return f"{price:.4e}"
-             return f"{price:.10f}".rstrip('0').rstrip('.')
+            if abs(price) < 0.000001: return f"{price:.4e}"
+            return f"{price:.10f}".rstrip('0').rstrip('.')
         return formatted if formatted != "" else "0"
 
 def format_amt(amt, precision=None):
@@ -198,8 +198,8 @@ def format_amt(amt, precision=None):
         p_int = precision_to_int(precision)
         formatted = f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
         if (formatted == "" or formatted == "0") and amt != 0:
-             if abs(amt) < 0.000001: return f"{amt:.4e}"
-             return f"{amt:.10f}".rstrip('0').rstrip('.')
+            if abs(amt) < 0.000001: return f"{amt:.4e}"
+            return f"{amt:.10f}".rstrip('0').rstrip('.')
         return formatted if formatted != "" else "0"
 
 def render_ascii_chart(symbol, config):
@@ -216,8 +216,11 @@ def render_ascii_chart(symbol, config):
     # In bot2.py, we'll try to keep it simple.
 
     df = None
-    if symbol in ohlcv_cache:
-        df = ohlcv_cache[symbol]
+    # Corrected lookup for adaptive cache keys:
+    timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1s')
+    cache_key = f"{symbol}_{timeframe}"
+    if cache_key in ohlcv_cache:
+        df = ohlcv_cache[cache_key]
 
     if df is None or df.empty:
         return Text(f"No data available for {symbol}", style="bold red")
@@ -226,7 +229,7 @@ def render_ascii_chart(symbol, config):
     last_ts = int(df.index[-1].timestamp())
 
     if chart_cache["symbol"] == symbol and chart_cache["last_update"] == last_ts:
-         return chart_cache["content"]
+        return chart_cache["content"]
 
     plt_ascii.clear_figure()
     plt_ascii.clf()
@@ -236,7 +239,7 @@ def render_ascii_chart(symbol, config):
     plt_ascii.subplot(1, 1)
     plt_ascii.clf()
     plt_ascii.theme('dark')
-    plt_ascii.title(f"K-Lines: {symbol} (1s)")
+    plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
@@ -265,7 +268,7 @@ def render_ascii_chart(symbol, config):
     chart_cache = {"symbol": symbol, "last_update": last_ts, "content": content}
     return content
 
-async def input_task():
+async def input_task(config):
     global focused_panel, selected_pair_index, pairs_scroll_offset, logs_scroll_offset
     global expert_mode, marquee_enabled, show_help, show_chart, chart_symbol
     global pairs_pause_until, logs_pause_until
@@ -402,7 +405,8 @@ async def watch_ohlcv_timeframe_task(exchange, symbols, timeframe, config):
 
             ohlcv_cache[cache_key] = df
             async with bot_lock:
-                bot_state[symbol]['price'] = candles[-1][4]
+                if symbol in bot_state:
+                    bot_state[symbol]['price'] = candles[-1][4]
 
         await analysis_queue.put((symbol, timeframe))
 
@@ -464,44 +468,45 @@ async def sync_live_positions(exchange, data_manager, config):
 
         curr_price = ticker['last'] if ticker else 0
         if curr_price > 0:
-             entry_price = curr_price
-             entry_fee = 0
-             entry_total_base = amount * curr_price
+            entry_price = curr_price
+            entry_fee = 0
+            entry_total_base = amount * curr_price
 
-             try:
-                  my_trades = await exchange.fetch_my_trades(symbol, limit=10)
-                  if my_trades:
-                       buys = [t for t in my_trades if t['side'] == 'buy']
-                       if buys:
-                            buys.sort(key=lambda x: x['timestamp'], reverse=True)
-                            last_buy = buys[0]
-                            entry_price = last_buy['price']
+            try:
+                my_trades = await exchange.fetch_my_trades(symbol, limit=10)
+                if my_trades:
+                    buys = [t for t in my_trades if t['side'] == 'buy']
+                    if buys:
+                        buys.sort(key=lambda x: x['timestamp'], reverse=True)
+                        last_buy = buys[0]
+                        entry_price = last_buy['price']
 
-                            total_fee = 0
-                            accumulated_amount = 0
-                            for b in buys:
-                                 if accumulated_amount >= amount * 0.99: break
-                                 trade_amt = b['amount']
-                                 if 'fee' in b and b['fee']:
-                                      fee_cost = b['fee'].get('cost', 0)
-                                      fee_currency = b['fee'].get('currency')
-                                      _, quote = symbol.split('/')
-                                      if fee_currency and fee_currency != quote:
-                                           try:
-                                                fticker = await exchange.fetch_ticker(f"{fee_currency}/{quote}")
-                                                if fticker: fee_cost *= fticker['last']
-                                           except: pass
-                                      total_fee += fee_cost
-                                 accumulated_amount += trade_amt
+                        total_fee = 0
+                        accumulated_amount = 0
+                        for b in buys:
+                            if accumulated_amount >= amount * 0.99:
+                                break
+                            trade_amt = b['amount']
+                            if 'fee' in b and b['fee']:
+                                fee_cost = b['fee'].get('cost', 0)
+                                fee_currency = b['fee'].get('currency')
+                                _, quote = symbol.split('/')
+                                if fee_currency and fee_currency != quote:
+                                    try:
+                                        fticker = await exchange.fetch_ticker(f"{fee_currency}/{quote}")
+                                        if fticker: fee_cost *= fticker['last']
+                                    except: pass
+                                total_fee += fee_cost
+                            accumulated_amount += trade_amt
 
-                            entry_fee = total_fee
-                            entry_total_base = (amount * entry_price) + entry_fee
-             except Exception as e:
-                  logging.warning(f"[{symbol}] Failed to recover trade history: {e}")
+                        entry_fee = total_fee
+                        entry_total_base = (amount * entry_price) + entry_fee
+            except Exception as e:
+                logging.warning(f"[{symbol}] Failed to recover trade history: {e}")
 
-             data_manager.add_position(symbol, entry_price, amount, entry_fee, {"info": "auto_populated"}, time.time(), total_base=entry_total_base)
+            data_manager.add_position(symbol, entry_price, amount, entry_fee, {"info": "auto_populated"}, time.time(), total_base=entry_total_base)
         else:
-             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
+            logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
 
     logging.info(f"Syncing positions from {exchange_id} API done.")
 
@@ -868,8 +873,8 @@ def make_dashboard(mode, config):
 
     should_step = False
     if marquee_enabled and (now_ts - last_marquee_update >= 0.4):
-         should_step = True
-         last_marquee_update = now_ts
+        should_step = True
+        last_marquee_update = now_ts
 
     all_pairs = get_sorted_symbols(config)
 
@@ -879,14 +884,14 @@ def make_dashboard(mode, config):
     max_logs_offset = max(0, len(all_logs) - log_height)
 
     if max_logs_offset > 0 and should_step:
-         if now_ts > logs_pause_until:
-              if logs_scroll_offset > 0:
-                   logs_scroll_offset -= 1
-                   if logs_scroll_offset == 0:
-                        logs_pause_until = now_ts + 1
-              else:
-                   logs_scroll_offset = max_logs_offset
-                   logs_pause_until = now_ts + 1
+        if now_ts > logs_pause_until:
+            if logs_scroll_offset > 0:
+                logs_scroll_offset -= 1
+                if logs_scroll_offset == 0:
+                    logs_pause_until = now_ts + 1
+            else:
+                logs_scroll_offset = max_logs_offset
+                logs_pause_until = now_ts + 1
 
     logs_scroll_offset = max(0, min(logs_scroll_offset, max_logs_offset))
     start = max(0, len(all_logs) - log_height - logs_scroll_offset)
@@ -934,18 +939,19 @@ def make_dashboard(mode, config):
         table.add_column("Strategy", style="bold cyan", no_wrap=True)
 
     pairs_height = console.height - 20
-    if pairs_height < 3: pairs_height = 3
+    if pairs_height < 3:
+        pairs_height = 3
     max_pairs_offset = max(0, len(all_pairs) - pairs_height)
 
     if max_pairs_offset > 0 and should_step:
-         if now_ts > pairs_pause_until:
-              if pairs_scroll_offset < max_pairs_offset:
-                   pairs_scroll_offset += 1
-                   if pairs_scroll_offset == max_pairs_offset:
-                        pairs_pause_until = now_ts + 1
-              else:
-                   pairs_scroll_offset = 0
-                   pairs_pause_until = now_ts + 1
+        if now_ts > pairs_pause_until:
+            if pairs_scroll_offset < max_pairs_offset:
+                pairs_scroll_offset += 1
+                if pairs_scroll_offset == max_pairs_offset:
+                    pairs_pause_until = now_ts + 1
+            else:
+                pairs_scroll_offset = 0
+                pairs_pause_until = now_ts + 1
 
     pairs_scroll_offset = max(0, min(pairs_scroll_offset, max_pairs_offset))
     visible_symbols = all_pairs[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
@@ -988,29 +994,29 @@ def make_dashboard(mode, config):
         macd_str = f"{macd_hist:.4e}" if abs(macd_hist) < 0.001 else f"{macd_hist:.4f}"
 
         if expert_mode:
-             row_vals = [
-                  symbol, tf,
-                  f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
-                  macd_str,
-                  f"{data.get('rsi', 0):.2f}",
-                  f"{data.get('volatility', 0):.6f}/{data.get('adx', 0):.2f}",
-                  str(data.get('score', 0)),
-                  f"{data.get('expected_profit', 0):.4f}",
-                  data.get('aggr', 'N/A'),
-                  data.get('strategy', 'N/A')
-             ]
+            row_vals = [
+                symbol, tf,
+                f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
+                macd_str,
+                f"{data.get('rsi', 0):.2f}",
+                f"{data.get('volatility', 0):.6f}/{data.get('adx', 0):.2f}",
+                str(data.get('score', 0)),
+                f"{data.get('expected_profit', 0):.4f}",
+                data.get('aggr', 'N/A'),
+                data.get('strategy', 'N/A')
+            ]
         else:
-             strat = config.get('pairs', {}).get(symbol, {}).get('strategy', 'tema')
-             row_vals = [
-                  symbol, tf,
-                  format_price(data.get('price')),
-                  amt_str, entry_str, fee_str,
-                  f"{data.get('expected_profit', 0):.4f}",
-                  data.get('tendency', 'Neutral'),
-                  f"[{sig_style}]{current_signal}[/]",
-                  data.get('aggr', 'N/A'),
-                  f"[bold cyan]{strat}[/]"
-             ]
+            strat = config.get('pairs', {}).get(symbol, {}).get('strategy', 'tema')
+            row_vals = [
+                symbol, tf,
+                format_price(data.get('price')),
+                amt_str, entry_str, fee_str,
+                f"{data.get('expected_profit', 0):.4f}",
+                data.get('tendency', 'Neutral'),
+                f"[{sig_style}]{current_signal}[/]",
+                data.get('aggr', 'N/A'),
+                f"[bold cyan]{strat}[/]"
+            ]
 
         # Rolling effect for strategy display (if multiple)
         strats = data.get('strategies')
@@ -1035,14 +1041,14 @@ def make_dashboard(mode, config):
     max_status_offset = max(0, len(status_text) - display_width)
 
     if max_status_offset > 0 and should_step:
-         status_scroll_index = (status_scroll_index + 1) % (max_status_offset + 10)
-         if status_scroll_index > max_status_offset:
-              status_display = status_text[0 : display_width]
-         else:
-              status_display = status_text[status_scroll_index : status_scroll_index + display_width]
+        status_scroll_index = (status_scroll_index + 1) % (max_status_offset + 10)
+        if status_scroll_index > max_status_offset:
+            status_display = status_text[0 : display_width]
+        else:
+            status_display = status_text[status_scroll_index : status_scroll_index + display_width]
     else:
-         status_display = status_text
-         status_display.justify = "center"
+        status_display = status_text
+        status_display.justify = "center"
 
     if show_help:
         help_text = Text()
@@ -1061,9 +1067,9 @@ def make_dashboard(mode, config):
         pairs_panel = Panel(chart_content, title=f"[bold]K-Lines: {chart_symbol}[/]", border_style="bold magenta")
 
     if not startup_complete:
-         waiting_text = Text.from_markup("\n\n\n\n\n[bold blink yellow]Waiting for system initialization...[/]\n", justify="center")
-         waiting_text.append_text(Text.from_markup("[dim]Fetching market data and calculating first signals...[/]\n", style="white"))
-         pairs_panel = Panel(waiting_text, title="[bold]System Startup[/]", border_style="bold yellow")
+        waiting_text = Text.from_markup("\n\n\n\n\n[bold blink yellow]Waiting for system initialization...[/]\n", justify="center")
+        waiting_text.append_text(Text.from_markup("[dim]Fetching market data and calculating first signals...[/]\n", style="white"))
+        pairs_panel = Panel(waiting_text, title="[bold]System Startup[/]", border_style="bold yellow")
 
     layout = Layout()
     layout.split(
@@ -1367,7 +1373,7 @@ async def main():
         logging.error("No pairs found in config or pairs.txt")
         return
 
-    # Start UI task (it will wait for startup_complete to start Live)
+    # Start UI task
     global ui_task, background_tasks, startup_complete
     mode = args.mode if args.mode else config.get('mode', 'simulation')
     ui_task = asyncio.create_task(run_dashboard(mode, config))
@@ -1397,27 +1403,28 @@ async def main():
         }
 
     if args.fast_start:
-        logging.info("[bold yellow]Fast start enabled: Skipping 10,000 candles fetch.")
+        logging.info("[bold yellow]Fast start enabled: Skipping initial candles fetch.")
         for symbol in pairs:
-            ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+            tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+            ohlcv_cache[f"{symbol}_{tf}"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
     else:
-        logging.info(f"[bold cyan]Fetching 10,000 initial candles (1s) for {len(pairs)} pairs...")
-
-        semaphore = asyncio.Semaphore(5) # Limit concurrency
+        logging.info(f"[bold cyan]Fetching initial candles for {len(pairs)} pairs...")
+        semaphore = asyncio.Semaphore(5)
 
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    logging.info(f"Fetching candles for {symbol}...")
-                    ohlcv = await exchange.fetch_ohlcv_10k(symbol, '1s', 10000)
+                    tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+                    logging.info(f"Fetching candles for {symbol} ({tf})...")
+                    ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=500)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     df.set_index('timestamp', inplace=True)
-                    ohlcv_cache[symbol] = df
+                    ohlcv_cache[f"{symbol}_{tf}"] = df
                     logging.info(f"[{symbol}] Loaded {len(df)} candles.")
                 except Exception as e:
                     logging.error(f"Failed to load candles for {symbol}: {e}")
-                    ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    ohlcv_cache[f"{symbol}_{tf}"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
@@ -1426,7 +1433,7 @@ async def main():
     background_tasks = [
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager)),
-        asyncio.create_task(input_task()),
+        asyncio.create_task(input_task(config)),
         asyncio.create_task(heartbeat_task())
     ]
 
@@ -1454,6 +1461,8 @@ async def main():
         shutdown_event.set()
         for t in background_tasks: t.cancel()
         if ui_task: ui_task.cancel()
+        global bench_executor
+        if bench_executor: bench_executor.shutdown(wait=False)
         await exchange.close()
 
         # Clear screen and show final logs
