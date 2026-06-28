@@ -344,6 +344,24 @@ STRATEGIES = [
     'heikin_ashi', 'candle_patterns', 'sinewave_cycle'
 ]
 
+STRATEGY_GROUPS = {
+    'trend_following': [
+        'ichimoku_cloud', 'parabolic_sar', 'vwap_momentum', 'renko_proxy',
+        'ema_rsi_volume', 'mc_momentum', 'adx_trend_strength', 'halving_cycle_proxy',
+        'tema_crossover', 'heikin_ashi', 'donchian_channels'
+    ],
+    'mean_reversion': [
+        'bollinger_bands', 'stochastic_rsi', 'williams_r', 'mc_mean_reversion',
+        'mc_market_making', 'pairs_trading_proxy', 'sinewave_cycle'
+    ],
+    'other': [
+        'mc_dynamic_allocation', 'mc_stop_loss_eval', 'mc_options_pricing',
+        'whale_detection_proxy', 'pump_dump_proxy', 'scientific_ensemble',
+        'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'listing_surge_proxy',
+        'candle_patterns'
+    ]
+}
+
 # Global MC engine for reuse
 _mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
 
@@ -435,9 +453,12 @@ def get_signals(df, mode_config, is_scan=False):
         df['vol_std_whale'] = df['volume'].rolling(window=20).std()
         df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
 
-        # Market Regime Proxy (Common)
+        # Market Regime Proxy (Common) - Improved Detection
+        # Typically: ADX < 25 = Ranging/Mean Reversion, ADX >= 25 = Trending
+        # We also use volatility relative to its mean.
         df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
-        df['is_mean_rev'] = (df['volatility'] > df['vol_ma_regime']).astype(int)
+        df['is_mean_rev'] = ((df['adx'] < 25) | (df['volatility'] > 1.5 * df['vol_ma_regime'])).astype(int)
+        df['regime'] = np.where(df['is_mean_rev'] == 1, 'mean_reversion', 'trend_following')
 
     # Initialize default score and tendency if not present
     if 'score' not in df.columns:
