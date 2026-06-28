@@ -931,43 +931,6 @@ async def watch_orders_task(exchange, data_manager):
                 # We could sync positions with data_manager here if we wanted to be
                 # fully WebSocket-driven for fills.
 
-async def show_balances(exchange):
-    console.print("\n[bold magenta]=== Real Wallet Balance (All Assets) ===[/]")
-    balance = await exchange.fetch_balance()
-    if balance is None:
-        console.print("[bold red]Error: Failed to fetch balances.[/]")
-        return
-
-    table = Table(title="Asset Inventory", expand=True)
-    table.add_column("Asset", style="cyan")
-    table.add_column("Free", justify="right")
-    table.add_column("Used", justify="right")
-    table.add_column("Total", justify="right")
-    table.add_column("Est. EUR", justify="right", style="green")
-
-    total_balances = balance.get('total', balance)
-    free_balances = balance.get('free', {})
-    used_balances = balance.get('used', {})
-
-    total_eur_value = 0
-    for asset in sorted(total_balances.keys()):
-        total = total_balances[asset]
-        if not isinstance(total, (int, float)) or total == 0: continue
-        free = free_balances.get(asset, 0)
-        used = used_balances.get(asset, 0)
-
-        eur_val = 0
-        if asset in ['EUR', 'USDT', 'USDC']: eur_val = total
-        else:
-            ticker = await exchange.fetch_ticker(f"{asset}/EUR")
-            if ticker: eur_val = total * ticker['last']
-
-        total_eur_value += eur_val
-        table.add_row(asset, format_amt(free), format_amt(used), format_amt(total), format_price(eur_val))
-
-    console.print(table)
-    console.print(f"\n[bold yellow]Estimated Total Wallet Value: {total_eur_value:.2f} EUR[/]\n")
-
 def get_sorted_symbols(config):
     tf_priority = {'1s': 0, '1m': 1, '3m': 2, '5m': 3, '15m': 4, '30m': 5}
     all_pairs = sorted(
@@ -1223,7 +1186,6 @@ async def heartbeat_task():
 async def main():
     parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot v2 (Asynchronous)')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
-    parser.add_argument('--mode', choices=['live', 'balance'], default='balance', help='Bot mode')
     parser.add_argument('--fast-start', action='store_true', help='Skip fetching initial candles')
 
     args = parser.parse_args()
@@ -1279,12 +1241,7 @@ async def main():
     exchange = CCXTExchange2(exchange_id,
                              api_creds.get('api_key') or config.get('api_key'),
                              api_creds.get('api_secret') or config.get('api_secret'))
-    
-    if args.mode == 'balance':
-        await show_balances(exchange)
-        await exchange.close()
-        return
-    
+        
     logging.info(f"Connecting to {exchange_id}...")
     await exchange.load_markets()
 
@@ -1395,9 +1352,8 @@ async def main():
         logging.info(f"[yellow]Warning: Could not fetch initial balances: {e}")
 
     # Synchronizing positions from the exchange API
-    if mode == 'live':
-        logging.info(f"Synchronizing positions from the {exchange_id.capitalize()} API...")
-        await sync_live_positions(exchange, data_manager, config)
+    logging.info(f"Synchronizing positions from the {exchange_id.capitalize()} API...")
+    await sync_live_positions(exchange, data_manager, config)
 
     # Dedicated analysis/trade worker
     background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
