@@ -1,54 +1,54 @@
-# 🛸 Bot de Trading CCXT Pro
+# 🛸 CCXT Pro Trading Bot
 
-Un bot de trading universel de crypto-monnaies implémenté en Python, tirant parti du traitement multi-cœurs, de l'accélération GPU et de stratégies basées sur des preuves. Il prend en charge **n'importe quel échange** fourni par la bibliothèque CCXT (Binance, Kraken, OKX, Coinbase, etc.).
-
----
-
-## 🔬 Fondements Scientifiques
-Ce bot implémente des stratégies et une logique recommandées par des études empiriques de premier plan sur les marchés de crypto-monnaies :
-
-- **Scoring Multi-Techniques** : Agrège les signaux de plusieurs stratégies et profils d'agressivité. Le score du signal est pondéré par le nombre de techniques et le score de l'unité de temps optimale du symbole.
-- **Détection du Régime de Marché** : Utilise une commutation basée sur la volatilité entre le retour à la moyenne (Mean-Reversion) et le suivi de tendance (Trend-Following).
-- **Validation Monte Carlo** : Simulations vectorisées pour estimer la probabilité de succès pour chaque signal, pénalisant les configurations à haut risque.
+A universal cryptocurrency trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **any exchange** provided by the CCXT library (Binance, Kraken, OKX, Coinbase, etc.).
 
 ---
 
-## 🛠 Fonctionnalités Principales
+## 🔬 Scientific Foundations
+This bot implements strategies and logic recommended by leading empirical studies on cryptocurrency markets:
 
-### 🛡 Gestion des Risques
-- **Logique de Confirmation** : Nécessite des signaux identiques consécutifs pour l'exécution. La fenêtre de confirmation s'élargit automatiquement en cas de haute volatilité (> 0.1).
-- **Suspension Intelligente** : Suspend automatiquement le trading pour les symboles où les ordres échouent ou si le budget est insuffisant. Reprend uniquement lorsque 1.5x le budget requis devient disponible.
-- **Dimensionnement Dynamique** : Les tailles de position sont calculées comme un pourcentage de votre solde disponible, divisé par le nombre maximum de lots autorisés pour maintenir une exposition contrôlée.
+- **Multi-Technique Scoring**: Aggregates signals from multiple strategies and aggressiveness profiles. The signal score is weighted by the number of techniques and the optimal timeframe score for the symbol.
+- **Market Regime Detection**: Uses a dynamic switch between **Mean Reversion** and **Trend Following** based on volatility and ADX (Average Directional Index).
+- **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for each signal, penalizing high-risk configurations.
+
+---
+
+## 🛠 Main Features
+
+### 🛡 Risk Management
+- **Confirmation Logic**: Requires persistent signals for execution. The confirmation window automatically expands during high volatility (> 0.1).
+- **Intelligent Suspension**: Automatically suspends trading for symbols where orders fail or if the budget is insufficient. Resumes only when 1.2x the required budget becomes available.
+- **Dynamic Sizing**: Position sizes are calculated as a percentage of your available balance, divided by the maximum number of lots allowed to maintain controlled exposure.
 
 ---
 
 ### ⚡ Performance
-- **Accélération GPU** : Les calculs sont déportés sur la puce graphique via PyTorch. Backends supportés : **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** et **ROCm**.
-- **Optimisation SIMD Matérielle** : Détection et utilisation automatique des jeux d'instructions CPU (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) pour des performances optimisées via PyTorch.
+- **GPU Acceleration**: Calculations are offloaded to the graphics chip via PyTorch. Supported backends: **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX**, and **ROCm**.
+- **Hardware SIMD Optimization**: Automatic detection and utilization of CPU instruction sets (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) for optimized performance via PyTorch.
 
 ---
 
-## 📈 Stratégies Supportées
-Le bot propose plus de 30 stratégies distinctes, incluant :
+## 📈 Supported Strategies
+The bot offers over 30 distinct strategies, including:
 
-- **Suivi de Tendance** : `ichimoku_cloud`, `parabolic_sar`, `adx_trend_strength`, `halving_cycle_proxy`.
-- **Retour à la Moyenne & Plage** : `bollinger_bands`, `rsi_support_resistance`, `pairs_trading_proxy`.
-- **Breakout & Momentum** : `breakout_volume`, `donchian_channels`, `atr_breakout`, `stochastic_rsi`, `williams_r`, `vwap_momentum`.
-- **Scalping & Flux d'Ordres** : `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`.
-- **Proxies Avancés** : `scientific_ensemble`, `whale_detection_proxy`, `pump_dump_proxy`, `market_regime_proxy`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`.
-- **Moteurs Monte Carlo** : `mc_mean_reversion`, `mc_momentum`, `mc_dynamic_allocation`, `mc_market_making`, `mc_stop_loss_eval`.
+- **Trend Following**: `ichimoku_cloud`, `parabolic_sar`, `adx_trend_strength`, `halving_cycle_proxy`.
+- **Mean Reversion & Range**: `bollinger_bands`, `rsi_support_resistance`, `pairs_trading_proxy`.
+- **Breakout & Momentum**: `breakout_volume`, `donchian_channels`, `atr_breakout`, `stochastic_rsi`, `williams_r`, `vwap_momentum`.
+- **Scalping & Order Flow**: `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`.
+- **Advanced Proxies**: `scientific_ensemble`, `whale_detection_proxy`, `pump_dump_proxy`, `market_regime_proxy`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`.
+- **Monte Carlo Engines**: `mc_mean_reversion`, `mc_momentum`, `mc_dynamic_allocation`, `mc_market_making`, `mc_stop_loss_eval`.
 
 ---
 
 ## ⚙️ Configuration
 
 ### 🛠 `config.json`
-Paramètres principaux du bot.
+Main parameters of the bot.
 
-*   **`max_lots_per_symbol`** : (int) Nombre maximum de lots d'achat autorisés par symbole (par défaut : `1`).
-*   **`max_open_positions`** : (int) Nombre maximum de paires de trading distinctes ouvertes simultanément (par défaut : `10`).
-*   **`max_trade_percentage`** : (float | object) Pourcentage maximum de votre solde total à exposer par symbole (tous lots confondus) (par défaut : `10`).
-*   * Attention, il s'agit de DIX pourcent par défaut ce qui peut être beaucoup ! Bien vérifier les options avant lancement !
+*   **`max_lots_per_symbol`**: (int) Maximum number of buy lots allowed per symbol (default: `1`).
+*   **`max_open_positions`**: (int) Maximum number of distinct trading pairs open simultaneously (default: `10`).
+*   **`max_trade_percentage`**: (float | object) Maximum percentage of your total balance to expose per symbol (total of all lots) (default: `10`).
+*   * Warning: The default is TEN percent, which can be significant! Check your options before launching!
 *   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
     ```json
     "max_trade_percentage": {
@@ -58,7 +58,10 @@ Paramètres principaux du bot.
         "default": 12.0
     }
     ```
-*   **`global_risk_multiplier`** : (float) Multiplicateur pour le dimensionnement des positions et les confirmations techniques.
+*   **`global_risk_multiplier`**: (float) Multiplier for position sizing and technical confirmations (default: `1.1`).
+*   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `2.0`).
+*   **`max_analysis_workers`**: (int) Number of parallel workers for technical analysis (default: `4`).
+*   **`no_signal_threshold`**: (int) Number of candles without signals before triggering background optimization (default: `48`).
 
 #### Advanced Overrides (Optional)
 *   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy for every pair.
@@ -75,6 +78,9 @@ Paramètres principaux du bot.
         }
     }
     ```
+
+---
+
 ### 📄 `pairs.txt`
 Define the trading pairs you want the bot to monitor (one per line).
 Example:
@@ -98,28 +104,31 @@ Store your API credentials and preferred exchange.
 
 ---
 
-## 🚀 Démarrage Rapide
+## 🚀 Quick Start
 
 ### Installation
 
 **Linux/macOS:**
-1. Créer un environnement virtuel et l'activer: `python -m venv venv && source venv/bin/activate`
+1. Create a virtual environment and activate it: `python -m venv venv && source venv/bin/activate`
 
 **Windows:**
-1. Créer un environnement virtuel: `python -m venv venv`, puis l'activer: `.\venv\Scripts\Activate.ps1`
+1. Create a virtual environment: `python -m venv venv`, then activate it: `.\venv\Scripts\Activate.ps1`
 
-2. Installer les dépendances : `pip install --upgrade -r requirements.txt`
+2. Install dependencies: `pip install --upgrade -r requirements.txt`
 
-*Note: pour Windows il faudra exécuter la commande `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` pour la sécurité, utiliser la révision **3.13** de Python, et installer le **Visual C++ 2015-2022 Redistributable (x64)** que vous pouvez trouver ici [https://aka.ms/vs/17/release/vc_redist.x64.exe] à cause de dépendances spécifiques à cette plateforme.*
+*Note: For Windows, you will need to run the command `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` for security, use Python version **3.13**, and install the **Visual C++ 2015-2022 Redistributable (x64)** which you can find here [https://aka.ms/vs/17/release/vc_redist.x64.exe] due to platform-specific dependencies.*
 
-**Maintenance régulière:**
+**Regular Maintenance:**
 
-Pour rester à jour concernant les modifications des appels API : `pip install --upgrade ccxt` ou `pip install --upgrade -r requirements.txt` pour lancer la procédure complète de mise à jour des dépendances. Assurez-vous également que **l'horloge** de votre ordinateur est synchronisée.
+To stay up to date with API call changes: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to run the full dependency update procedure. Also, ensure your computer's **clock** is synchronized.
 
-### Exécution
+### Execution
 - **Live**: `python bot2.py`
+- **Options**:
+    - `--no-gpu`: Force CPU execution.
+    - `--fast-start`: Skip initial candle fetching for faster startup.
 
 ---
 
-## ⚖️ Avertissement
-Le trading comporte des risques significatifs. Utilisez ce bot à vos propres risques. Sous licence **GPL**.
+## ⚖️ Disclaimer
+Trading involves significant risk. Use this bot at your own risk. Licensed under **GPL**.

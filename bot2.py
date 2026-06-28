@@ -30,7 +30,7 @@ import readchar
 
 # Import renamed modules
 from exchange_handler2 import CCXTExchange2, MockExchange2
-from indicators2 import get_signals, STRATEGIES
+from indicators2 import get_signals, STRATEGIES, STRATEGY_GROUPS
 from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
@@ -720,6 +720,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             df = get_signals(df, {'device': device})
 
         latest_base = df.iloc[-1]
+        market_regime = latest_base.get('regime', 'trend_following')
+        logging.debug(f"[{symbol}] Market Regime detected: {market_regime}")
 
         # 2. Adaptive Timeframe Discovery
         last_tf_check = config['pairs'].get(symbol, {}).get('_last_tf_check', 0)
@@ -735,14 +737,43 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         pair_config = config['pairs'].get(symbol, {})
         techniques = pair_config.get('techniques', [])
         if not techniques:
-            techniques = [{"strategy": s, "aggr": ["normal", "aggressive", "dynamic"]} for s in STRATEGIES]
+            # Prioritize current regime, then others
+            regime_strats = STRATEGY_GROUPS.get(market_regime, [])
+            other_regime = 'trend_following' if market_regime == 'mean_reversion' else 'mean_reversion'
+            other_regime_strats = STRATEGY_GROUPS.get(other_regime, [])
+            misc_strats = STRATEGY_GROUPS.get('other', [])
+
+            ordered_strats = regime_strats + misc_strats + other_regime_strats
+            techniques = [{"strategy": s, "aggr": ["normal", "aggressive", "dynamic"]} for s in ordered_strats]
+        else:
+            # Reorder existing techniques to prioritize the detected regime
+            def technique_priority(t):
+                strat = t.get('strategy')
+                if strat in STRATEGY_GROUPS.get(market_regime, []):
+                    return 0
+                if strat in STRATEGY_GROUPS.get('other', []):
+                    return 1
+                return 2
+            techniques = sorted(techniques, key=technique_priority)
+
+        # Filtering mechanism: Prioritize current regime or generic, but keep ALL techniques
+        # We don't want to drop user-configured strategies even if they aren't in a group.
+        def is_relevant(t):
+            strat = t.get('strategy')
+            return strat in STRATEGY_GROUPS.get(market_regime, []) or strat in STRATEGY_GROUPS.get('other', [])
+
+        filtered_techniques = [t for t in techniques if is_relevant(t)]
+        other_techniques = [t for t in techniques if not is_relevant(t)]
+
+        # Combine them, ensuring priority techniques are first
+        final_techniques = filtered_techniques + other_techniques
 
         buy_count = 0
         sell_count = 0
         total_score = 0
 
         tasks = []
-        for t in techniques:
+        for t in final_techniques:
             strat = t.get('strategy')
             aggr_list = t.get('aggr', ['normal'])
             if isinstance(aggr_list, str): aggr_list = [aggr_list]
