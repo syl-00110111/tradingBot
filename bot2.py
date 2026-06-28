@@ -102,6 +102,9 @@ background_tasks = []
 active_scans = {}
 bench_executor = None
 
+# Global UI Constants
+MAX_STRAT_LEN = max(len(s) for s in STRATEGIES) if STRATEGIES else 20
+
 # Marquee Timing Control
 last_marquee_update = 0
 pairs_pause_until = 0
@@ -473,10 +476,10 @@ async def get_optimal_timeframe(exchange, symbol, config):
         if spread_pct < 0.01: score += 1
         if volatility > 0.05: score += 1
 
-        if score >= 3: tf = '1s'
-        elif score == 2: tf = '1m'
-        elif score == 1: tf = '3m'
-        elif score == 0: tf = '5m'
+        if score == 4: tf = '1s'
+        elif score == 3: tf = '1m'
+        elif score == 2: tf = '3m'
+        elif score == 1: tf = '5m'
         else: tf = '15m'
         return tf, score
     except Exception as e:
@@ -1143,7 +1146,7 @@ def make_dashboard(config):
         table.add_column("Scr", style="bold white", no_wrap=True)
         table.add_column("B.Prof", style="bold green", no_wrap=True)
         table.add_column("Aggr", style="white", no_wrap=True)
-        table.add_column("Strategy", style="bold cyan", no_wrap=True)
+        table.add_column("Strategy", style="bold cyan", no_wrap=True, width=MAX_STRAT_LEN)
     else:
         table.add_column("Pair", style="cyan", no_wrap=True)
         table.add_column("TF", style="yellow", no_wrap=True)
@@ -1155,7 +1158,7 @@ def make_dashboard(config):
         table.add_column("Tendency", style="bold white", no_wrap=True)
         table.add_column("Signal", style="bold", no_wrap=True)
         table.add_column("Aggr", style="white", no_wrap=True)
-        table.add_column("Strategy", style="bold cyan", no_wrap=True)
+        table.add_column("Strategy", style="bold cyan", no_wrap=True, width=MAX_STRAT_LEN)
 
     pairs_height = console.height - 20
     if pairs_height < 3:
