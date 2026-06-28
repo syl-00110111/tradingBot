@@ -539,7 +539,7 @@ async def get_optimal_timeframe(exchange, symbol, config):
         else: tf = '30m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
-        return tf, score, reasons
+        return tf, score
 
     except Exception as e:
         err_msg = str(e)
