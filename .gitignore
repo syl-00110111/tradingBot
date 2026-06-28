@@ -7,3 +7,4 @@ venv/
 api.json
 config.json
 trades_*.json
+fatal_error.log
