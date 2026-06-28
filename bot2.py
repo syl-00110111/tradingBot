@@ -754,7 +754,7 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
             if candles_since >= config.get('no_signal_threshold', 20) and symbol not in active_scans:
                 global bench_executor
-                if not bench_executor: bench_executor = concurrent.futures.ProcessPoolExecutor(max_workers=2)
+                if not bench_executor: bench_executor = concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count() or 4)
                 task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
                                           symbol, config, timeframe, ['normal'], STRATEGIES[:10], df, engine, device)
                 active_scans[symbol] = task
@@ -1397,25 +1397,9 @@ async def main():
     logging.info(f"Connecting to {exchange_id}...")
     await exchange.load_markets()
 
-    # Pre-initialize balances from REST
-    try:
-        logging.info("Fetching initial balances...")
-        initial_balance = await exchange.fetch_balance()
-        async with bot_lock:
-            global current_balances
-            current_balances = initial_balance
-    except Exception as e:
-        logging.info(f"[yellow]Warning: Could not fetch initial balances: {e}")
-
     data_manager = DataManager()
     pattern_manager = PatternManager()
     engine = TradingEngine(config)
-
-    # Initial sync happens at start
-    if args.mode == 'simulation':
-        await initialize_simulation(exchange, data_manager, pattern_manager, engine, config, device)
-    elif args.mode == 'live':
-        await sync_live_positions(exchange, data_manager, config)
 
     if args.mode == 'balance':
         await show_balances(exchange)
@@ -1525,6 +1509,26 @@ async def main():
 
     # Start Global OHLCV Watcher
     await watcher_manager.start_global_watcher()
+
+    # Ensure all watchers are setup (Wait a bit for connections to stabilize)
+    await asyncio.sleep(2)
+
+    # Now that watchers are set up, perform initial sync and balance retrieval
+    try:
+        logging.info("Retrieving initial balances...")
+        initial_balance = await exchange.fetch_balance()
+        async with bot_lock:
+            global current_balances
+            current_balances = initial_balance
+    except Exception as e:
+        logging.info(f"[yellow]Warning: Could not fetch initial balances: {e}")
+
+    # Synchronizing positions from the exchange API
+    if mode == 'simulation':
+        await initialize_simulation(exchange, data_manager, pattern_manager, engine, config, device)
+    elif mode == 'live':
+        logging.info(f"Synchronizing positions from the {exchange_id.capitalize()} API...")
+        await sync_live_positions(exchange, data_manager, config)
 
     # Dedicated analysis/trade worker
     background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
