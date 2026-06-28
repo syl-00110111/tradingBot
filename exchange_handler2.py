@@ -58,26 +58,45 @@ class CCXTExchange2(ExchangeInterface2):
 
     async def fetch_ohlcv_10k(self, symbol, timeframe, limit=10000):
         all_ohlcv = []
-        tf_seconds = self.exchange.parse_timeframe(timeframe)
+        try:
+            tf_seconds = self.exchange.parse_timeframe(timeframe)
+        except:
+            tf_seconds = 1
+
         duration_ms = limit * tf_seconds * 1000
         since = self.exchange.milliseconds() - duration_ms
 
-        while len(all_ohlcv) < limit:
+        retries = 0
+        max_retries = 3
+
+        while len(all_ohlcv) < limit and retries < max_retries:
             fetch_limit = min(1000, limit - len(all_ohlcv))
             try:
                 chunk = await asyncio.wait_for(
                     self.exchange.fetch_ohlcv(symbol, timeframe, since, limit=fetch_limit),
-                    timeout=30
+                    timeout=20
                 )
                 if not chunk:
-                    break
+                    if len(all_ohlcv) > 0: break
+                    else:
+                        retries += 1
+                        await asyncio.sleep(1)
+                        continue
+
                 all_ohlcv.extend(chunk)
                 since = chunk[-1][0] + 1
+                retries = 0 # reset on success
+
                 if len(chunk) < fetch_limit:
                     break
             except Exception as e:
-                logging.error(f"Error in fetch_ohlcv_10k for {symbol}: {e}")
-                break
+                logging.warning(f"Error in fetch_ohlcv_10k for {symbol} (chunk {len(all_ohlcv)}): {e}")
+                retries += 1
+                await asyncio.sleep(2)
+
+        if len(all_ohlcv) < 100:
+            logging.warning(f"[{symbol}] Only {len(all_ohlcv)} candles retrieved. Bot might need more history for accuracy.")
+
         return all_ohlcv[-limit:]
 
     async def watch_ohlcv(self, symbol, timeframe):
@@ -151,6 +170,13 @@ class CCXTExchange2(ExchangeInterface2):
         except Exception as e:
             logging.error(f"Error fetching ticker for {symbol}: {e}")
             return None
+
+    async def fetch_tickers(self, symbols=None):
+        try:
+            return await self.exchange.fetch_tickers(symbols)
+        except Exception as e:
+            logging.error(f"Error fetching tickers: {e}")
+            return {}
 
     async def fetch_balance(self):
         try:
@@ -276,6 +302,11 @@ class MockExchange2(ExchangeInterface2):
         if self.real_exchange:
             return await self.real_exchange.fetch_ticker(symbol)
         return {'last': 100.0}
+
+    async def fetch_tickers(self, symbols=None):
+        if self.real_exchange:
+            return await self.real_exchange.fetch_tickers(symbols)
+        return {}
 
     async def fetch_balance(self):
         await self._init_balance()
