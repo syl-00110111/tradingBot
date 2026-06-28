@@ -387,12 +387,17 @@ def get_signals(df, mode_config, is_scan=False):
     # For now, just checking 'ema_f' is enough to avoid full recalculation of common indicators
     # in the tight multi-technique loop.
     if needs_recalc:
+        # Ensure OHLCV columns are numeric to avoid conversion errors from object type
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns and df[col].dtype == 'object':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
         # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
         use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
         if use_acceleration:
-            close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
-            high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
-            low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
+            close_t = torch.tensor(df['close'].astype(float).values, device=device, dtype=torch.float64)
+            high_t = torch.tensor(df['high'].astype(float).values, device=device, dtype=torch.float64)
+            low_t = torch.tensor(df['low'].astype(float).values, device=device, dtype=torch.float64)
             df['ema_f'] = torch_ema(close_t, mode_config.get('ema_fast', 8)).to('cpu').numpy()
             df['ema_s'] = torch_ema(close_t, mode_config.get('ema_slow', 18)).to('cpu').numpy()
             m_val, m_sig, m_hist = torch_macd(close_t, fast=mode_config.get('macd_fast', 12), slow=mode_config.get('macd_slow', 26), signal=mode_config.get('macd_signal', 9))
@@ -482,8 +487,15 @@ def get_signals(df, mode_config, is_scan=False):
     elif strategy == 'listing_surge_proxy':
         df = strategy_listing_surge(df, mode_config)
     elif strategy == 'tema_crossover':
+        # Ensure numeric for TEMA strategy
+        if 'close' in df.columns and df['close'].dtype == 'object':
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
         df = strategy_tema_crossover(df, mode_config)
     elif strategy == 'heikin_ashi':
+        # Ensure numeric for HA strategy
+        for col in ['open', 'high', 'low', 'close']:
+            if col in df.columns and df[col].dtype == 'object':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
         df = strategy_heikin_ashi(df, mode_config)
     elif strategy == 'candle_patterns':
         df = strategy_candle_patterns(df, mode_config)
@@ -648,8 +660,8 @@ def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     # GPU-accelerated Shape Correlation
     try:
         # Convert to tensors for fast computation
-        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
-        p_vals = torch.tensor(pattern['prices'], device=device, dtype=torch.float64)
+        c_vals = torch.tensor(buffer_df['close'].astype(float).values, device=device, dtype=torch.float64)
+        p_vals = torch.tensor(np.array(pattern['prices'], dtype=float), device=device, dtype=torch.float64)
 
         # Min-max normalization on GPU
         c_min, c_max = c_vals.min(), c_vals.max()
@@ -817,7 +829,7 @@ def strategy_ichimoku(df, config):
         Updated dataframe with buy/sell signals.
     """
     ichi_result = ta.ichimoku(df['high'], df['low'], df['close'])
-    if ichi_result is not None and len(ichi_result) > 0:
+    if ichi_result is not None and len(ichi_result) > 0 and ichi_result[0] is not None:
         ichimoku = ichi_result[0]
         df['tenkan'] = ichimoku.iloc[:, 0].fillna(df['close'])
         df['kijun'] = ichimoku.iloc[:, 1].fillna(df['close'])
@@ -932,7 +944,7 @@ def strategy_donchian(df, config):
         Updated dataframe with buy/sell signals.
     """
     dc = ta.donchian(df['high'], df['low'], length=20)
-    if dc is not None:
+    if dc is not None and not dc.empty:
         df['dc_upper'] = dc.iloc[:, 0]
         df['dc_lower'] = dc.iloc[:, 2]
     else:
@@ -967,7 +979,7 @@ def strategy_stoch_rsi(df, config):
         Updated dataframe with buy/sell signals.
     """
     stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
-    if stoch is not None:
+    if stoch is not None and not stoch.empty:
         df['stoch_k'] = stoch.iloc[:, 0]
     else:
         df['stoch_k'] = 50
@@ -1087,10 +1099,10 @@ def strategy_ema_rsi_volume(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['ema_9'] = ta.ema(df['close'], length=9).fillna(df['close'])
-    df['ema_21'] = ta.ema(df['close'], length=21).fillna(df['close'])
-    df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
-    df['vol_ma'] = ta.sma(df['volume'], length=20).fillna(df['volume'])
+    ema_9 = ta.ema(df['close'], length=9); df['ema_9'] = ema_9.fillna(df['close']) if ema_9 is not None else df['close']
+    ema_21 = ta.ema(df['close'], length=21); df['ema_21'] = ema_21.fillna(df['close']) if ema_21 is not None else df['close']
+    rsi_14 = ta.rsi(df['close'], length=14); df['rsi'] = rsi_14.fillna(50) if rsi_14 is not None else 50
+    vol_ma_20 = ta.sma(df['volume'], length=20); df['vol_ma'] = vol_ma_20.fillna(df['volume']) if vol_ma_20 is not None else df['volume']
 
     df['buy_candidate'] = (df['ema_9'] > df['ema_21']) & (df['rsi'] > 50) & (df['volume'] > df['vol_ma'])
     df['sell_candidate'] = (df['ema_9'] < df['ema_21'])
@@ -1249,8 +1261,8 @@ def strategy_sentiment_momentum(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
-    df['roc'] = ta.roc(df['close'], length=10).fillna(0)
+    rsi_14 = ta.rsi(df['close'], length=14); df['rsi'] = rsi_14.fillna(50) if rsi_14 is not None else 50
+    roc_10 = ta.roc(df['close'], length=10); df['roc'] = roc_10.fillna(0) if roc_10 is not None else 0
     df['acceleration'] = df['roc'].diff().fillna(0)
 
     # Positive sentiment: Price accelerating upwards + RSI not yet overbought
@@ -1327,7 +1339,7 @@ def strategy_adx_trend(df, config):
         Updated dataframe with buy/sell signals.
     """
     adx = ta.adx(df['high'], df['low'], df['close'])
-    if adx is not None:
+    if adx is not None and not adx.empty:
         df['adx'] = adx.iloc[:, 0].fillna(0)
         df['dmp'] = adx.iloc[:, 1].fillna(0)
         df['dmn'] = adx.iloc[:, 2].fillna(0)
@@ -1365,7 +1377,7 @@ def strategy_pairs_trading(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['ma_50'] = ta.sma(df['close'], length=50).fillna(df['close'])
+    ma_50 = ta.sma(df['close'], length=50); df['ma_50'] = ma_50.fillna(df['close']) if ma_50 is not None else df['close']
     df['z_score'] = (df['close'] - df['ma_50']) / df['close'].rolling(window=50).std()
 
     df['buy_candidate'] = df['z_score'] < -2.0
@@ -1399,8 +1411,8 @@ def strategy_halving_cycle(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['ema_200'] = ta.ema(df['close'], length=200).fillna(df['close'])
-    df['ema_50'] = ta.ema(df['close'], length=50).fillna(df['close'])
+    ema_200 = ta.ema(df['close'], length=200); df['ema_200'] = ema_200.fillna(df['close']) if ema_200 is not None else df['close']
+    ema_50 = ta.ema(df['close'], length=50); df['ema_50'] = ema_50.fillna(df['close']) if ema_50 is not None else df['close']
 
     # Buy only when above 200 EMA (Bull market cycle)
     df['buy_candidate'] = (df['close'] > df['ema_200']) & (df['close'] > df['ema_50']) & (df['close'].shift(1) <= df['ema_50'].shift(1))
@@ -1435,7 +1447,7 @@ def strategy_listing_surge(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['vol_ma'] = ta.sma(df['volume'], length=50).fillna(df['volume'])
+    vol_ma_50 = ta.sma(df['volume'], length=50); df['vol_ma'] = vol_ma_50.fillna(df['volume']) if vol_ma_50 is not None else df['volume']
     df['price_std'] = df['close'].rolling(window=50).std().fillna(0)
 
     # Surge: Volume > 10x average + Price breakout
@@ -1500,7 +1512,10 @@ def strategy_sinewave(df, config):
     """
     device = config.get('device', torch.device('cpu'))
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
-        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+        # Ensure numeric for Sinewave
+        if 'close' in df.columns and df['close'].dtype == 'object':
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        close_t = torch.tensor(df['close'].astype(float).values, device=device, dtype=torch.float64)
         sine, leadsine = torch_sinewave(close_t)
         df['sine'] = sine.to('cpu').numpy()
         df['leadsine'] = leadsine.to('cpu').numpy()
@@ -1598,8 +1613,12 @@ def strategy_heikin_ashi(df, config):
         df['ha_close'] = ha_c.to('cpu').numpy()
     else:
         ha_df = ta.ha(df['open'], df['high'], df['low'], df['close'])
-        df['ha_open'] = ha_df.iloc[:, 0]; df['ha_high'] = ha_df.iloc[:, 1]
-        df['ha_low'] = ha_df.iloc[:, 2]; df['ha_close'] = ha_df.iloc[:, 3]
+        if ha_df is not None:
+            df['ha_open'] = ha_df.iloc[:, 0]; df['ha_high'] = ha_df.iloc[:, 1]
+            df['ha_low'] = ha_df.iloc[:, 2]; df['ha_close'] = ha_df.iloc[:, 3]
+        else:
+            df['ha_open'] = df['open']; df['ha_high'] = df['high']
+            df['ha_low'] = df['low']; df['ha_close'] = df['close']
 
     # Buy: Green candle (HA_Close > HA_Open) and No lower wick (HA_Low == HA_Open)
     # Using a small epsilon for float comparison
