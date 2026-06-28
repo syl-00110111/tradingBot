@@ -60,7 +60,6 @@ class WatcherManager:
 
         if not changes: return
 
-        logging.info(f"Processing {len(changes)} aggregated timeframe reschedules...")
         await self.start_global_watcher()
 
     async def start_global_watcher(self):
@@ -430,7 +429,8 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
     Single watcher task for all symbols across potentially different timeframes.
     'watch_pairs' is a list of [symbol, timeframe].
     """
-    logging.info(f"Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
+    if watcher_manager = none:
+        logging.info(f"Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
 
     while not shutdown_event.is_set():
         try:
@@ -693,7 +693,6 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             new_tf, score = await get_optimal_timeframe(exchange, symbol, config)
             config['pairs'][symbol]['_last_tf_check'] = time.time()
             if new_tf != timeframe:
-                logging.info(f"[{symbol}] Timeframe change: {timeframe} -> {new_tf}")
                 config['pairs'][symbol]['timeframe'] = new_tf
                 if watcher_manager:
                     await watcher_manager.schedule_reschedule(symbol, timeframe, new_tf)
