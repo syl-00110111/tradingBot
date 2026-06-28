@@ -212,7 +212,7 @@ class CCXTExchange2(ExchangeInterface2):
         try:
             return self.exchange.fetch_trades(symbol, limit=limit)
         except Exception as e:
-            logging.error(f"Error fetching trades for {symbol} on {self.exchange_id}: {e}");
+            logging.error(f"Error fetching trades for {symbol}: {e}");
             return []
 
     def amount_to_precision(self, symbol, amount):
