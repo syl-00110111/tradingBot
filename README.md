@@ -29,11 +29,14 @@ This bot implements strategies and logic recommended by leading empirical studie
 ---
 
 ## 📈 Supported Strategies
-The bot offers over 30 distinct strategies, categorized by market regime:
+The bot offers over 30 distinct strategies, including:
 
-- **Trend Following**: `ichimoku_cloud`, `parabolic_sar`, `vwap_momentum`, `renko_proxy`, `ema_rsi_volume`, `mc_momentum`, `adx_trend_strength`, `halving_cycle_proxy`, `tema_crossover`, `heikin_ashi`, `donchian_channels`.
-- **Mean Reversion**: `bollinger_bands`, `stochastic_rsi`, `williams_r`, `mc_mean_reversion`, `mc_market_making`, `pairs_trading_proxy`, `sinewave_cycle`.
-- **Specialized Proxies & Others**: `mc_dynamic_allocation`, `mc_stop_loss_eval`, `mc_options_pricing`, `whale_detection_proxy`, `pump_dump_proxy`, `scientific_ensemble`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`, `listing_surge_proxy`, `candle_patterns`.
+- **Trend Following**: `ichimoku_cloud`, `parabolic_sar`, `adx_trend_strength`, `halving_cycle_proxy`.
+- **Mean Reversion & Range**: `bollinger_bands`, `rsi_support_resistance`, `pairs_trading_proxy`.
+- **Breakout & Momentum**: `breakout_volume`, `donchian_channels`, `atr_breakout`, `stochastic_rsi`, `williams_r`, `vwap_momentum`.
+- **Scalping & Order Flow**: `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`.
+- **Advanced Proxies**: `scientific_ensemble`, `whale_detection_proxy`, `pump_dump_proxy`, `market_regime_proxy`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`.
+- **Monte Carlo Engines**: `mc_mean_reversion`, `mc_momentum`, `mc_dynamic_allocation`, `mc_market_making`, `mc_stop_loss_eval`.
 
 ---
 
@@ -44,18 +47,37 @@ Main parameters of the bot.
 
 *   **`max_lots_per_symbol`**: (int) Maximum number of buy lots allowed per symbol (default: `1`).
 *   **`max_open_positions`**: (int) Maximum number of distinct trading pairs open simultaneously (default: `10`).
-*   **`max_trade_percentage`**: (float | object) Maximum percentage of your total balance to expose per symbol (total of all lots) (default: `10.0`).
+*   **`max_trade_percentage`**: (float | object) Maximum percentage of your total balance to expose per symbol (total of all lots) (default: `10`).
+*   * Warning: The default is TEN percent, which can be significant! Check your options before launching!
+*   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
     ```json
     "max_trade_percentage": {
         "BTC": 5.0,
         "USDT": 12.0,
-        "default": 10.0
+        "USDC": 10.0,
+        "default": 12.0
     }
     ```
 *   **`global_risk_multiplier`**: (float) Multiplier for position sizing and technical confirmations (default: `1.1`).
 *   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `2.0`).
 *   **`max_analysis_workers`**: (int) Number of parallel workers for technical analysis (default: `4`).
 *   **`no_signal_threshold`**: (int) Number of candles without signals before triggering background optimization (default: `48`).
+
+#### Advanced Overrides (Optional)
+*   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy for every pair.
+*   **`force_agressivity_to_all_pairs`**: (string) Force a specific aggressiveness level (e.g., `dynamic`, `normal`, `aggressive`).
+*   **`pairs`**: (Object) Allows per-pair configuration with multiple techniques.
+    Example:
+    ```json
+    "pairs": {
+        "BTC/USDC": {
+            "techniques": [
+                {"strategy": "ichimoku_cloud", "aggr": ["normal", "aggressive"]},
+                {"strategy": "bollinger_bands", "aggr": ["normal"]}
+            ]
+        }
+    }
+    ```
 
 ---
 
@@ -92,7 +114,11 @@ Store your API credentials and preferred exchange.
 
 2. Install dependencies: `pip install --upgrade -r requirements.txt`
 
-*Note: For Windows, you might need to run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`, use Python **3.13**, and install **Visual C++ 2015-2022 Redistributable (x64)**.*
+*Note: For Windows, you will need to run the command `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` for security, use Python version **3.13**, and install the **Visual C++ 2015-2022 Redistributable (x64)** which you can find here [https://aka.ms/vs/17/release/vc_redist.x64.exe] due to platform-specific dependencies.*
+
+**Regular Maintenance:**
+
+To stay up to date with API call changes: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to run the full dependency update procedure. Also, ensure your computer's **clock** is synchronized.
 
 ### Execution
 - **Live**: `python bot2.py`

@@ -756,23 +756,24 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                 return 2
             techniques = sorted(techniques, key=technique_priority)
 
-        # Filtering mechanism: only keep techniques relevant to the current regime or generic
-        filtered_techniques = []
-        for t in techniques:
+        # Filtering mechanism: Prioritize current regime or generic, but keep ALL techniques
+        # We don't want to drop user-configured strategies even if they aren't in a group.
+        def is_relevant(t):
             strat = t.get('strategy')
-            if strat in STRATEGY_GROUPS.get(market_regime, []) or strat in STRATEGY_GROUPS.get('other', []):
-                filtered_techniques.append(t)
+            return strat in STRATEGY_GROUPS.get(market_regime, []) or strat in STRATEGY_GROUPS.get('other', [])
 
-        # If everything was filtered out (unlikely but safe), fallback to all ordered
-        if not filtered_techniques:
-            filtered_techniques = techniques
+        filtered_techniques = [t for t in techniques if is_relevant(t)]
+        other_techniques = [t for t in techniques if not is_relevant(t)]
+
+        # Combine them, ensuring priority techniques are first
+        final_techniques = filtered_techniques + other_techniques
 
         buy_count = 0
         sell_count = 0
         total_score = 0
 
         tasks = []
-        for t in filtered_techniques:
+        for t in final_techniques:
             strat = t.get('strategy')
             aggr_list = t.get('aggr', ['normal'])
             if isinstance(aggr_list, str): aggr_list = [aggr_list]
