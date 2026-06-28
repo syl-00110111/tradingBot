@@ -813,17 +813,20 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
     try:
         # Check suspensions
         now_ts = time.time()
+        is_suspended = False
         if symbol in pair_suspensions:
             susp = pair_suspensions[symbol]
-            if now_ts < susp.get('until', 0): return
-            if susp.get('reason') == 'budget':
+            if now_ts < susp.get('until', 0):
+                is_suspended = True
+            elif susp.get('reason') == 'budget':
                 balance = current_balances
                 base_curr = symbol.split('/')[1]
                 free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
                 if free_bal >= susp.get('amount_required', 0) * 1.2:
                     logging.info(f"[{symbol}] Budget recovered. Resuming pair.")
                     del pair_suspensions[symbol]
-                else: return
+                else:
+                    is_suspended = True
             else:
                 del pair_suspensions[symbol]
 
@@ -956,8 +959,13 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                             bot_state[symbol]['last_strat_with_signal'] = strat
                         break # Skip remaining strategies in this group
 
-        buy_candidate = buy_count > sell_count and buy_count > 0
-        sell_candidate = sell_count > buy_count and sell_count > 0
+        # Signal Subtraction
+        diff = buy_count - sell_count
+        final_buy_count = max(0, diff)
+        final_sell_count = max(0, -diff)
+
+        buy_candidate = final_buy_count > 0
+        sell_candidate = final_sell_count > 0
 
         # Consecutive signals logic
         candle_ts = int(latest_base.name.timestamp())
@@ -969,10 +977,10 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
             if prev_ts != candle_ts:
                 if buy_candidate:
-                    consecutive_buys += 1
+                    consecutive_buys += final_buy_count
                     consecutive_sells = 0
                 elif sell_candidate:
-                    consecutive_sells += 1
+                    consecutive_sells += final_sell_count
                     consecutive_buys = 0
                 else:
                     consecutive_buys = 0
@@ -982,12 +990,30 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             bot_state[symbol]['consecutive_buys'] = consecutive_buys
             bot_state[symbol]['consecutive_sells'] = consecutive_sells
 
+        # Skipping logic for predominantly signals
+        has_position = len(data_manager.get_position(symbol)) > 0
+        if (sell_candidate and not has_position) or (buy_candidate and is_suspended):
+            async with bot_lock:
+                bot_state[symbol].update({
+                    'price': latest_base['close'],
+                    'ema_f': latest_base.get('ema_f', 0),
+                    'ema_s': latest_base.get('ema_s', 0),
+                    'rsi': latest_base.get('rsi', 0),
+                    'adx': latest_base.get('adx', 0),
+                    'volatility': latest_base.get('volatility', 0),
+                    'score': total_score,
+                    'tendency': "Bullish" if total_score > 0 else ("Bearish" if total_score < 0 else "Neutral"),
+                    'last_signal': 'Sell' if sell_candidate else 'Buy',
+                    'last_analysis_ts': time.time()
+                })
+            return
+
         # Thresholds (Stability)
         buy_signal = consecutive_buys >= 1
         sell_signal = consecutive_sells >= 1
 
         # Monte Carlo Validation
-        if buy_signal or (sell_signal and data_manager.get_position(symbol)):
+        if buy_signal or (sell_signal and has_position):
             mc = MonteCarloEngine(num_simulations=500, timeframe_candles=20)
             mc.set_device(device)
             mc_score = mc.validate_strategy(df)
