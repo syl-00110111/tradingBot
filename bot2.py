@@ -490,7 +490,7 @@ async def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 80000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 120000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -498,11 +498,11 @@ async def get_optimal_timeframe(exchange, symbol, config):
             spread = ticker['ask'] - ticker['bid']
             spread_pct = (spread / ticker['bid']) * 100
         spr_low = thresholds.get('spread_pct', {}).get('low', 0.001)
-        spr_high = thresholds.get('spread_pct', {}).get('high', 0.02)
+        spr_high = thresholds.get('spread_pct', {}).get('high', 0.04)
 
         # 3. Volatility
         volatility = 0.05
-        if ohlcv and len(ohlcv) > 0:
+        if ohlcv is not None and len(ohlcv) > 0:
             closes = [candle[4] for candle in ohlcv]
             volatility = (max(closes) - min(closes)) / min(closes)
         vlt_low = thresholds.get('volatility_pct', {}).get('low', 0.01)
@@ -533,10 +533,10 @@ async def get_optimal_timeframe(exchange, symbol, config):
         if trades_per_min > tpm_high: score += 1; reasons.append("Active")
         elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
 
-        if score >= 3: tf = '1s'
-        elif score == 2: tf = '1m'
-        elif score == 1: tf = '3m'
-        elif score == 0: tf = '5m'
+        if score >= 2: tf = '1s'
+        elif score == 1: tf = '1m'
+        elif score == 0: tf = '3m'
+        elif score == -1: tf = '5m'
         else: tf = '15m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
@@ -742,10 +742,21 @@ async def sync_live_positions(exchange, data_manager, config):
 
     logging.info(f"Syncing positions from {exchange_id} API done.")
 
+def worker_process_init():
+    import signal
+    try:
+        # Ignore SIGINT in worker processes to avoid messy KeyboardInterrupt tracebacks
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except:
+        pass
+
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
     max_workers = config.get('max_analysis_workers', 4)
     logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
-    executor = concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count() or 4)
+    executor = concurrent.futures.ProcessPoolExecutor(
+        max_workers=os.cpu_count() or 4,
+        initializer=worker_process_init
+    )
 
     async def worker():
         while not shutdown_event.is_set():
@@ -991,7 +1002,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             bot_state[symbol]['consecutive_sells'] = consecutive_sells
 
         # Skipping logic for predominantly signals
-        has_position = len(data_manager.get_position(symbol)) > 0
+        pos = data_manager.get_position(symbol)
+        has_position = pos is not None and len(pos) > 0
         if (sell_candidate and not has_position) or (buy_candidate and is_suspended):
             async with bot_lock:
                 bot_state[symbol].update({
@@ -1031,7 +1043,11 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
             if candles_since >= config.get('no_signal_threshold', 20) and symbol not in active_scans:
                 global bench_executor
-                if not bench_executor: bench_executor = concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count() or 4)
+                if not bench_executor:
+                    bench_executor = concurrent.futures.ProcessPoolExecutor(
+                        max_workers=os.cpu_count() or 4,
+                        initializer=worker_process_init
+                    )
                 task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
                                           symbol, config, timeframe, ['normal'], STRATEGIES[:10], df, engine, device)
                 active_scans[symbol] = task
@@ -1077,7 +1093,7 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config):
     async with bot_lock:
         pos = data_manager.get_position(symbol)
         max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
-        if pos and len(pos) >= max_lots: return
+        if pos is not None and len(pos) >= max_lots: return
 
     try:
         price = data['close']
