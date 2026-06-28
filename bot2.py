@@ -53,7 +53,7 @@ class WatcherManager:
                 self.aggregation_task = asyncio.create_task(self._process_reschedules())
 
     async def _process_reschedules(self):
-        await asyncio.sleep(5)  # 5-second aggregation window
+        await asyncio.sleep(30)  # 30-second aggregation window
         async with self.aggregation_lock:
             changes = self.pending_reschedules.copy()
             self.pending_reschedules.clear()
@@ -568,6 +568,14 @@ async def sync_live_positions(exchange, data_manager, config):
         else:
             logging.warning(
                 f"[{symbol}] Asset found in wallet but price unavailable.")
+
+    # Update global bot_state for dashboard
+    async with bot_lock:
+        open_positions = data_manager.get_open_positions()
+        for symbol, pos_list in open_positions.items():
+            if symbol not in bot_state:
+                bot_state[symbol] = {}
+            bot_state[symbol]['position'] = pos_list
 
     logging.info(f"Syncing positions from {exchange_id} API done.")
 
