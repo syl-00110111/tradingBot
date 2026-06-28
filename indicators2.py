@@ -1099,10 +1099,10 @@ def strategy_ema_rsi_volume(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['ema_9'] = ta.ema(df['close'], length=9).fillna(df['close'])
-    df['ema_21'] = ta.ema(df['close'], length=21).fillna(df['close'])
-    df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
-    df['vol_ma'] = ta.sma(df['volume'], length=20).fillna(df['volume'])
+    ema_9 = ta.ema(df['close'], length=9); df['ema_9'] = ema_9.fillna(df['close']) if ema_9 is not None else df['close']
+    ema_21 = ta.ema(df['close'], length=21); df['ema_21'] = ema_21.fillna(df['close']) if ema_21 is not None else df['close']
+    rsi_14 = ta.rsi(df['close'], length=14); df['rsi'] = rsi_14.fillna(50) if rsi_14 is not None else 50
+    vol_ma_20 = ta.sma(df['volume'], length=20); df['vol_ma'] = vol_ma_20.fillna(df['volume']) if vol_ma_20 is not None else df['volume']
 
     df['buy_candidate'] = (df['ema_9'] > df['ema_21']) & (df['rsi'] > 50) & (df['volume'] > df['vol_ma'])
     df['sell_candidate'] = (df['ema_9'] < df['ema_21'])
@@ -1261,8 +1261,8 @@ def strategy_sentiment_momentum(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['rsi'] = ta.rsi(df['close'], length=14).fillna(50)
-    df['roc'] = ta.roc(df['close'], length=10).fillna(0)
+    rsi_14 = ta.rsi(df['close'], length=14); df['rsi'] = rsi_14.fillna(50) if rsi_14 is not None else 50
+    roc_10 = ta.roc(df['close'], length=10); df['roc'] = roc_10.fillna(0) if roc_10 is not None else 0
     df['acceleration'] = df['roc'].diff().fillna(0)
 
     # Positive sentiment: Price accelerating upwards + RSI not yet overbought
@@ -1377,7 +1377,7 @@ def strategy_pairs_trading(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['ma_50'] = ta.sma(df['close'], length=50).fillna(df['close'])
+    ma_50 = ta.sma(df['close'], length=50); df['ma_50'] = ma_50.fillna(df['close']) if ma_50 is not None else df['close']
     df['z_score'] = (df['close'] - df['ma_50']) / df['close'].rolling(window=50).std()
 
     df['buy_candidate'] = df['z_score'] < -2.0
@@ -1411,8 +1411,8 @@ def strategy_halving_cycle(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['ema_200'] = ta.ema(df['close'], length=200).fillna(df['close'])
-    df['ema_50'] = ta.ema(df['close'], length=50).fillna(df['close'])
+    ema_200 = ta.ema(df['close'], length=200); df['ema_200'] = ema_200.fillna(df['close']) if ema_200 is not None else df['close']
+    ema_50 = ta.ema(df['close'], length=50); df['ema_50'] = ema_50.fillna(df['close']) if ema_50 is not None else df['close']
 
     # Buy only when above 200 EMA (Bull market cycle)
     df['buy_candidate'] = (df['close'] > df['ema_200']) & (df['close'] > df['ema_50']) & (df['close'].shift(1) <= df['ema_50'].shift(1))
@@ -1447,7 +1447,7 @@ def strategy_listing_surge(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['vol_ma'] = ta.sma(df['volume'], length=50).fillna(df['volume'])
+    vol_ma_50 = ta.sma(df['volume'], length=50); df['vol_ma'] = vol_ma_50.fillna(df['volume']) if vol_ma_50 is not None else df['volume']
     df['price_std'] = df['close'].rolling(window=50).std().fillna(0)
 
     # Surge: Volume > 10x average + Price breakout
