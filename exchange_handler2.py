@@ -21,6 +21,7 @@ class ExchangeInterface2:
     async def load_markets(self): raise NotImplementedError
     async def fetch_trading_fee(self, symbol): raise NotImplementedError
     async def fetch_my_trades(self, symbol, limit=10): raise NotImplementedError
+    async def fetch_trades(self, symbol, limit=100): raise NotImplementedError
     def amount_to_precision(self, symbol, amount): raise NotImplementedError
     def price_to_precision(self, symbol, price): raise NotImplementedError
     async def close(self): raise NotImplementedError
@@ -205,6 +206,13 @@ class CCXTExchange2(ExchangeInterface2):
             return await self.exchange.fetch_my_trades(symbol, limit=limit)
         except Exception as e:
             logging.error(f"Error fetching my trades for {symbol}: {e}")
+            return []
+
+    async def fetch_trades(self, symbol, limit=100):
+        try:
+            return self.exchange.fetch_trades(symbol, limit=limit)
+        except Exception as e:
+            logging.error(f"Error fetching trades for {symbol} on {self.exchange_id}: {e}");
             return []
 
     def amount_to_precision(self, symbol, amount):
