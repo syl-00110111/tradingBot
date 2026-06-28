@@ -12,6 +12,8 @@ import sys
 import platform
 import random
 import math
+import threading
+import queue
 import pandas as pd
 import torch
 import concurrent.futures
@@ -114,28 +116,47 @@ def handle_stop_signal(sig=None, frame=None):
         os._exit(1)
     shutdown_event.set()
 
+# Sound Queue and Worker for non-blocking audio
+sound_queue = queue.Queue()
+
+def sound_worker():
+    while True:
+        try:
+            item = sound_queue.get()
+            if item is None: break
+            action, config = item
+
+            system = platform.system().lower()
+            if system == "windows":
+                import winsound
+                if action == "startup":
+                    for _ in range(5):
+                        winsound.Beep(random.randint(440, 880), 100)
+                elif action == "buy":
+                    # Use MessageBeep for better compatibility with sound cards
+                    winsound.MessageBeep(winsound.MB_OK)
+                    # Also try Beep as fallback/extra
+                    winsound.Beep(1000, 250)
+                elif action == "sell":
+                    winsound.MessageBeep(winsound.MB_ICONHAND)
+                    winsound.Beep(600, 250)
+            else:
+                if action == "startup":
+                    sys.stdout.write("\a")
+                elif action == "buy":
+                    sys.stdout.write("\a")
+                elif action == "sell":
+                    sys.stdout.write("\a\a")
+                sys.stdout.flush()
+            sound_queue.task_done()
+        except Exception:
+            pass
+
+# Start the dedicated sound thread
+threading.Thread(target=sound_worker, daemon=True).start()
+
 def play_sound(action, config=None):
-    system = platform.system().lower()
-    try:
-        if system == "windows":
-            import winsound
-            if action == "startup":
-                num_blips = 5
-                for _ in range(num_blips):
-                    freq = random.randint(200, 1400)
-                    dur = random.randint(50, 400)
-                    winsound.Beep(freq, dur)
-                return
-            frequency = 800 if action == "buy" else 1800
-            winsound.Beep(frequency, 240)
-        else:
-            if action == "startup":
-                sys.stdout.write("\a"); sys.stdout.flush()
-                return
-            bell_char = "\a" if action == "buy" else "\a\a"
-            sys.stdout.write(bell_char)
-            sys.stdout.flush()
-    except Exception: pass
+    sound_queue.put((action, config))
 
 # State shared between tasks
 bot_state = {}
@@ -378,19 +399,37 @@ async def input_task(config):
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
                     logs_pause_until = time.time() + 30
             elif key == readchar.key.PAGE_UP:
-                if focused_panel == "logs":
+                if focused_panel == "pairs":
+                    selected_pair_index = max(0, selected_pair_index - pairs_height)
+                    pairs_scroll_offset = max(0, pairs_scroll_offset - pairs_height)
+                    pairs_pause_until = time.time() + 5
+                elif focused_panel == "logs":
                     logs_scroll_offset += 10
                     logs_pause_until = time.time() + 30
             elif key == readchar.key.PAGE_DOWN:
-                if focused_panel == "logs":
+                if focused_panel == "pairs":
+                    max_pairs_offset = max(0, len(all_pairs) - pairs_height)
+                    selected_pair_index = min(len(all_pairs) - 1, selected_pair_index + pairs_height)
+                    pairs_scroll_offset = min(max_pairs_offset, pairs_scroll_offset + pairs_height)
+                    pairs_pause_until = time.time() + 5
+                elif focused_panel == "logs":
                     logs_scroll_offset = max(0, logs_scroll_offset - 10)
                     logs_pause_until = time.time() + 30
             elif key == readchar.key.HOME:
-                if focused_panel == "logs":
+                if focused_panel == "pairs":
+                    selected_pair_index = 0
+                    pairs_scroll_offset = 0
+                    pairs_pause_until = time.time() + 5
+                elif focused_panel == "logs":
                     logs_scroll_offset = max(0, len(all_logs) - 8) # 8 is log_height
                     logs_pause_until = time.time() + 30
             elif key == readchar.key.END:
-                if focused_panel == "logs":
+                if focused_panel == "pairs":
+                    max_pairs_offset = max(0, len(all_pairs) - pairs_height)
+                    selected_pair_index = len(all_pairs) - 1
+                    pairs_scroll_offset = max_pairs_offset
+                    pairs_pause_until = time.time() + 5
+                elif focused_panel == "logs":
                     logs_scroll_offset = 0
                     logs_pause_until = time.time() + 30
             elif key.lower() == 'x':
@@ -768,29 +807,70 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         # Combine them, ensuring priority techniques are first
         final_techniques = filtered_techniques + other_techniques
 
+        # Group techniques by their STRATEGY_GROUPS category
+        grouped_techniques = {}
+        for t in final_techniques:
+            strat = t.get('strategy')
+            found_group = 'other'
+            for gname, strats in STRATEGY_GROUPS.items():
+                if strat in strats:
+                    found_group = gname
+                    break
+            if found_group not in grouped_techniques:
+                grouped_techniques[found_group] = []
+            grouped_techniques[found_group].append(t)
+
+        ordered_groups = [market_regime]
+        other_regime = 'trend_following' if market_regime == 'mean_reversion' else 'mean_reversion'
+        if 'other' in grouped_techniques: ordered_groups.append('other')
+        if other_regime in grouped_techniques: ordered_groups.append(other_regime)
+        for gname in grouped_techniques:
+            if gname not in ordered_groups: ordered_groups.append(gname)
+
         buy_count = 0
         sell_count = 0
         total_score = 0
 
-        tasks = []
-        for t in final_techniques:
-            strat = t.get('strategy')
-            aggr_list = t.get('aggr', ['normal'])
-            if isinstance(aggr_list, str): aggr_list = [aggr_list]
-            for a in aggr_list:
-                mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
-                mode_settings['strategy'] = strat
-                mode_settings['device'] = device
-                tasks.append(loop.run_in_executor(executor, get_signals, df.copy(), mode_settings))
+        for gname in ordered_groups:
+            if gname not in grouped_techniques: continue
 
-        if tasks:
-            done_results = await asyncio.gather(*tasks)
-            for res_df in done_results:
-                if res_df.empty: continue
-                latest = res_df.iloc[-1]
-                total_score += latest.get('score', 0)
-                if latest.get('buy_signal'): buy_count += 1
-                if latest.get('sell_signal'): sell_count += 1
+            group_signal_found = False
+            for t in grouped_techniques[gname]:
+                strat = t.get('strategy')
+
+                async with bot_lock:
+                    bot_state[symbol]['strategy'] = strat
+
+                aggr_list = t.get('aggr', ['normal'])
+                if isinstance(aggr_list, str): aggr_list = [aggr_list]
+
+                strat_tasks = []
+                for a in aggr_list:
+                    mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
+                    mode_settings['strategy'] = strat
+                    mode_settings['device'] = device
+                    strat_tasks.append(loop.run_in_executor(executor, get_signals, df.copy(), mode_settings))
+
+                if strat_tasks:
+                    done_results = await asyncio.gather(*strat_tasks)
+                    strat_buy = False
+                    strat_sell = False
+                    for res_df in done_results:
+                        if res_df.empty: continue
+                        latest = res_df.iloc[-1]
+                        total_score += latest.get('score', 0)
+                        if latest.get('buy_signal'):
+                            buy_count += 1
+                            strat_buy = True
+                        if latest.get('sell_signal'):
+                            sell_count += 1
+                            strat_sell = True
+
+                    if strat_buy or strat_sell:
+                        group_signal_found = True
+                        async with bot_lock:
+                            bot_state[symbol]['last_strat_with_signal'] = strat
+                        break # Skip remaining strategies in this group
 
         buy_candidate = buy_count > sell_count and buy_count > 0
         sell_candidate = sell_count > buy_count and sell_count > 0
@@ -1132,6 +1212,8 @@ def make_dashboard(config):
         macd_hist = data.get('macd_hist', 0)
         macd_str = f"{macd_hist:.4e}" if abs(macd_hist) < 0.001 else f"{macd_hist:.4f}"
 
+        display_strat = data.get('last_strat_with_signal') or data.get('strategy') or config.get('pairs', {}).get(symbol, {}).get('strategy', 'N/A')
+
         if expert_mode:
             row_vals = [
                 symbol, tf,
@@ -1142,10 +1224,9 @@ def make_dashboard(config):
                 str(data.get('score', 0)),
                 f"{data.get('expected_profit', 0):.4f}",
                 data.get('aggr', 'N/A'),
-                data.get('strategy', 'N/A')
+                str(display_strat)
             ]
         else:
-            strat = config.get('pairs', {}).get(symbol, {}).get('strategy', 'tema')
             row_vals = [
                 symbol, tf,
                 format_price(data.get('price')),
@@ -1154,14 +1235,8 @@ def make_dashboard(config):
                 data.get('tendency', 'Neutral'),
                 f"[{sig_style}]{current_signal}[/]",
                 data.get('aggr', 'N/A'),
-                f"[bold cyan]{strat}[/]"
+                f"[bold cyan]{display_strat}[/]"
             ]
-
-        # Rolling effect for strategy display (if multiple)
-        strats = data.get('strategies')
-        if strats and len(strats) > 1:
-            strat_idx = int(time.time() / 2) % len(strats)
-            row_vals[-1] = f"[bold cyan]{strats[strat_idx]}[/]"
 
         table.add_row(*row_vals, style=row_style)
 
