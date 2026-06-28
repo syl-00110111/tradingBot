@@ -72,11 +72,8 @@ class WatcherManager:
         if self.global_watcher and not self.global_watcher.done():
             self.global_watcher.cancel()
 
-        # Build list of [symbol, timeframe] for all pairs
-        watch_pairs = []
-        for s in self.config['pairs']:
-            tf = self.config['pairs'][s].get('timeframe', '1m')
-            watch_pairs.append([s, tf])
+        # All symbols managed via a single WebSocket connection at 1s interval
+        watch_pairs = [[s, '1s'] for s in self.config['pairs']]
 
         self.global_watcher = asyncio.create_task(watch_ohlcv_global_task(self.exchange, watch_pairs, self.config))
 
@@ -282,25 +279,28 @@ def format_amt(amt, precision=None):
 def render_ascii_chart(symbol, config):
     global chart_cache
 
-    async def get_df():
-        async with ohlcv_lock:
-            if symbol in ohlcv_cache:
-                return ohlcv_cache[symbol].copy()
-        return None
+    # We always use the 1s cache now
+    df_1s = None
+    cache_key_1s = f"{symbol}_1s"
+    if cache_key_1s in ohlcv_cache:
+        df_1s = ohlcv_cache[cache_key_1s]
 
-    # This is a bit tricky because render_ascii_chart is called from make_dashboard which is sync
-    # We'll use the cache or return a message if not ready.
-    # In bot2.py, we'll try to keep it simple.
-
-    df = None
-    # Corrected lookup for adaptive cache keys:
-    timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1s')
-    cache_key = f"{symbol}_{timeframe}"
-    if cache_key in ohlcv_cache:
-        df = ohlcv_cache[cache_key]
-
-    if df is None or df.empty:
+    if df_1s is None or df_1s.empty:
         return Text(f"No data available for {symbol}", style="bold red")
+
+    timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+
+    if timeframe != '1s':
+        pd_tf = timeframe.replace('m', 'min')
+        df = df_1s.resample(pd_tf).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+    else:
+        df = df_1s
 
     df = df.tail(100)
     last_ts = int(df.index[-1].timestamp())
@@ -585,7 +585,8 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                         for col in ['open', 'high', 'low', 'close', 'volume']:
                             new_df[col] = pd.to_numeric(new_df[col], errors='coerce')
                         new_df.set_index('timestamp', inplace=True)
-                        df = pd.concat([df, new_df]).tail(1000)
+                        # Maintain a larger history for 1s candles (5000)
+                        df = pd.concat([df, new_df]).tail(5000)
 
                         ohlcv_cache[cache_key] = df
                         async with bot_lock:
@@ -595,14 +596,15 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                 async with analysis_tracking_lock:
                     if symbol not in analysis_set:
                         last_anal = 0
+                        assigned_tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
                         async with bot_lock:
                             if symbol in bot_state:
                                 last_anal = bot_state[symbol].get('last_analysis_ts', 0)
 
-                        # Schedule analysis only if the timeframe interval has passed
-                        interval = TIMEFRAME_SECONDS.get(timeframe, 60)
+                        # Schedule analysis only if the assigned timeframe interval has passed
+                        interval = TIMEFRAME_SECONDS.get(assigned_tf, 60)
                         if time.time() - last_anal >= interval:
-                            await analysis_queue.put((last_anal, (symbol, timeframe)))
+                            await analysis_queue.put((last_anal, (symbol, assigned_tf)))
                             analysis_set.add(symbol)
         except Exception as e:
             if not shutdown_event.is_set():
@@ -841,12 +843,32 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             else:
                 del pair_suspensions[symbol]
 
-        cache_key = f"{symbol}_{timeframe}"
+        # All symbols are managed via 1s WebSocket, so we always pull from 1s cache
+        cache_key_1s = f"{symbol}_1s"
         async with ohlcv_lock:
-            if cache_key not in ohlcv_cache: return
-            df = ohlcv_cache[cache_key].copy()
+            if cache_key_1s not in ohlcv_cache: return
+            df_1s = ohlcv_cache[cache_key_1s].copy()
 
-        if df.empty or len(df) < 20: return
+        if df_1s.empty or len(df_1s) < 20: return
+
+        # Calculations must remain aligned with the assigned timeframe
+        if timeframe != '1s':
+            # Resample 1s data to assigned timeframe
+            # Note: timeframe is '1m', '3m', etc. Pandas understands these.
+            # Using 'min' instead of 'm' for pandas compatibility if needed,
+            # but usually '1T' or '1min' is safest. Bot uses '1m', '3m' etc.
+            pd_tf = timeframe.replace('m', 'min').replace('s', 's')
+            df = df_1s.resample(pd_tf).agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
+        else:
+            df = df_1s
+
+        if len(df) < 20: return
 
         loop = asyncio.get_event_loop()
 
@@ -1578,8 +1600,8 @@ async def main():
     if args.fast_start:
         logging.info("[bold yellow]Fast start enabled: Skipping initial candles fetch.")
         for symbol in pairs:
-            tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
-            ohlcv_cache[f"{symbol}_{tf}"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+            # Always initialize 1s cache regardless of assigned timeframe
+            ohlcv_cache[f"{symbol}_1s"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
     else:
         logging.info(f"[bold cyan]Fetching initial candles for {len(pairs)} pairs...")
         semaphore = asyncio.Semaphore(5)
@@ -1587,25 +1609,27 @@ async def main():
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
-                    logging.info(f"Fetching candles for {symbol} ({tf})...")
-                    ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=500)
+                    # Initial candles must correspond to the one-second timeframe (limit 2000)
+                    tf = '1s'
+                    logging.info(f"Fetching initial 1s candles for {symbol}...")
+                    ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=2000)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     for col in ['open', 'high', 'low', 'close', 'volume']:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.set_index('timestamp', inplace=True)
                     ohlcv_cache[f"{symbol}_{tf}"] = df
-                    logging.info(f"[{symbol}] Loaded {len(df)} candles.")
+                    logging.info(f"[{symbol}] Loaded {len(df)} candles (1s).")
                 except Exception as e:
                     logging.error(f"Failed to load candles for {symbol}: {e}")
-                    ohlcv_cache[f"{symbol}_{tf}"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    ohlcv_cache[f"{symbol}_1s"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
     # Seed analysis queue with initial pairs (priority 0)
     async with analysis_tracking_lock:
         for symbol in pairs:
+            # We still analyze based on assigned timeframe
             tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
             await analysis_queue.put((0, (symbol, tf)))
             analysis_set.add(symbol)
@@ -1650,6 +1674,10 @@ async def main():
     await asyncio.sleep(4)
     startup_complete = True
     logging.info("[bold green]Bot v2 fully operational.")
+
+    # Trigger initial chart and display update
+    # In rich Live, the dashboard is already refreshing at 4Hz.
+    # We just need to make sure the data is there.
 
     # Signal handling for graceful shutdown
     loop = asyncio.get_running_loop()
