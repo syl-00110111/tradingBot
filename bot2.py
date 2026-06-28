@@ -939,7 +939,7 @@ def get_sorted_symbols(config):
     )
     return all_pairs
 
-def make_dashboard(mode, config):
+def make_dashboard(config):
     now = datetime.now()
     now_ts = time.time()
     global status_scroll_index, pairs_scroll_offset, logs_scroll_offset
@@ -1109,7 +1109,7 @@ def make_dashboard(mode, config):
 
     # 3. Status Bar
     status_text = Text()
-    status_text.append(f"Update: {now.strftime('%H:%M:%S')} | Mode: {mode.upper()} | ", style="bold brown")
+    status_text.append(f"Update: {now.strftime('%H:%M:%S')} | ", style="bold brown")
     status_text.append("TAB: Switch | Arrows: Scroll | H: Help | X: Expert | M: Marquee | Exit: Ctrl+C", style="bold red")
 
     display_width = console.width - 4
@@ -1155,13 +1155,13 @@ def make_dashboard(mode, config):
     )
     return layout
 
-async def run_dashboard(mode, config):
+async def run_dashboard(config):
     try:
         # Start Live immediately but without screen=True to allow startup logs to be visible
         # or use a simplified layout during startup.
-        with Live(make_dashboard(mode, config), refresh_per_second=4, screen=False) as live:
+        with Live(make_dashboard(config), refresh_per_second=4, screen=False) as live:
             while not startup_complete and not shutdown_event.is_set():
-                live.update(make_dashboard(mode, config))
+                live.update(make_dashboard(config))
                 await asyncio.sleep(0.5)
 
             # Switch to screen mode once startup is complete
@@ -1170,9 +1170,9 @@ async def run_dashboard(mode, config):
 
         if shutdown_event.is_set(): return
 
-        with Live(make_dashboard(mode, config), refresh_per_second=4, screen=True) as live:
+        with Live(make_dashboard(config), refresh_per_second=4, screen=True) as live:
             while not shutdown_event.is_set():
-                live.update(make_dashboard(mode, config))
+                live.update(make_dashboard(config))
                 await asyncio.sleep(0.25)
     except asyncio.CancelledError:
         pass
@@ -1268,7 +1268,7 @@ async def main():
 
     # Start UI task
     global ui_task, background_tasks, startup_complete
-    ui_task = asyncio.create_task(run_dashboard(mode, config))
+    ui_task = asyncio.create_task(run_dashboard(config))
 
     # Initial Batch
     for symbol in pairs:
