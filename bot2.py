@@ -317,6 +317,9 @@ async def input_task(config):
     while not shutdown_event.is_set():
         try:
             loop = asyncio.get_event_loop()
+            # Wrap in wait_for to allow checking shutdown_event periodically
+            # if readkey blocks in a way that doesn't respect cancellation on some platforms.
+            # However, run_in_executor usually can't be cancelled easily.
             key = await loop.run_in_executor(None, readchar.readkey)
 
             if key == readchar.key.CTRL_C:
@@ -366,6 +369,8 @@ async def input_task(config):
                     chart_symbol = all_pairs[selected_pair_index]
                     show_chart = True
 
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            break
         except Exception as e:
             logging.error(f"Input error: {e}")
         await asyncio.sleep(0.1)
@@ -1169,6 +1174,8 @@ async def run_dashboard(mode, config):
             while not shutdown_event.is_set():
                 live.update(make_dashboard(mode, config))
                 await asyncio.sleep(0.25)
+    except asyncio.CancelledError:
+        pass
     except Exception as e:
         logging.info(f"[red]Dashboard error: {e}")
 
@@ -1527,15 +1534,36 @@ async def main():
 
     try:
         await shutdown_event.wait()
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass
     except Exception as e:
         logging.error(f"Main loop error: {e}")
     finally:
         shutdown_event.set()
-        for t in background_tasks: t.cancel()
-        if ui_task: ui_task.cancel()
+        logging.info("Shutting down... cancelling tasks.")
+
+        # Cancel all background tasks
+        all_tasks = background_tasks.copy()
+        if ui_task: all_tasks.append(ui_task)
+        if watcher_manager and watcher_manager.global_watcher:
+            all_tasks.append(watcher_manager.global_watcher)
+        if watcher_manager and watcher_manager.aggregation_task:
+            all_tasks.append(watcher_manager.aggregation_task)
+
+        for t in all_tasks: t.cancel()
+
+        # Wait for tasks to finish (with timeout)
+        if all_tasks:
+            try:
+                await asyncio.wait(all_tasks, timeout=3)
+            except: pass
+
         global bench_executor
         if bench_executor: bench_executor.shutdown(wait=False)
-        await exchange.close()
+
+        try:
+            await exchange.close()
+        except: pass
 
         # Clear screen and show final logs
         console.clear()
