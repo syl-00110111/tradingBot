@@ -106,6 +106,7 @@ bench_executor = None
 
 # Global UI Constants
 MAX_STRAT_LEN = max(len(s) for s in STRATEGIES) if STRATEGIES else 20
+TIMEFRAME_SECONDS = {'1s': 1, '1m': 60, '3m': 180, '5m': 300, '15m': 900}
 
 # Marquee Timing Control
 last_marquee_update = 0
@@ -489,7 +490,7 @@ async def get_optimal_timeframe(exchange, symbol, config):
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
         vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 120000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 80000)
 
         # 2. Spread
         spread_pct = 0.5
@@ -497,7 +498,7 @@ async def get_optimal_timeframe(exchange, symbol, config):
             spread = ticker['ask'] - ticker['bid']
             spread_pct = (spread / ticker['bid']) * 100
         spr_low = thresholds.get('spread_pct', {}).get('low', 0.001)
-        spr_high = thresholds.get('spread_pct', {}).get('high', 0.04)
+        spr_high = thresholds.get('spread_pct', {}).get('high', 0.02)
 
         # 3. Volatility
         volatility = 0.05
@@ -597,8 +598,12 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                         async with bot_lock:
                             if symbol in bot_state:
                                 last_anal = bot_state[symbol].get('last_analysis_ts', 0)
-                        await analysis_queue.put((last_anal, (symbol, timeframe)))
-                        analysis_set.add(symbol)
+
+                        # Schedule analysis only if the timeframe interval has passed
+                        interval = TIMEFRAME_SECONDS.get(timeframe, 60)
+                        if time.time() - last_anal >= interval:
+                            await analysis_queue.put((last_anal, (symbol, timeframe)))
+                            analysis_set.add(symbol)
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"WebSocket OHLCV reconnection error: {e}")
