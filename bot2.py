@@ -105,6 +105,14 @@ last_marquee_update = 0
 pairs_pause_until = 0
 logs_pause_until = 0
 status_scroll_index = 0
+ctrl_c_count = 0
+
+def handle_stop_signal(sig=None, frame=None):
+    global ctrl_c_count
+    ctrl_c_count += 1
+    if ctrl_c_count > 1:
+        os._exit(1)
+    shutdown_event.set()
 
 def play_sound(action, config=None):
     system = platform.system().lower()
@@ -158,7 +166,7 @@ class AsyncDashboardHandler(logging.Handler):
                     log['expiry'] = expiry
                     return
 
-        if "Bot v2 fully operational." in msg:
+        if "Bot v2 fully operational." in msg or "[bold green]Bot v2 fully operational." in msg:
             for log in all_logs:
                 if "Waiting for system initialization..." in log['msg']:
                     log['msg'] = msg
@@ -318,13 +326,23 @@ async def input_task(config):
     while not shutdown_event.is_set():
         try:
             loop = asyncio.get_event_loop()
-            # Wrap in wait_for to allow checking shutdown_event periodically
-            # if readkey blocks in a way that doesn't respect cancellation on some platforms.
-            # However, run_in_executor usually can't be cancelled easily.
+
+            # Use non-blocking check for stdin if possible to remain responsive to shutdown_event
+            system = platform.system().lower()
+            if system == "windows":
+                import msvcrt
+                if not msvcrt.kbhit():
+                    await asyncio.sleep(0.1)
+                    continue
+            else:
+                import select
+                if not select.select([sys.stdin], [], [], 0.5)[0]:
+                    continue
+
             key = await loop.run_in_executor(None, readchar.readkey)
 
-            if key == readchar.key.CTRL_C:
-                shutdown_event.set()
+            if key == readchar.key.CTRL_C or key == '\x03':
+                handle_stop_signal()
                 break
 
             if not startup_complete: continue
@@ -432,7 +450,7 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
     'watch_pairs' is a list of [symbol, timeframe].
     """
     if not watcher_manager._startup_message_shown:
-        logging.info(f"Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
+        logging.info(f"[bold cyan]Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
         watcher_manager._startup_message_shown = True
 
     while not shutdown_event.is_set():
@@ -613,7 +631,7 @@ async def sync_live_positions(exchange, data_manager, config):
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
     max_workers = config.get('max_analysis_workers', 4)
     logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count() or 4)
 
     async def worker():
         while not shutdown_event.is_set():
@@ -1376,21 +1394,23 @@ async def main():
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(4)
     startup_complete = True
-    logging.info("Bot v2 fully operational.")
+    logging.info("[bold green]Bot v2 fully operational.")
 
     # Signal handling for graceful shutdown
     loop = asyncio.get_running_loop()
     if platform.system().lower() != 'windows':
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(sig, lambda: shutdown_event.set())
+                loop.add_signal_handler(sig, handle_stop_signal)
             except NotImplementedError:
                 pass
+    else:
+        signal.signal(signal.SIGINT, handle_stop_signal)
 
     try:
         await shutdown_event.wait()
     except (asyncio.CancelledError, KeyboardInterrupt):
-        shutdown_event.set()
+        handle_stop_signal()
     except Exception as e:
         logging.error(f"Main loop error: {e}")
     finally:
@@ -1403,10 +1423,8 @@ async def main():
         # Cancel UI task first to restore terminal sooner
         if ui_task:
             ui_task.cancel()
-            try:
-                await asyncio.wait_for(ui_task, timeout=2)
-            except:
-                pass
+            # No await here, we want to proceed with other cancellations
+            # and the final console.clear() as fast as possible.
 
         if watcher_manager and watcher_manager.global_watcher:
             all_tasks.append(watcher_manager.global_watcher)
@@ -1440,7 +1458,7 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     except Exception as e:
         # Final emergency log
