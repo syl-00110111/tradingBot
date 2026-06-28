@@ -37,8 +37,10 @@ from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
 
-# Analysis Queue
-analysis_queue = asyncio.Queue()
+# Analysis Queue and Tracking
+analysis_queue = asyncio.PriorityQueue()
+analysis_set = set()
+analysis_tracking_lock = asyncio.Lock()
 
 class WatcherManager:
     def __init__(self, exchange, config):
@@ -531,7 +533,14 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                             if symbol in bot_state:
                                 bot_state[symbol]['price'] = candles[-1][4]
 
-                await analysis_queue.put((symbol, timeframe))
+                async with analysis_tracking_lock:
+                    if symbol not in analysis_set:
+                        last_anal = 0
+                        async with bot_lock:
+                            if symbol in bot_state:
+                                last_anal = bot_state[symbol].get('last_analysis_ts', 0)
+                        await analysis_queue.put((last_anal, (symbol, timeframe)))
+                        analysis_set.add(symbol)
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"WebSocket OHLCV reconnection error: {e}")
@@ -679,8 +688,14 @@ async def dedicated_analysis_task(exchange, config, data_manager, pattern_manage
         while not shutdown_event.is_set():
             symbol, timeframe = None, None
             try:
-                symbol, timeframe = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
+                priority, (symbol, timeframe) = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
                 await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor)
+
+                # Update last analysis timestamp
+                async with bot_lock:
+                    if symbol in bot_state:
+                        bot_state[symbol]['last_analysis_ts'] = time.time()
+
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -689,6 +704,9 @@ async def dedicated_analysis_task(exchange, config, data_manager, pattern_manage
                 logging.error(f"Error in analysis worker: {e}")
             finally:
                 if symbol:
+                    async with analysis_tracking_lock:
+                        if symbol in analysis_set:
+                            analysis_set.remove(symbol)
                     analysis_queue.task_done()
 
     try:
@@ -1433,7 +1451,8 @@ async def main():
             'ema_s': 0,
             'adx': 0,
             'volatility': 0,
-            'expected_profit': 0
+            'expected_profit': 0,
+            'last_analysis_ts': 0
         }
 
     if args.fast_start:
@@ -1463,6 +1482,13 @@ async def main():
                     ohlcv_cache[f"{symbol}_{tf}"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
+
+    # Seed analysis queue with initial pairs (priority 0)
+    async with analysis_tracking_lock:
+        for symbol in pairs:
+            tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
+            await analysis_queue.put((0, (symbol, tf)))
+            analysis_set.add(symbol)
 
     # Start WebSocket Tasks
     logging.info("[bold green]Starting WebSocket tasks...")
