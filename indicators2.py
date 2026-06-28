@@ -829,7 +829,7 @@ def strategy_ichimoku(df, config):
         Updated dataframe with buy/sell signals.
     """
     ichi_result = ta.ichimoku(df['high'], df['low'], df['close'])
-    if ichi_result is not None and len(ichi_result) > 0:
+    if ichi_result is not None and len(ichi_result) > 0 and ichi_result[0] is not None:
         ichimoku = ichi_result[0]
         df['tenkan'] = ichimoku.iloc[:, 0].fillna(df['close'])
         df['kijun'] = ichimoku.iloc[:, 1].fillna(df['close'])
@@ -944,7 +944,7 @@ def strategy_donchian(df, config):
         Updated dataframe with buy/sell signals.
     """
     dc = ta.donchian(df['high'], df['low'], length=20)
-    if dc is not None:
+    if dc is not None and not dc.empty:
         df['dc_upper'] = dc.iloc[:, 0]
         df['dc_lower'] = dc.iloc[:, 2]
     else:
@@ -979,7 +979,7 @@ def strategy_stoch_rsi(df, config):
         Updated dataframe with buy/sell signals.
     """
     stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
-    if stoch is not None:
+    if stoch is not None and not stoch.empty:
         df['stoch_k'] = stoch.iloc[:, 0]
     else:
         df['stoch_k'] = 50
@@ -1339,7 +1339,7 @@ def strategy_adx_trend(df, config):
         Updated dataframe with buy/sell signals.
     """
     adx = ta.adx(df['high'], df['low'], df['close'])
-    if adx is not None:
+    if adx is not None and not adx.empty:
         df['adx'] = adx.iloc[:, 0].fillna(0)
         df['dmp'] = adx.iloc[:, 1].fillna(0)
         df['dmn'] = adx.iloc[:, 2].fillna(0)
@@ -1613,8 +1613,12 @@ def strategy_heikin_ashi(df, config):
         df['ha_close'] = ha_c.to('cpu').numpy()
     else:
         ha_df = ta.ha(df['open'], df['high'], df['low'], df['close'])
-        df['ha_open'] = ha_df.iloc[:, 0]; df['ha_high'] = ha_df.iloc[:, 1]
-        df['ha_low'] = ha_df.iloc[:, 2]; df['ha_close'] = ha_df.iloc[:, 3]
+        if ha_df is not None:
+            df['ha_open'] = ha_df.iloc[:, 0]; df['ha_high'] = ha_df.iloc[:, 1]
+            df['ha_low'] = ha_df.iloc[:, 2]; df['ha_close'] = ha_df.iloc[:, 3]
+        else:
+            df['ha_open'] = df['open']; df['ha_high'] = df['high']
+            df['ha_low'] = df['low']; df['ha_close'] = df['close']
 
     # Buy: Green candle (HA_Close > HA_Open) and No lower wick (HA_Low == HA_Open)
     # Using a small epsilon for float comparison
