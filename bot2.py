@@ -932,9 +932,10 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         for gname in ordered_groups:
             if gname not in grouped_techniques: continue
 
-            group_signal_found = False
             for t in grouped_techniques[gname]:
                 strat = t.get('strategy')
+                strat_buy = False
+                strat_sell = False
 
                 async with bot_lock:
                     bot_state[symbol]['strategy'] = strat
@@ -951,24 +952,21 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
                 if strat_tasks:
                     done_results = await asyncio.gather(*strat_tasks)
-                    strat_buy = False
-                    strat_sell = False
                     for res_df in done_results:
                         if res_df.empty: continue
                         latest = res_df.iloc[-1]
                         total_score += latest.get('score', 0)
                         if latest.get('buy_signal'):
-                            buy_count += 1
                             strat_buy = True
                         if latest.get('sell_signal'):
-                            sell_count += 1
                             strat_sell = True
 
+                    if strat_buy: buy_count += 1
+                    if strat_sell: sell_count += 1
+
                     if strat_buy or strat_sell:
-                        group_signal_found = True
                         async with bot_lock:
                             bot_state[symbol]['last_strat_with_signal'] = strat
-                        break # Skip remaining strategies in this group
 
         # Signal Subtraction
         diff = buy_count - sell_count
@@ -978,28 +976,22 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         buy_candidate = final_buy_count > 0
         sell_candidate = final_sell_count > 0
 
-        # Consecutive signals logic
-        candle_ts = int(latest_base.name.timestamp())
+        # Signal logic: current analysis loop strength (rationalized)
         async with bot_lock:
             if symbol not in bot_state: bot_state[symbol] = {}
-            prev_ts = bot_state[symbol].get('_last_candle_ts')
-            consecutive_buys = bot_state[symbol].get('consecutive_buys', 0)
-            consecutive_sells = bot_state[symbol].get('consecutive_sells', 0)
 
-            if prev_ts != candle_ts:
-                if buy_candidate:
-                    consecutive_buys += final_buy_count
-                    consecutive_sells = 0
-                elif sell_candidate:
-                    consecutive_sells += final_sell_count
-                    consecutive_buys = 0
-                else:
-                    consecutive_buys = 0
-                    consecutive_sells = 0
-                bot_state[symbol]['_last_candle_ts'] = candle_ts
+            if buy_candidate:
+                signal_strength_buy = final_buy_count
+                signal_strength_sell = 0
+            elif sell_candidate:
+                signal_strength_sell = final_sell_count
+                signal_strength_buy = 0
+            else:
+                signal_strength_buy = 0
+                signal_strength_sell = 0
 
-            bot_state[symbol]['consecutive_buys'] = consecutive_buys
-            bot_state[symbol]['consecutive_sells'] = consecutive_sells
+            bot_state[symbol]['consecutive_buys'] = signal_strength_buy
+            bot_state[symbol]['consecutive_sells'] = signal_strength_sell
 
         # Skipping logic for predominantly signals
         pos = data_manager.get_position(symbol)
@@ -1021,8 +1013,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             return
 
         # Thresholds (Stability)
-        buy_signal = consecutive_buys >= 1
-        sell_signal = consecutive_sells >= 1
+        buy_signal = signal_strength_buy >= 1
+        sell_signal = signal_strength_sell >= 1
 
         # Monte Carlo Validation
         if buy_signal or (sell_signal and has_position):
@@ -1041,13 +1033,17 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                 candles_since = 0
             bot_state[symbol]['candles_since_last_signal'] = candles_since
 
-            if candles_since >= config.get('no_signal_threshold', 20) and symbol not in active_scans:
+            last_opt = bot_state[symbol].get('last_optimization_ts', 0)
+            curr_time = time.time()
+            # Rationalize optimization: at least 10 minutes between scans, and respect candle threshold
+            if candles_since >= config.get('no_signal_threshold', 20) and (curr_time - last_opt > 600) and symbol not in active_scans:
                 global bench_executor
                 if not bench_executor:
                     bench_executor = concurrent.futures.ProcessPoolExecutor(
                         max_workers=os.cpu_count() or 4,
                         initializer=worker_process_init
                     )
+                bot_state[symbol]['last_optimization_ts'] = curr_time
                 task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
                                           symbol, config, timeframe, ['normal'], STRATEGIES[:10], df, engine, device)
                 active_scans[symbol] = task
