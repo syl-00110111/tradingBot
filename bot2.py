@@ -14,6 +14,7 @@ import math
 import pandas as pd
 import torch
 import concurrent.futures
+import plotext as plt_ascii
 from datetime import datetime, timedelta, timezone
 
 from rich.live import Live
@@ -41,6 +42,7 @@ pairs_scroll_offset = 0
 selected_pair_index = 0
 show_chart = False
 chart_symbol = None
+chart_cache = {"symbol": None, "last_update": 0, "content": None}
 logs_scroll_offset = 0
 focused_panel = "pairs"
 ohlcv_cache = {}
@@ -107,6 +109,69 @@ def format_amt(amt, precision=None):
         return f"{a:.{precision}f}".rstrip('0').rstrip('.')
     except: return str(amt)
 
+def render_ascii_chart(symbol, config):
+    global chart_cache
+
+    async def get_df():
+        async with ohlcv_lock:
+            if symbol in ohlcv_cache:
+                return ohlcv_cache[symbol].copy()
+        return None
+
+    # This is a bit tricky because render_ascii_chart is called from make_dashboard which is sync
+    # We'll use the cache or return a message if not ready.
+    # In bot2.py, we'll try to keep it simple.
+
+    df = None
+    if symbol in ohlcv_cache:
+        df = ohlcv_cache[symbol]
+
+    if df is None or df.empty:
+        return Text(f"No data available for {symbol}", style="bold red")
+
+    df = df.tail(100)
+    last_ts = int(df.index[-1].timestamp())
+
+    if chart_cache["symbol"] == symbol and chart_cache["last_update"] == last_ts:
+         return chart_cache["content"]
+
+    plt_ascii.clear_figure()
+    plt_ascii.clf()
+    plt_ascii.theme('dark')
+    plt_ascii.subplots(2, 1)
+
+    plt_ascii.subplot(1, 1)
+    plt_ascii.clf()
+    plt_ascii.theme('dark')
+    plt_ascii.title(f"K-Lines: {symbol} (1s)")
+    indices = list(range(len(df)))
+    df_plot = df[['open', 'high', 'low', 'close']].copy()
+    df_plot.columns = ['Open', 'High', 'Low', 'Close']
+    df_plot.reset_index(drop=True, inplace=True)
+    plt_ascii.candlestick(indices, df_plot)
+
+    plt_ascii.subplot(2, 1)
+    plt_ascii.clf()
+    plt_ascii.theme('dark')
+    volumes = df['volume'].tolist()
+    plt_ascii.bar(indices, volumes, color='blue', label='Volume')
+    plt_ascii.title("Volume")
+
+    width = console.width - 4
+    height = console.height - 20
+    if width < 20: width = 20
+    if height < 15: height = 15
+
+    h_volume = max(5, height // 3)
+    h_klines = height - h_volume
+
+    plt_ascii.subplot(1, 1).plotsize(width, h_klines)
+    plt_ascii.subplot(2, 1).plotsize(width, h_volume)
+    content = Text.from_ansi(plt_ascii.build())
+
+    chart_cache = {"symbol": symbol, "last_update": last_ts, "content": content}
+    return content
+
 async def input_task():
     global focused_panel, selected_pair_index, pairs_scroll_offset, logs_scroll_offset
     global expert_mode, marquee_enabled, show_help, show_chart, chart_symbol
@@ -122,28 +187,39 @@ async def input_task():
 
             if not startup_complete: continue
 
+            sorted_symbols = sorted(bot_state.keys())
+            pairs_height = console.height - 15
+
+            if show_chart or show_help:
+                if key in [readchar.key.ENTER, readchar.key.ESC, 'q', 'Q', 'h', 'H']:
+                    show_chart = False
+                    show_help = False
+                continue
+
             if key == readchar.key.TAB:
                 focused_panel = "logs" if focused_panel == "pairs" else "pairs"
             elif key == readchar.key.UP:
                 if focused_panel == "pairs":
                     selected_pair_index = max(0, selected_pair_index - 1)
+                    if selected_pair_index < pairs_scroll_offset:
+                        pairs_scroll_offset = selected_pair_index
                 else:
                     logs_scroll_offset += 1
             elif key == readchar.key.DOWN:
                 if focused_panel == "pairs":
-                    selected_pair_index += 1
+                    selected_pair_index = min(len(sorted_symbols) - 1, selected_pair_index + 1)
+                    if selected_pair_index >= pairs_scroll_offset + pairs_height:
+                        pairs_scroll_offset = selected_pair_index - pairs_height + 1
                 else:
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'h':
-                show_help = not show_help
+                show_help = True
             elif key == readchar.key.ENTER:
-                if focused_panel == "pairs":
-                    symbols = sorted(bot_state.keys())
-                    if symbols and selected_pair_index < len(symbols):
-                        chart_symbol = symbols[selected_pair_index]
-                        show_chart = not show_chart
+                if focused_panel == "pairs" and sorted_symbols:
+                    chart_symbol = sorted_symbols[selected_pair_index]
+                    show_chart = True
 
         except Exception as e:
             logging.error(f"Input error: {e}")
@@ -182,6 +258,105 @@ async def watch_ohlcv_all_symbols_task(exchange, symbols, timeframe):
 
         # Put symbol in queue for dedicated analysis task
         await analysis_queue.put(symbol)
+
+async def sync_live_positions(exchange, data_manager, config):
+    exchange_id = exchange.exchange_id
+    logging.info(f"Syncing positions from {exchange_id} API...")
+    balance = await exchange.fetch_balance()
+    if balance is None:
+        logging.error("Failed to sync live positions: balances are unavailable.")
+        return
+
+    if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
+        free_balances = balance['free']
+    else:
+        free_balances = balance
+
+    pairs_dict = config.get('pairs', {})
+    base_currencies = sorted(list(set([p.split('/')[1] for p in pairs_dict.keys() if '/' in p])))
+    if not base_currencies: base_currencies = ['USDT', 'USDC', 'EUR']
+
+    sellable_found = False
+    all_tickers = {}
+    try:
+        all_tickers = await exchange.fetch_tickers()
+    except: pass
+
+    for asset, amount in free_balances.items():
+        if asset in base_currencies or amount <= 0: continue
+
+        symbol = None
+        for bc in base_currencies:
+            candidate = f"{asset}/{bc}"
+            if candidate in pairs_dict:
+                symbol = candidate
+                break
+        if not symbol: continue
+
+        existing_pos_list = data_manager.get_position(symbol)
+        if existing_pos_list:
+            total_existing_amount = sum(p['amount'] for p in existing_pos_list)
+            if abs(total_existing_amount - amount) / amount < 0.001:
+                sellable_found = True
+                continue
+
+        is_dust = False
+        try:
+            ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
+            if symbol in exchange.markets:
+                m = exchange.markets[symbol]
+                min_amt = m['limits']['amount']['min']
+                min_cost = m['limits']['cost']['min'] or 10
+                if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
+                    is_dust = True
+            elif amount <= 0.000001: is_dust = True
+        except: pass
+
+        if is_dust: continue
+        sellable_found = True
+
+        curr_price = ticker['last'] if ticker else 0
+        if curr_price > 0:
+             entry_price = curr_price
+             entry_fee = 0
+             entry_total_base = amount * curr_price
+
+             try:
+                  my_trades = await exchange.fetch_my_trades(symbol, limit=10)
+                  if my_trades:
+                       buys = [t for t in my_trades if t['side'] == 'buy']
+                       if buys:
+                            buys.sort(key=lambda x: x['timestamp'], reverse=True)
+                            last_buy = buys[0]
+                            entry_price = last_buy['price']
+
+                            total_fee = 0
+                            accumulated_amount = 0
+                            for b in buys:
+                                 if accumulated_amount >= amount * 0.99: break
+                                 trade_amt = b['amount']
+                                 if 'fee' in b and b['fee']:
+                                      fee_cost = b['fee'].get('cost', 0)
+                                      fee_currency = b['fee'].get('currency')
+                                      _, quote = symbol.split('/')
+                                      if fee_currency and fee_currency != quote:
+                                           try:
+                                                fticker = await exchange.fetch_ticker(f"{fee_currency}/{quote}")
+                                                if fticker: fee_cost *= fticker['last']
+                                           except: pass
+                                      total_fee += fee_cost
+                                 accumulated_amount += trade_amt
+
+                            entry_fee = total_fee
+                            entry_total_base = (amount * entry_price) + entry_fee
+             except Exception as e:
+                  logging.warning(f"[{symbol}] Failed to recover trade history: {e}")
+
+             data_manager.add_position(symbol, entry_price, amount, entry_fee, {"info": "auto_populated"}, time.time(), total_base=entry_total_base)
+        else:
+             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
+
+    logging.info(f"Syncing positions from {exchange_id} API done.")
 
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
     logging.info("Dedicated analysis and trade task started.")
@@ -333,59 +508,106 @@ async def watch_orders_task(exchange, data_manager):
 def make_dashboard(mode, config):
     now = datetime.now()
     layout = Layout()
+
+    # Calculate height for pairs
+    pairs_height = console.height - 15
+    if pairs_height < 5: pairs_height = 5
+
+    # Status bar
+    status_text = Text(f"Mode: {mode.upper()} | Update: {now.strftime('%H:%M:%S')} | Symbols: {len(bot_state)}", justify="center")
+
     layout.split(
         Layout(Panel(Text("🛸 CCXT Pro Trading Bot v2 (Async/1s)", style="bold magenta", justify="center"), border_style="blue"), size=3),
         Layout(name="main"),
-        Layout(Panel(Text(f"Mode: {mode.upper()} | Update: {now.strftime('%H:%M:%S')} | Symbols: {len(bot_state)}", justify="center"), title="Status", border_style="cyan"), size=3)
+        Layout(Panel(status_text, title="Status", border_style="cyan"), size=3)
     )
+
+    # Logs Panel (Utilize more height)
     log_content = Text()
-    start_log = max(0, len(all_logs) - 15 - logs_scroll_offset)
+    log_limit = console.height // 4
+    start_log = max(0, len(all_logs) - log_limit - logs_scroll_offset)
     end_log = max(0, len(all_logs) - logs_scroll_offset)
     for log in all_logs[start_log:end_log]:
         try:
             msg_text = Text.from_markup(f"[{log['timestamp']}] {log['msg']}")
         except:
             msg_text = Text(f"[{log['timestamp']}] {log['msg']}")
-
-        if log['expiry'] < now:
-            msg_text.stylize("dim green")
+        if log['expiry'] < now: msg_text.stylize("dim green")
         else:
-            if not any(span.style for span in msg_text.spans):
-                msg_text.stylize("bold green")
+            if not any(span.style for span in msg_text.spans): msg_text.stylize("bold green")
+        log_content.append_text(msg_text); log_content.append("\n")
 
-        log_content.append_text(msg_text)
-        log_content.append("\n")
-    table = Table(expand=True, box=None)
-    table.add_column("Pair", style="cyan")
-    table.add_column("Price", style="magenta")
-    table.add_column("RSI", style="yellow")
-    table.add_column("Tendency", style="bold")
-    table.add_column("Signal", style="bold")
-    table.add_column("Lots", style="yellow", justify="center")
-    table.add_column("Strategy", style="dim cyan")
-    symbols = sorted(bot_state.keys())
-    for i, symbol in enumerate(symbols):
+    # Pairs Panel with Expert Mode support
+    table = Table(expand=True, box=None, padding=(0, 1))
+    if expert_mode:
+        table.add_column("Pair", style="cyan")
+        table.add_column("Price", style="magenta")
+        table.add_column("EMA F/S", style="green")
+        table.add_column("RSI", style="yellow")
+        table.add_column("ADX/Vol", style="dim white")
+        table.add_column("Score", style="bold white")
+        table.add_column("Signal", style="bold")
+    else:
+        table.add_column("Pair", style="cyan")
+        table.add_column("Price", style="magenta")
+        table.add_column("RSI", style="yellow")
+        table.add_column("Tendency", style="bold")
+        table.add_column("Signal", style="bold")
+        table.add_column("Lots", style="yellow", justify="center")
+        table.add_column("Strategy", style="dim cyan")
+
+    sorted_symbols = sorted(bot_state.keys())
+    visible_symbols = sorted_symbols[pairs_scroll_offset : pairs_scroll_offset + pairs_height]
+
+    for i, symbol in enumerate(visible_symbols):
+        abs_idx = pairs_scroll_offset + i
         data = bot_state[symbol]
-        style = "bold reverse" if i == selected_pair_index else ""
+        row_style = "bold reverse" if abs_idx == selected_pair_index and focused_panel == "pairs" else ""
+
         price = format_price(data.get('price'))
-        rsi = f"{data.get('rsi', 0):.2f}"
-        tend = data.get('tendency', 'Neutral')
         sig = data.get('last_signal', 'Waiting')
-        pos = data.get('position')
-        lots = str(len(pos)) if pos else "0"
-        strat = config.get('pairs', {}).get(symbol, {}).get('strategy', 'tema')
-        table.add_row(symbol, price, rsi, tend, sig, lots, strat, style=style)
+        sig_style = "bold green" if "Buy" in sig else "bold red" if "Sell" in sig else "white"
+
+        if expert_mode:
+            row_vals = [
+                symbol, price,
+                f"{data.get('ema_f', 0):.2f}/{data.get('ema_s', 0):.2f}",
+                f"{data.get('rsi', 0):.2f}",
+                f"{data.get('adx', 0):.1f}/{data.get('volatility', 0):.4f}",
+                str(data.get('score', 0)),
+                f"[{sig_style}]{sig}[/]"
+            ]
+        else:
+            pos = data.get('position')
+            lots = str(len(pos)) if pos else "0"
+            strat = config.get('pairs', {}).get(symbol, {}).get('strategy', 'tema')
+            row_vals = [
+                symbol, price, f"{data.get('rsi', 0):.2f}",
+                data.get('tendency', 'Neutral'),
+                f"[{sig_style}]{sig}[/]",
+                lots, strat
+            ]
+        table.add_row(*row_vals, style=row_style)
+
     layout["main"].split_row(
-        Layout(Panel(log_content, title="Live Logs (H for Help)", border_style="green" if focused_panel=="logs" else "blue"), ratio=1),
-        Layout(Panel(table, title="Trading Pairs (1s Interval)", border_style="green" if focused_panel=="pairs" else "blue"), ratio=2)
+        Layout(Panel(log_content, title="Live Logs", border_style="green" if focused_panel=="logs" else "blue"), ratio=1),
+        Layout(Panel(table, title="Trading Pairs", border_style="green" if focused_panel=="pairs" else "blue"), ratio=2)
     )
+
     if show_help:
-        help_text = Text("\nTAB: Switch Panels\nArrows: Navigate\nENTER: Chart\nX: Expert Mode\nCtrl+C: Quit", justify="center")
+        help_text = Text()
+        help_text.append("\nKeyboard Shortcuts:\n", style="bold cyan")
+        help_text.append("  TAB    : Switch Panels\n")
+        help_text.append("  UP/DN  : Navigate / Scroll\n")
+        help_text.append("  ENTER  : Show K-Lines\n")
+        help_text.append("  X      : Expert Mode\n")
+        help_text.append("  H      : Close Help\n")
+        help_text.append("  Ctrl+C : Quit\n")
         layout["main"].update(Panel(help_text, title="Help", border_style="bold yellow"))
 
     if show_chart and chart_symbol:
-        # Placeholder for chart implementation
-        layout["main"].update(Panel(Text(f"Chart for {chart_symbol} goes here...\n(Press ENTER to return)", justify="center"), title=f"Chart: {chart_symbol}", border_style="bold magenta"))
+        chart_content = render_ascii_chart(chart_symbol, config)
+        layout["main"].update(Panel(chart_content, title=f"Chart: {chart_symbol}", border_style="bold magenta"))
 
     return layout
 
@@ -452,6 +674,9 @@ async def main():
     pattern_manager = PatternManager()
     engine = TradingEngine(config)
 
+    # Sync live positions from real wallet (works for both Live and Simulation with API keys)
+    await sync_live_positions(exchange, data_manager, config)
+
     if 'pairs' not in config:
         config['pairs'] = {}
 
@@ -476,7 +701,10 @@ async def main():
 
     # Initial Batch
     for symbol in pairs:
-        bot_state[symbol] = {'price': 0, 'rsi': 0, 'tendency': 'Neutral', 'last_signal': 'Init', 'position': None}
+        bot_state[symbol] = {
+            'price': 0, 'rsi': 0, 'tendency': 'Neutral',
+            'last_signal': 'Init', 'position': data_manager.get_position(symbol)
+        }
 
     if args.fast_start:
         logging.info("[bold yellow]Fast start enabled: Skipping 10,000 candles fetch.")
@@ -530,7 +758,13 @@ async def main():
         for t in background_tasks: t.cancel()
         if ui_task: ui_task.cancel()
         await exchange.close()
-        logging.info("Graceful shutdown complete.")
+
+        # Clear screen and show final logs
+        console.clear()
+        console.print("[bold red]Bot v2 shutdown sequence complete.[/]")
+        console.print("[bold white]Final Log Summary:[/]")
+        for log in all_logs[-20:]:
+            console.print(f"[{log['timestamp']}] {log['msg']}")
 
 if __name__ == "__main__":
     try:
