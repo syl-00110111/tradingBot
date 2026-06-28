@@ -387,12 +387,17 @@ def get_signals(df, mode_config, is_scan=False):
     # For now, just checking 'ema_f' is enough to avoid full recalculation of common indicators
     # in the tight multi-technique loop.
     if needs_recalc:
+        # Ensure OHLCV columns are numeric to avoid conversion errors from object type
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns and df[col].dtype == 'object':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
         # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
         use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
         if use_acceleration:
-            close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
-            high_t = torch.tensor(df['high'].values, device=device, dtype=torch.float64)
-            low_t = torch.tensor(df['low'].values, device=device, dtype=torch.float64)
+            close_t = torch.tensor(df['close'].astype(float).values, device=device, dtype=torch.float64)
+            high_t = torch.tensor(df['high'].astype(float).values, device=device, dtype=torch.float64)
+            low_t = torch.tensor(df['low'].astype(float).values, device=device, dtype=torch.float64)
             df['ema_f'] = torch_ema(close_t, mode_config.get('ema_fast', 8)).to('cpu').numpy()
             df['ema_s'] = torch_ema(close_t, mode_config.get('ema_slow', 18)).to('cpu').numpy()
             m_val, m_sig, m_hist = torch_macd(close_t, fast=mode_config.get('macd_fast', 12), slow=mode_config.get('macd_slow', 26), signal=mode_config.get('macd_signal', 9))
@@ -482,8 +487,15 @@ def get_signals(df, mode_config, is_scan=False):
     elif strategy == 'listing_surge_proxy':
         df = strategy_listing_surge(df, mode_config)
     elif strategy == 'tema_crossover':
+        # Ensure numeric for TEMA strategy
+        if 'close' in df.columns and df['close'].dtype == 'object':
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
         df = strategy_tema_crossover(df, mode_config)
     elif strategy == 'heikin_ashi':
+        # Ensure numeric for HA strategy
+        for col in ['open', 'high', 'low', 'close']:
+            if col in df.columns and df[col].dtype == 'object':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
         df = strategy_heikin_ashi(df, mode_config)
     elif strategy == 'candle_patterns':
         df = strategy_candle_patterns(df, mode_config)
@@ -648,8 +660,8 @@ def calculate_similarity(buffer_df, pattern, device=torch.device('cpu')):
     # GPU-accelerated Shape Correlation
     try:
         # Convert to tensors for fast computation
-        c_vals = torch.tensor(buffer_df['close'].values, device=device, dtype=torch.float64)
-        p_vals = torch.tensor(pattern['prices'], device=device, dtype=torch.float64)
+        c_vals = torch.tensor(buffer_df['close'].astype(float).values, device=device, dtype=torch.float64)
+        p_vals = torch.tensor(np.array(pattern['prices'], dtype=float), device=device, dtype=torch.float64)
 
         # Min-max normalization on GPU
         c_min, c_max = c_vals.min(), c_vals.max()
@@ -1500,7 +1512,10 @@ def strategy_sinewave(df, config):
     """
     device = config.get('device', torch.device('cpu'))
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
-        close_t = torch.tensor(df['close'].values, device=device, dtype=torch.float64)
+        # Ensure numeric for Sinewave
+        if 'close' in df.columns and df['close'].dtype == 'object':
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        close_t = torch.tensor(df['close'].astype(float).values, device=device, dtype=torch.float64)
         sine, leadsine = torch_sinewave(close_t)
         df['sine'] = sine.to('cpu').numpy()
         df['leadsine'] = leadsine.to('cpu').numpy()
