@@ -7,7 +7,6 @@ Un bot de trading universel de crypto-monnaies implémenté en Python, tirant pa
 ## 🔬 Fondements Scientifiques
 Ce bot implémente des stratégies et une logique recommandées par des études empiriques de premier plan sur les marchés de crypto-monnaies :
 
-- **Success Pattern Matching (SPM)** : Le bot analyse les bougies historiques pour identifier les motifs de succès. Il utilise ensuite la corrélation de Pearson accélérée par GPU et la similarité des états techniques (RSI/ADX) pour n'activer le trading que lorsque les conditions actuelles du marché correspondent à ces fenêtres éprouvées.
 - **Scoring Multi-Techniques** : Agrège les signaux de plusieurs stratégies et profils d'agressivité. Le score du signal est pondéré par le nombre de techniques et le score de l'unité de temps optimale du symbole.
 - **Détection du Régime de Marché** : Utilise une commutation basée sur la volatilité entre le retour à la moyenne (Mean-Reversion) et le suivi de tendance (Trend-Following).
 - **Validation Monte Carlo** : Simulations vectorisées pour estimer la probabilité de succès pour chaque signal, pénalisant les configurations à haut risque.
@@ -122,10 +121,8 @@ Store your API credentials and preferred exchange.
 
 Pour rester à jour concernant les modifications des appels API : `pip install --upgrade ccxt` ou `pip install --upgrade -r requirements.txt` pour lancer la procédure complète de mise à jour des dépendances. Assurez-vous également que **l'horloge** de votre ordinateur est synchronisée.
 
-### Modes d'exécution
-- **Simulation**: `python bot.py --mode simulation --exchange kraken`
-- **Live**: `python bot.py --mode live`
-- **Balance**: `python bot.py --mode balance --exchange binance`
+### Exécution
+- **Live**: `python bot2.py`
 
 ---
 
