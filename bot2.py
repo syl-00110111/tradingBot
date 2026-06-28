@@ -532,11 +532,11 @@ async def get_optimal_timeframe(exchange, symbol, config):
         if trades_per_min > tpm_high: score += 1; reasons.append("Active")
         elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
 
-        if score >= 3: tf = '1m'
-        elif score == 2: tf = '3m'
-        elif score == 1: tf = '5m'
-        elif score == 0: tf = '15m'
-        else: tf = '30m'
+        if score >= 3: tf = '1s'
+        elif score == 2: tf = '1m'
+        elif score == 1: tf = '3m'
+        elif score == 0: tf = '5m'
+        else: tf = '15m'
 
         # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
         return tf, score
