@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 import logging
+import signal
 import argparse
 import os
 import sys
@@ -45,6 +46,7 @@ class WatcherManager:
         self.pending_reschedules = {}  # symbol -> (old_tf, new_tf)
         self.aggregation_lock = asyncio.Lock()
         self.aggregation_task = None
+        self._startup_message_shown = False
 
     async def schedule_reschedule(self, symbol, old_tf, new_tf):
         async with self.aggregation_lock:
@@ -429,8 +431,9 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
     Single watcher task for all symbols across potentially different timeframes.
     'watch_pairs' is a list of [symbol, timeframe].
     """
-    if watcher_manager.global_watcher == None:
+    if not watcher_manager._startup_message_shown:
         logging.info(f"Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
+        watcher_manager._startup_message_shown = True
 
     while not shutdown_event.is_set():
         try:
@@ -608,18 +611,31 @@ async def sync_live_positions(exchange, data_manager, config):
     logging.info(f"Syncing positions from {exchange_id} API done.")
 
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
-    logging.info("Dedicated analysis and trade task started.")
+    max_workers = config.get('max_analysis_workers', 4)
+    logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
 
-    while not shutdown_event.is_set():
-        try:
-            symbol, timeframe = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
-            await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor)
-            analysis_queue.task_done()
-        except asyncio.TimeoutError:
-            continue
-        except Exception as e:
-            logging.error(f"Error in dedicated analysis task: {e}")
+    async def worker():
+        while not shutdown_event.is_set():
+            symbol, timeframe = None, None
+            try:
+                symbol, timeframe = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
+                await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.error(f"Error in analysis worker: {e}")
+            finally:
+                if symbol:
+                    analysis_queue.task_done()
+
+    try:
+        workers = [asyncio.create_task(worker()) for _ in range(max_workers)]
+        await asyncio.gather(*workers)
+    finally:
+        executor.shutdown(wait=False)
 
 def run_optimization_for_symbol_sync(symbol, config, timeframe, aggrs, strategies, df, engine, device):
     from indicators2 import get_signals
@@ -1362,10 +1378,19 @@ async def main():
     startup_complete = True
     logging.info("Bot v2 fully operational.")
 
+    # Signal handling for graceful shutdown
+    loop = asyncio.get_running_loop()
+    if platform.system().lower() != 'windows':
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, lambda: shutdown_event.set())
+            except NotImplementedError:
+                pass
+
     try:
         await shutdown_event.wait()
     except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
+        shutdown_event.set()
     except Exception as e:
         logging.error(f"Main loop error: {e}")
     finally:
@@ -1374,13 +1399,23 @@ async def main():
 
         # Cancel all background tasks
         all_tasks = background_tasks.copy()
-        if ui_task: all_tasks.append(ui_task)
+
+        # Cancel UI task first to restore terminal sooner
+        if ui_task:
+            ui_task.cancel()
+            try:
+                await asyncio.wait_for(ui_task, timeout=2)
+            except:
+                pass
+
         if watcher_manager and watcher_manager.global_watcher:
             all_tasks.append(watcher_manager.global_watcher)
         if watcher_manager and watcher_manager.aggregation_task:
             all_tasks.append(watcher_manager.aggregation_task)
 
-        for t in all_tasks: t.cancel()
+        for t in all_tasks:
+            if not t.done():
+                t.cancel()
 
         # Wait for tasks to finish (with timeout)
         if all_tasks:
