@@ -944,22 +944,33 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                 if isinstance(aggr_list, str): aggr_list = [aggr_list]
 
                 strat_tasks = []
+                # Keep track of which settings produced which result
+                settings_list = []
                 for a in aggr_list:
                     mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
                     mode_settings['strategy'] = strat
                     mode_settings['device'] = device
+                    settings_list.append(mode_settings)
                     strat_tasks.append(loop.run_in_executor(executor, get_signals, df.copy(), mode_settings))
 
                 if strat_tasks:
                     done_results = await asyncio.gather(*strat_tasks)
-                    for res_df in done_results:
+                    for idx, res_df in enumerate(done_results):
                         if res_df.empty: continue
                         latest = res_df.iloc[-1]
                         total_score += latest.get('score', 0)
-                        if latest.get('buy_signal'):
-                            strat_buy = True
-                        if latest.get('sell_signal'):
-                            strat_sell = True
+
+                        has_buy = latest.get('buy_signal')
+                        has_sell = latest.get('sell_signal')
+
+                        if has_buy: strat_buy = True
+                        if has_sell: strat_sell = True
+
+                        if has_buy or has_sell:
+                            # Update the currently active aggressiveness profile in the UI
+                            effective_aggr = settings_list[idx].get('effective_aggr', aggr_list[idx])
+                            async with bot_lock:
+                                bot_state[symbol]['aggr'] = effective_aggr
 
                     if strat_buy: buy_count += 1
                     if strat_sell: sell_count += 1
@@ -979,6 +990,14 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         # Signal logic: current analysis loop strength (rationalized)
         async with bot_lock:
             if symbol not in bot_state: bot_state[symbol] = {}
+
+            # If no signal found, update Aggr to reflect current dynamic state of the first technique
+            if not buy_candidate and not sell_candidate and techniques:
+                t = techniques[0]
+                a = t.get('aggr', ['normal'])
+                if isinstance(a, list): a = a[0]
+                m_set = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
+                bot_state[symbol]['aggr'] = m_set.get('effective_aggr', a)
 
             if buy_candidate:
                 signal_strength_buy = final_buy_count
