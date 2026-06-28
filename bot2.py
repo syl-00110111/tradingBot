@@ -482,9 +482,9 @@ async def get_optimal_timeframe(exchange, symbol, config):
     thresholds = config.get('timeframe_thresholds', {})
 
     try:
-        ticker = exchange.fetch_ticker(symbol)
-        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=60)
-        trades = exchange.fetch_trades(symbol, limit=1000)
+        ticker = await exchange.fetch_ticker(symbol)
+        ohlcv = await exchange.fetch_ohlcv(symbol, '1h', limit=60)
+        trades = await exchange.fetch_trades(symbol, limit=1000)
 
         # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
