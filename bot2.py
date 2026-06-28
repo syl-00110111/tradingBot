@@ -1280,18 +1280,17 @@ async def main():
         exchange = CCXTExchange2(exchange_id,
                                 api_creds.get('api_key') or config.get('api_key'),
                                 api_creds.get('api_secret') or config.get('api_secret'))
-
+    elif args.mode == 'balance':
+        await show_balances(exchange)
+        await exchange.close()
+        return
+    
     logging.info(f"Connecting to {exchange_id}...")
     await exchange.load_markets()
 
     data_manager = DataManager()
     pattern_manager = PatternManager()
     engine = TradingEngine(config)
-
-    if args.mode == 'balance':
-        await show_balances(exchange)
-        await exchange.close()
-        return
 
     if 'pairs' not in config:
         config['pairs'] = {}
