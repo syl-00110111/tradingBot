@@ -429,7 +429,7 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
     Single watcher task for all symbols across potentially different timeframes.
     'watch_pairs' is a list of [symbol, timeframe].
     """
-    if watcher_manager.pending_reschedules == {}:
+    if watcher_manager.global_watcher == None:
         logging.info(f"Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
 
     while not shutdown_event.is_set():
