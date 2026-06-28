@@ -27,5 +27,6 @@
             "low": 1,
             "high": 40
         }
-    }
+    },
+    "max_analysis_workers": 4
 }
