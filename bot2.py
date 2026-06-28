@@ -393,13 +393,15 @@ async def watch_ohlcv_timeframe_task(exchange, symbols, timeframe, config):
             for candle in candles:
                 ts = pd.to_datetime(candle[0], unit='ms')
                 if ts in df.index:
-                    df.loc[ts] = candle[1:]
+                    df.loc[ts] = [float(x) for x in candle[1:]]
                 else:
                     new_data.append(candle)
 
             if new_data:
                 new_df = pd.DataFrame(new_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], unit='ms')
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    new_df[col] = pd.to_numeric(new_df[col], errors='coerce')
                 new_df.set_index('timestamp', inplace=True)
                 df = pd.concat([df, new_df]).tail(1000)
 
@@ -1129,6 +1131,8 @@ async def run_scan_logic(exchange, symbol, strategy, aggr_name, config, timefram
         if not ohlcv: return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
         df.set_index('timestamp', inplace=True)
     else:
         df = df_in.copy()
@@ -1227,6 +1231,8 @@ async def initialize_simulation(exchange, data_manager, pattern_manager, engine,
         if ohlcv:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
             df.set_index('timestamp', inplace=True)
 
             best_p = -999
@@ -1419,6 +1425,8 @@ async def main():
                     ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=500)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.set_index('timestamp', inplace=True)
                     ohlcv_cache[f"{symbol}_{tf}"] = df
                     logging.info(f"[{symbol}] Loaded {len(df)} candles.")
