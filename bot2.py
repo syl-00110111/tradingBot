@@ -348,7 +348,7 @@ async def input_task(config):
                     pairs_pause_until = time.time() + 5
                 else:
                     logs_scroll_offset += 1
-                    logs_pause_until = time.time() + 5
+                    logs_pause_until = time.time() + 30
             elif key == readchar.key.DOWN:
                 if focused_panel == "pairs":
                     selected_pair_index = min(len(all_pairs) - 1, selected_pair_index + 1)
@@ -357,7 +357,23 @@ async def input_task(config):
                     pairs_pause_until = time.time() + 5
                 else:
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
-                    logs_pause_until = time.time() + 5
+                    logs_pause_until = time.time() + 30
+            elif key == readchar.key.PAGE_UP:
+                if focused_panel == "logs":
+                    logs_scroll_offset += 10
+                    logs_pause_until = time.time() + 30
+            elif key == readchar.key.PAGE_DOWN:
+                if focused_panel == "logs":
+                    logs_scroll_offset = max(0, logs_scroll_offset - 10)
+                    logs_pause_until = time.time() + 30
+            elif key == readchar.key.HOME:
+                if focused_panel == "logs":
+                    logs_scroll_offset = max(0, len(all_logs) - 8) # 8 is log_height
+                    logs_pause_until = time.time() + 30
+            elif key == readchar.key.END:
+                if focused_panel == "logs":
+                    logs_scroll_offset = 0
+                    logs_pause_until = time.time() + 30
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'm':
@@ -416,41 +432,48 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
     """
     logging.info(f"Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
 
-    async for data in exchange.watch_ohlcv_for_symbols(watch_pairs):
-        if shutdown_event.is_set(): break
+    while not shutdown_event.is_set():
+        try:
+            async for data in exchange.watch_ohlcv_for_symbols(watch_pairs):
+                if shutdown_event.is_set(): break
 
-        if isinstance(data, tuple) and len(data) == 3:
-            symbol, timeframe, candles = data
-        else: continue
+                if isinstance(data, tuple) and len(data) == 3:
+                    symbol, timeframe, candles = data
+                else: continue
 
-        async with ohlcv_lock:
-            cache_key = f"{symbol}_{timeframe}"
-            if cache_key not in ohlcv_cache:
-                ohlcv_cache[cache_key] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                async with ohlcv_lock:
+                    cache_key = f"{symbol}_{timeframe}"
+                    if cache_key not in ohlcv_cache:
+                        ohlcv_cache[cache_key] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
-            df = ohlcv_cache[cache_key]
-            new_data = []
-            for candle in candles:
-                ts = pd.to_datetime(candle[0], unit='ms')
-                if ts in df.index:
-                    df.loc[ts] = [float(x) for x in candle[1:]]
-                else:
-                    new_data.append(candle)
+                    df = ohlcv_cache[cache_key]
+                    new_data = []
+                    for candle in candles:
+                        ts = pd.to_datetime(candle[0], unit='ms')
+                        if ts in df.index:
+                            df.loc[ts] = [float(x) for x in candle[1:]]
+                        else:
+                            new_data.append(candle)
 
-            if new_data:
-                new_df = pd.DataFrame(new_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], unit='ms')
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    new_df[col] = pd.to_numeric(new_df[col], errors='coerce')
-                new_df.set_index('timestamp', inplace=True)
-                df = pd.concat([df, new_df]).tail(1000)
+                    if new_data:
+                        new_df = pd.DataFrame(new_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], unit='ms')
+                        for col in ['open', 'high', 'low', 'close', 'volume']:
+                            new_df[col] = pd.to_numeric(new_df[col], errors='coerce')
+                        new_df.set_index('timestamp', inplace=True)
+                        df = pd.concat([df, new_df]).tail(1000)
 
-            ohlcv_cache[cache_key] = df
-            async with bot_lock:
-                if symbol in bot_state:
-                    bot_state[symbol]['price'] = candles[-1][4]
+                        ohlcv_cache[cache_key] = df
+                        async with bot_lock:
+                            if symbol in bot_state:
+                                bot_state[symbol]['price'] = candles[-1][4]
 
-        await analysis_queue.put((symbol, timeframe))
+                await analysis_queue.put((symbol, timeframe))
+        except Exception as e:
+            if not shutdown_event.is_set():
+                logging.error(f"WebSocket OHLCV reconnection error: {e}")
+                await asyncio.sleep(5)
+            else: break
 
 async def sync_live_positions(exchange, data_manager, config):
     exchange_id = exchange.exchange_id
@@ -880,17 +903,31 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config):
 async def watch_balance_task(exchange, data_manager):
     global current_balances
     logging.info("WebSocket: watch_balance task started.")
-    async for balance in exchange.watch_balance():
-        async with bot_lock:
-            current_balances = balance
-        logging.debug("Balance updated via WebSocket")
+    while not shutdown_event.is_set():
+        try:
+            async for balance in exchange.watch_balance():
+                async with bot_lock:
+                    current_balances = balance
+                logging.debug("Balance updated via WebSocket")
+        except Exception as e:
+            if not shutdown_event.is_set():
+                logging.error(f"WebSocket balance reconnection error: {e}")
+                await asyncio.sleep(5)
+            else: break
 
 async def watch_orders_task(exchange, data_manager):
     logging.info("WebSocket: watch_orders task started.")
-    async for orders in exchange.watch_orders():
-        for order in orders:
-            if order['status'] == 'closed':
-                logging.info(f"Order Completed: {order['symbol']} {order['side']} @ {order['price']}")
+    while not shutdown_event.is_set():
+        try:
+            async for orders in exchange.watch_orders():
+                for order in orders:
+                    if order['status'] == 'closed':
+                        logging.info(f"Order Completed: {order['symbol']} {order['side']} @ {order['price']}")
+        except Exception as e:
+            if not shutdown_event.is_set():
+                logging.error(f"WebSocket orders reconnection error: {e}")
+                await asyncio.sleep(5)
+            else: break
                 # We could sync positions with data_manager here if we wanted to be
                 # fully WebSocket-driven for fills.
 
