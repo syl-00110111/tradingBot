@@ -1357,6 +1357,8 @@ async def main():
     # Dedicated analysis/trade worker
     background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
 
+    # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
+    await asyncio.sleep(4)
     startup_complete = True
     logging.info("Bot v2 fully operational.")
 
