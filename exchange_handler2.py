@@ -111,22 +111,29 @@ class CCXTExchange2(ExchangeInterface2):
                 logging.error(f"Error in watch_ohlcv for {symbol}: {e}")
                 await asyncio.sleep(1)
 
-    async def watch_ohlcv_for_symbols(self, symbols, timeframe):
-        if not isinstance(symbols, list):
-            symbols = list(symbols)
+    async def watch_ohlcv_for_symbols(self, symbols, timeframe=None):
+        """
+        Watches OHLCV for multiple symbols.
+        'symbols' can be a list of symbols (if 'timeframe' is provided)
+        or a list of [symbol, timeframe] pairs.
+        """
+        if timeframe is not None:
+            pairs = [[s, timeframe] for s in symbols]
+        else:
+            pairs = symbols
 
         # Multiplexed individual watchers is often more reliable than watchOHLCVForSymbols
         # for high-frequency 1s updates across various exchanges.
         queue = asyncio.Queue()
 
-        async def _worker(symbol):
+        async def _worker(symbol, tf):
             try:
-                async for candles in self.watch_ohlcv(symbol, timeframe):
-                    await queue.put((symbol, candles))
+                async for candles in self.watch_ohlcv(symbol, tf):
+                    await queue.put((symbol, tf, candles))
             except Exception as e:
-                logging.error(f"Worker error for {symbol}: {e}")
+                logging.error(f"Worker error for {symbol} ({tf}): {e}")
 
-        tasks = [asyncio.create_task(_worker(s)) for s in symbols]
+        tasks = [asyncio.create_task(_worker(s, tf)) for s, tf in pairs]
         try:
             while True:
                 yield await queue.get()
@@ -255,14 +262,20 @@ class MockExchange2(ExchangeInterface2):
                 await asyncio.sleep(1)
                 yield [[time.time()*1000, 100, 105, 95, 102, 1000]]
 
-    async def watch_ohlcv_for_symbols(self, symbols, timeframe):
+    async def watch_ohlcv_for_symbols(self, symbols, timeframe=None):
         if self.real_exchange:
             async for data in self.real_exchange.watch_ohlcv_for_symbols(symbols, timeframe):
                 yield data
         else:
+            if timeframe is not None:
+                pairs = [[s, timeframe] for s in symbols]
+            else:
+                pairs = symbols
             while True:
-                for symbol in symbols:
-                    yield (symbol, [[time.time()*1000, 100, 105, 95, 102, 1000]])
+                for item in pairs:
+                    symbol = item[0]
+                    tf = item[1]
+                    yield (symbol, tf, [[time.time()*1000, 100, 105, 95, 102, 1000]])
                 await asyncio.sleep(1)
 
     async def watch_balance(self):
