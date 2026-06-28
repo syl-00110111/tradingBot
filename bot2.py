@@ -1220,156 +1220,10 @@ async def heartbeat_task():
     while not shutdown_event.is_set():
         await asyncio.sleep(30)
 
-def plot_scan(df, symbol, strategy_name, aggr_name, results):
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(12, 7))
-    plt.plot(df.index, df['close'], label='Price', color='blue', alpha=0.6)
-    buys = df[df['buy_signal']]
-    plt.scatter(buys.index, buys['close'], marker='^', color='green', label='BUY', s=100)
-    sells = df[df['sell_signal']]
-    plt.scatter(sells.index, sells['close'], marker='v', color='red', label='SELL', s=100)
-    plt.title(f"Scan: {symbol} | Strategy: {strategy_name} | Aggr: {aggr_name}")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    filename = f"scan_{symbol.replace('/', '_')}_{strategy_name}.png"
-    plt.savefig(filename)
-    console.print(f"[bold green]Scan plot saved as {filename}[/]")
-    plt.close()
-
-async def run_scan_logic(exchange, symbol, strategy, aggr_name, config, timeframe='1m', df_in=None, limit=500, engine=None, device=None):
-    if df_in is None:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if not ohlcv: return None
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df.set_index('timestamp', inplace=True)
-    else:
-        df = df_in.copy()
-
-    # Base settings for scan
-    mode_settings = engine.get_dynamic_settings(20, 0.005, aggr=aggr_name)
-    mode_settings['strategy'] = strategy
-    mode_settings['device'] = device
-
-    df = get_signals(df, mode_settings, is_scan=True)
-
-    balance = 100.0
-    position = None
-    trades = []
-
-    for i in range(len(df)):
-        row = df.iloc[i]
-        price = row['close']
-
-        if row['sell_signal'] and position:
-            profit = (position['amount'] * price * 0.999) - position['cost']
-            balance += (position['amount'] * price * 0.999)
-            trades.append(profit)
-            position = None
-        elif row['buy_signal'] and not position and balance > 10:
-            cost = balance * 0.1
-            amount = (cost * 0.999) / price
-            position = {'amount': amount, 'cost': cost}
-            balance -= cost
-
-    total_profit = sum(trades)
-    return {
-        'df': df,
-        'profit': total_profit,
-        'win_rate': len([t for t in trades if t > 0]) / len(trades) if trades else 0,
-        'trades_count': len(trades)
-    }
-
-async def run_scan_mode(exchange, config, args, engine, device):
-    strategy = args.strategy
-    aggr = args.aggr or 'normal'
-    symbol = args.symbol
-    timeframe = args.timeframe or '1m'
-
-    console.print(f"[bold blue]Running Scan for {symbol} | Strategy: {strategy}...[/]")
-    results = await run_scan_logic(exchange, symbol, strategy, aggr, config, timeframe=timeframe, engine=engine, device=device)
-
-    if results:
-        if results['trades_count'] > 0:
-            plot_scan(results['df'], symbol, strategy, aggr, results)
-        console.print(f"\n[bold yellow]Scan Summary for {symbol}:[/]")
-        console.print(f"Total Profit: {results['profit']:.2f} EUR")
-        console.print(f"Win Rate: {results['win_rate']:.1%}")
-        console.print(f"Total Trades: {results['trades_count']}")
-
-async def run_optimization_test(exchange, config, args, data_manager, pattern_manager, engine, device):
-    symbols = [args.symbol] if args.symbol else list(config['pairs'].keys())
-    console.print(f"[bold blue]Scanning strategies for {len(symbols)} symbol(s) using multi-processing...[/]")
-
-    loop = asyncio.get_event_loop()
-    global bench_executor
-    if not bench_executor: bench_executor = concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count() or 4)
-
-    tasks = []
-    for symbol in symbols:
-        timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=1000)
-        if not ohlcv: continue
-
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-
-        task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
-                                  symbol, config, timeframe, ['normal'], STRATEGIES, df, engine, device)
-        tasks.append(task)
-
-    results = await asyncio.gather(*tasks)
-
-    console.print("\n[bold magenta]=== DISCOVERY RECOMMENDATIONS ===[/]")
-    for sym, best_strat, profit in results:
-        if best_strat:
-            console.print(f"[bold green]🏆 DISCOVERY FOR {sym}:[/] {best_strat} | Profit: {profit:.2f} EUR")
-            config['pairs'][sym]['strategy'] = best_strat
-
-async def initialize_simulation(exchange, data_manager, pattern_manager, engine, config, device):
-    logging.info("Initializing Simulation positions (Discovery phase)...")
-    await sync_live_positions(exchange, data_manager, config)
-
-    pairs = list(config['pairs'].keys())
-
-    # Discovery phase: find best strategies for simulation start if not cached
-    for symbol in pairs:
-        timeframe = config['pairs'].get(symbol, {}).get('timeframe', '1m')
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=500)
-        if ohlcv:
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df.set_index('timestamp', inplace=True)
-
-            best_p = -999
-            best_s = 'tema_crossover'
-            for s in STRATEGIES[:5]:
-                res = await run_scan_logic(exchange, symbol, s, 'normal', config, df_in=df, engine=engine, device=device)
-                if res and res['profit'] > best_p:
-                    best_p = res['profit']
-                    best_s = s
-            config['pairs'][symbol]['strategy'] = best_s
-            logging.info(f"[{symbol}] Initialized with strategy {best_s}")
-
-    logging.info("Initialization of simulation positions completed.")
-
 async def main():
     parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot v2 (Asynchronous)')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
-    parser.add_argument('--exchange', help='CCXT Exchange ID to use (e.g., binance, kraken, bitvavo)')
-    parser.add_argument('--mode', choices=['live', 'simulation', 'balance', 'scan', 'optimization'], default='simulation', help='Bot mode')
-    parser.add_argument('--config', help='Path to config file (optional)')
-    parser.add_argument('--symbol', help='Target symbol (e.g. BTC/EUR)')
-    parser.add_argument('--strategy', help='Strategy name for scan mode')
-    parser.add_argument('--aggr', help='Agressivity for scan mode')
-    parser.add_argument('--timeframe', help='Manual timeframe override')
-    parser.add_argument('--since', help='Start date (YYYY-MM-DD HH:MM)')
-    parser.add_argument('--until', help='End date (YYYY-MM-DD HH:MM)')
+    parser.add_argument('--mode', choices=['live', 'balance'], default='balance', help='Bot mode')
     parser.add_argument('--fast-start', action='store_true', help='Skip fetching initial candles')
 
     args = parser.parse_args()
@@ -1412,21 +1266,14 @@ async def main():
                 device = torch.device('cpu')
                 gpu_enabled = False
 
-    if args.config:
-        config = load_config_from_path(args.config)
-    else:
-        config = load_config()
+    config = load_config()
 
     api_creds = {}
     if os.path.exists('api.json'):
         with open('api.json', 'r') as f: api_creds = json.load(f)
 
-    exchange_id = api_creds.get('exchange_id') or args.exchange or config.get('exchange') or 'binance'
-    if args.mode == 'simulation':
-        exchange = MockExchange2(api_creds.get('api_key') or config.get('api_key'),
-                                api_creds.get('api_secret') or config.get('api_secret'),
-                                exchange_id)
-    else:
+    exchange_id = api_creds.get('exchange_id') or config.get('exchange') or 'binance'
+    if args.mode == 'live':
         exchange = CCXTExchange2(exchange_id,
                                 api_creds.get('api_key') or config.get('api_key'),
                                 api_creds.get('api_secret') or config.get('api_secret'))
@@ -1440,20 +1287,6 @@ async def main():
 
     if args.mode == 'balance':
         await show_balances(exchange)
-        await exchange.close()
-        return
-
-    if args.mode == 'scan':
-        if not args.symbol or not args.strategy:
-            console.print("[bold red]Error: Scan mode requires --symbol and --strategy.[/]")
-            await exchange.close()
-            return
-        await run_scan_mode(exchange, config, args, engine, device)
-        await exchange.close()
-        return
-
-    if args.mode == 'optimization':
-        await run_optimization_test(exchange, config, args, data_manager, pattern_manager, engine, device)
         await exchange.close()
         return
 
@@ -1476,7 +1309,6 @@ async def main():
 
     # Start UI task
     global ui_task, background_tasks, startup_complete
-    mode = args.mode if args.mode else config.get('mode', 'simulation')
     ui_task = asyncio.create_task(run_dashboard(mode, config))
 
     # Initial Batch
@@ -1561,9 +1393,7 @@ async def main():
         logging.info(f"[yellow]Warning: Could not fetch initial balances: {e}")
 
     # Synchronizing positions from the exchange API
-    if mode == 'simulation':
-        await initialize_simulation(exchange, data_manager, pattern_manager, engine, config, device)
-    elif mode == 'live':
+    if mode == 'live':
         logging.info(f"Synchronizing positions from the {exchange_id.capitalize()} API...")
         await sync_live_positions(exchange, data_manager, config)
 
