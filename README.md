@@ -89,6 +89,7 @@ BTC/USDC
 ETH/USDC
 SOL/USDC
 ```
+*Base currencies (e.g., USDC) are automatically detected.*
 
 ### 🔑 `api.json`
 Store your API credentials and preferred exchange.
@@ -99,6 +100,7 @@ Store your API credentials and preferred exchange.
   "exchange_id": "binance"
 }
 ```
+*   **`exchange_id`**: The CCXT ID of the exchange (e.g., `binance`, `kraken`, `okx`, `coinbase`, `gateio`).
 
 ---
 

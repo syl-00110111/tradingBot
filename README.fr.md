@@ -49,7 +49,7 @@ Paramètres principaux du bot.
 *   **`max_open_positions`** : (int) Nombre maximum de paires de trading distinctes ouvertes simultanément (par défaut : `10`).
 *   **`max_trade_percentage`** : (float | object) Pourcentage maximum de votre solde total à exposer par symbole (tous lots confondus) (par défaut : `10`).
 *   * Attention, il s'agit de DIX pourcent par défaut ce qui peut être beaucoup ! Bien vérifier les options avant lancement !
-*   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
+*   **Configuration par devise de base** : Vous pouvez définir différents maximums pour différentes devises de base :
     ```json
     "max_trade_percentage": {
         "BTC": 5.0,
@@ -63,11 +63,11 @@ Paramètres principaux du bot.
 *   **`max_analysis_workers`** : (int) Nombre de workers en parallèle pour l'analyse technique (par défaut : `4`).
 *   **`no_signal_threshold`** : (int) Nombre de bougies sans signal avant de déclencher l'optimisation en arrière-plan (par défaut : `48`).
 
-#### Advanced Overrides (Optional)
-*   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy for every pair.
-*   **`force_agressivity_to_all_pairs`**: (string) Force a specific aggressiveness level (e.g., `dynamic`, `normal`, `aggressive`).
-*   **`pairs`**: (Object) Allows per-pair configuration with multiple techniques.
-    Example:
+#### Surcharges Avancées (Optionnel)
+*   **`force_strategy_to_all_pairs`** : (string) Force le bot à utiliser une stratégie spécifique pour chaque paire.
+*   **`force_agressivity_to_all_pairs`** : (string) Force un niveau d'agressivité spécifique (ex: `dynamic`, `normal`, `aggressive`).
+*   **`pairs`** : (Object) Permet une configuration par paire avec plusieurs techniques.
+    Exemple :
     ```json
     "pairs": {
         "BTC/USDC": {
@@ -87,6 +87,7 @@ BTC/USDC
 ETH/USDC
 SOL/USDC
 ```
+*Les devises de base (ex: USDC) sont automatiquement détectées.*
 
 ### 🔑 `api.json`
 Stockez vos identifiants API et l'échange préféré.
@@ -97,6 +98,7 @@ Stockez vos identifiants API et l'échange préféré.
   "exchange_id": "binance"
 }
 ```
+*   **`exchange_id`** : L'identifiant CCXT de l'échange (ex: `binance`, `kraken`, `okx`, `coinbase`, `gateio`).
 
 ---
 
@@ -114,7 +116,7 @@ Stockez vos identifiants API et l'échange préféré.
 
 *Note: pour Windows il faudra exécuter la commande `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` pour la sécurité, utiliser la révision **3.13** de Python, et installer le **Visual C++ 2015-2022 Redistributable (x64)** que vous pouvez trouver ici [https://aka.ms/vs/17/release/vc_redist.x64.exe] à cause de dépendances spécifiques à cette plateforme.*
 
-**Maintenance régulière:**
+**Maintenance régulière :**
 
 Pour rester à jour concernant les modifications des appels API : `pip install --upgrade ccxt` ou `pip install --upgrade -r requirements.txt` pour lancer la procédure complète de mise à jour des dépendances. Assurez-vous également que **l'horloge** de votre ordinateur est synchronisée.
 
