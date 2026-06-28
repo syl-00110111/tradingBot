@@ -10,7 +10,6 @@ Ce bot implémente des stratégies et une logique recommandées par des études 
 - **Scoring Multi-Techniques** : Agrège les signaux de plusieurs stratégies et profils d'agressivité. Le score du signal est pondéré par le nombre de techniques et le score de l'unité de temps optimale du symbole.
 - **Détection du Régime de Marché** : Utilise une commutation basée sur la volatilité entre le retour à la moyenne (Mean-Reversion) et le suivi de tendance (Trend-Following).
 - **Validation Monte Carlo** : Simulations vectorisées pour estimer la probabilité de succès pour chaque signal, pénalisant les configurations à haut risque.
-- **Optimisation SIMD Matérielle** : Détection et utilisation automatique des jeux d'instructions CPU (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) pour des performances optimisées via PyTorch.
 
 ---
 
@@ -18,17 +17,11 @@ Ce bot implémente des stratégies et une logique recommandées par des études 
 
 ### ⚡ Performance & Fiabilité
 - **Accélération GPU** : Les calculs sont déportés sur la puce graphique via PyTorch. Backends supportés : **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** et **ROCm**.
-- **Trading Multi-Lots** : Possibilité d'ouvrir plusieurs lots (achats successifs) pour une même paire, permettant de moyenner le prix d'entrée tout en gérant la sortie de chaque lot individuellement.
-- **Sortie Sélective Profitable** : Lors d'un signal de vente, le bot identifie et ne revend que les lots qui sont actuellement profitables (frais inclus), conservant les autres en attente de rentabilité.
-- **Tableau de Bord Interactif** : Navigation dans les paires de trading avec les flèches et visualisation des graphiques en chandeliers ASCII en temps réel en appuyant sur **ENTRÉE**.
-- **Découverte Auto des Positions** : Identifie automatiquement les actifs existants dans votre portefeuille et les peuple comme des positions gérées.
-- **Synchronisation API** : Le mode Live utilise exclusivement les données de l'API de l'échange pour les soldes et les positions.
-- **Sélection Dynamique du Timeframe** : Détermine l'unité de temps optimale (1m, 3m, 5m, 15m, 30m) pour chaque paire en fonction du volume 48h, du spread, de la volatilité et de l'activité, afin de tempérer chaque opportunité.
+- - **Optimisation SIMD Matérielle** : Détection et utilisation automatique des jeux d'instructions CPU (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) pour des performances optimisées via PyTorch.
 
 ### 🛡 Gestion des Risques
 - **Logique de Confirmation** : Nécessite des signaux identiques consécutifs pour l'exécution. La fenêtre de confirmation s'élargit automatiquement en cas de haute volatilité (> 0.1).
 - **Suspension Intelligente** : Suspend automatiquement le trading pour les symboles où les ordres échouent ou si le budget est insuffisant. Reprend uniquement lorsque 1.5x le budget requis devient disponible.
-- **Résilience HTTP** : Implémente un refroidissement pour les symboles rencontrant des erreurs serveur lors de l'échange.
 - **Dimensionnement Dynamique** : Les tailles de position sont calculées comme un pourcentage de votre solde disponible, divisé par le nombre maximum de lots autorisés pour maintenir une exposition contrôlée.
 
 ---
