@@ -1272,7 +1272,10 @@ async def main():
     if os.path.exists('api.json'):
         with open('api.json', 'r') as f: api_creds = json.load(f)
 
-    exchange_id = api_creds.get('exchange_id') or config.get('exchange') or 'binance'
+    exchange_id = api_creds.get('exchange_id')
+    if not exchange_id:
+        logging.error("No exchange found. Check your api.json file.")
+    
     if args.mode == 'live':
         exchange = CCXTExchange2(exchange_id,
                                 api_creds.get('api_key') or config.get('api_key'),
