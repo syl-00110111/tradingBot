@@ -17,7 +17,7 @@ Ce bot implémente des stratégies et une logique recommandées par des études 
 
 ### ⚡ Performance & Fiabilité
 - **Accélération GPU** : Les calculs sont déportés sur la puce graphique via PyTorch. Backends supportés : **CUDA**, **MPS**, **Vulkan**, **oneDNN**, **IPEX** et **ROCm**.
-- - **Optimisation SIMD Matérielle** : Détection et utilisation automatique des jeux d'instructions CPU (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) pour des performances optimisées via PyTorch.
+- **Optimisation SIMD Matérielle** : Détection et utilisation automatique des jeux d'instructions CPU (**MMX**, **SSE**, **AVX**, **AVX2**, **AVX512**) pour des performances optimisées via PyTorch.
 
 ### 🛡 Gestion des Risques
 - **Logique de Confirmation** : Nécessite des signaux identiques consécutifs pour l'exécution. La fenêtre de confirmation s'élargit automatiquement en cas de haute volatilité (> 0.1).
@@ -44,9 +44,9 @@ Le bot propose plus de 30 stratégies distinctes, incluant :
 Paramètres principaux du bot.
 
 *   **`max_lots_per_symbol`** : (int) Nombre maximum de lots d'achat autorisés par symbole (par défaut : `1`).
-*   **`max_open_positions`** : (int) Nombre maximum de paires de trading distinctes ouvertes simultanément.
-*   **`max_trade_percentage`** : (float | object) Pourcentage maximum de votre solde total à exposer par symbole (tous lots confondus).
-*   * Attention, il s'agit de DIX pourcent par défaut ce qui peut être beaucoup !! Bien vérifier les options avant lancement live, lancer simulation !!
+*   **`max_open_positions`** : (int) Nombre maximum de paires de trading distinctes ouvertes simultanément (par défaut : `10`).
+*   **`max_trade_percentage`** : (float | object) Pourcentage maximum de votre solde total à exposer par symbole (tous lots confondus) (par défaut : `10`).
+*   * Attention, il s'agit de DIX pourcent par défaut ce qui peut être beaucoup ! Bien vérifier les options avant lancement !
 *   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
     ```json
     "max_trade_percentage": {
