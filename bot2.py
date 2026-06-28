@@ -1276,11 +1276,11 @@ async def main():
     if not exchange_id:
         logging.error("No exchange found. Check your api.json file.")
     
-    if args.mode == 'live':
-        exchange = CCXTExchange2(exchange_id,
-                                api_creds.get('api_key') or config.get('api_key'),
-                                api_creds.get('api_secret') or config.get('api_secret'))
-    elif args.mode == 'balance':
+    exchange = CCXTExchange2(exchange_id,
+                             api_creds.get('api_key') or config.get('api_key'),
+                             api_creds.get('api_secret') or config.get('api_secret'))
+    
+    if args.mode == 'balance':
         await show_balances(exchange)
         await exchange.close()
         return
