@@ -455,38 +455,96 @@ async def input_task(config):
         await asyncio.sleep(0.1)
 
 async def get_optimal_timeframe(exchange, symbol, config):
+    """
+    Dynamically determines the optimal timeframe for a pair.
+
+    The decision is based on 48h volume, spread, volatility, and trades per minute,
+    comparing them against thresholds defined in the configuration.
+
+    Parameters
+    ----------
+    exchange : ExchangeInterface
+        The exchange instance to fetch market data from.
+    symbol : str
+        The trading pair symbol.
+    config : dict
+        The bot configuration containing timeframe thresholds.
+
+    Returns
+    -------
+    tf : str
+        The suggested timeframe (e.g., '1m', '5m', '30m').
+    score : int
+        The calculated score based on market conditions.
+    reasons : list of str
+        List of reasons contributing to the chosen timeframe.
+    """
+    thresholds = config.get('timeframe_thresholds', {})
+
     try:
-        ticker = await exchange.fetch_ticker(symbol)
-        if not ticker: return '1m', 0
-        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=24)
+        ticker = exchange.fetch_ticker(symbol)
+        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=60)
+        trades = exchange.fetch_trades(symbol, limit=1000)
 
+        # 1. Volume 48h
         volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
+        vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
+        vol_high = thresholds.get('volume_48h', {}).get('high', 120000)
 
+        # 2. Spread
         spread_pct = 0.5
         if ticker.get('ask') and ticker.get('bid') and ticker['bid'] > 0:
             spread = ticker['ask'] - ticker['bid']
             spread_pct = (spread / ticker['bid']) * 100
+        spr_low = thresholds.get('spread_pct', {}).get('low', 0.001)
+        spr_high = thresholds.get('spread_pct', {}).get('high', 0.04)
 
+        # 3. Volatility
         volatility = 0.05
-        if ohlcv_1h and len(ohlcv_1h) > 0:
-            closes = [candle[4] for candle in ohlcv_1h]
+        if ohlcv and len(ohlcv) > 0:
+            closes = [candle[4] for candle in ohlcv]
             volatility = (max(closes) - min(closes)) / min(closes)
+        vlt_low = thresholds.get('volatility_pct', {}).get('low', 0.01)
+        vlt_high = thresholds.get('volatility_pct', {}).get('high', 0.1)
 
+        # 4. Trades per minute
+        if trades:
+            times = [t['timestamp'] for t in trades]
+            duration_mins = (max(times) - min(times)) / 60000
+            trades_per_min = len(trades) / duration_mins if duration_mins > 0 else 0
+        else:
+            trades_per_min = 0
+        tpm_low = thresholds.get('trades_per_minute', {}).get('low', 1)
+        tpm_high = thresholds.get('trades_per_minute', {}).get('high', 40)
+
+        # Scoring logic: higher score = faster timeframe
         score = 0
-        if volume_48h > 1200000: score += 2
-        elif volume_48h > 120000: score += 1
-        if spread_pct < 0.01: score += 1
-        if volatility > 0.05: score += 1
+        reasons = []
+        if volume_48h > vol_high: score += 1; reasons.append("High Vol")
+        elif volume_48h < vol_low: score -= 1; reasons.append("Low Vol")
 
-        if score == 4: tf = '1s'
-        elif score == 3: tf = '1m'
+        if spread_pct < spr_low: score += 1; reasons.append("Tight Spread")
+        elif spread_pct > spr_high: score -= 1; reasons.append("Wide Spread")
+
+        if volatility < vlt_low: score += 1; reasons.append("Stable")
+        elif volatility > vlt_high: score -= 1; reasons.append("Volatile")
+
+        if trades_per_min > tpm_high: score += 1; reasons.append("Active")
+        elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
+
+        if score >= 3: tf = '1m'
         elif score == 2: tf = '3m'
         elif score == 1: tf = '5m'
-        else: tf = '15m'
-        return tf, score
+        elif score == 0: tf = '15m'
+        else: tf = '30m'
+
+        # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
+        return tf, score, reasons
+
     except Exception as e:
-        logging.warning(f"Error determining timeframe for {symbol}: {e}")
-        return '1m', 0
+        err_msg = str(e)
+        logging.warning(f"Error determining timeframe for {symbol}: {err_msg}. Defaulting to 1m.")
+        return '1m', 0, [f"Error: {err_msg}"]
 
 async def watch_ohlcv_global_task(exchange, watch_pairs, config):
     """
