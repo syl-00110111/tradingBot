@@ -210,7 +210,7 @@ class CCXTExchange2(ExchangeInterface2):
 
     async def fetch_trades(self, symbol, limit=100):
         try:
-            return self.exchange.fetch_trades(symbol, limit=limit)
+            return await self.exchange.fetch_trades(symbol, limit=limit)
         except Exception as e:
             logging.error(f"Error fetching trades for {symbol}: {e}");
             return []
