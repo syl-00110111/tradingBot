@@ -48,7 +48,8 @@ class TradingEngine:
             "ema_fast": 20, "ema_slow": 50,
             "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
             "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
-            "confirmation_window": 1
+            "confirmation_window": 1,
+            "effective_aggr": aggr
         }
 
         if aggr == 'aggressive':
@@ -60,13 +61,17 @@ class TradingEngine:
             if adx > 25:
                 settings.update({
                     "ema_fast": 10, "ema_slow": 30,
-                    "rsi_buy": 40, "rsi_sell": 60
+                    "rsi_buy": 40, "rsi_sell": 60,
+                    "effective_aggr": "aggressive"
                 })
             elif volatility > 0.015:
                 settings.update({
                     "ema_fast": 30, "ema_slow": 100,
-                    "rsi_buy": 20, "rsi_sell": 80
+                    "rsi_buy": 20, "rsi_sell": 80,
+                    "effective_aggr": "conservative"
                 })
+            else:
+                settings["effective_aggr"] = "normal"
 
         # La haute volatilité ajoute un signal de confirmation supplémentaire globalement
         if volatility > 0.1:
