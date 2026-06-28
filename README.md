@@ -62,6 +62,12 @@ Main parameters of the bot.
 *   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `2.0`).
 *   **`max_analysis_workers`**: (int) Number of parallel workers for technical analysis (default: `4`).
 *   **`no_signal_threshold`**: (int) Number of candles without signals before triggering background optimization (default: `48`).
+*   **`timeframe_thresholds`**: (Object) Configuration for the dynamic timeframe selection engine. The bot evaluates four market metrics to choose the most appropriate timeframe (from `1s` to `15m`):
+    *   **`volume_48h`**: (low/high) 48-hour quote volume. High volume favors faster timeframes.
+    *   **`spread_pct`**: (low/high) Bid/Ask spread percentage. Tight spreads favor faster timeframes.
+    *   **`volatility_pct`**: (low/high) Percentage difference between high and low over the last 60 hours. Low volatility (stability) favors faster timeframes.
+    *   **`trades_per_minute`**: (low/high) Frequency of trades. High activity favors faster timeframes.
+    *   *Scoring Logic*: The bot assigns points based on these thresholds. A score of ≥ 3 triggers `1s`, while lower scores progressively select `1m`, `3m`, `5m`, or `15m`.
 
 #### Advanced Overrides (Optional)
 *   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy for every pair.
