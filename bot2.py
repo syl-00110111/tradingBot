@@ -37,6 +37,47 @@ from monte_carlo2 import MonteCarloEngine
 # Analysis Queue
 analysis_queue = asyncio.Queue()
 
+class WatcherManager:
+    def __init__(self, exchange, config):
+        self.exchange = exchange
+        self.config = config
+        self.global_watcher = None
+        self.pending_reschedules = {}  # symbol -> (old_tf, new_tf)
+        self.aggregation_lock = asyncio.Lock()
+        self.aggregation_task = None
+
+    async def schedule_reschedule(self, symbol, old_tf, new_tf):
+        async with self.aggregation_lock:
+            self.pending_reschedules[symbol] = (old_tf, new_tf)
+            if not self.aggregation_task or self.aggregation_task.done():
+                self.aggregation_task = asyncio.create_task(self._process_reschedules())
+
+    async def _process_reschedules(self):
+        await asyncio.sleep(5)  # 5-second aggregation window
+        async with self.aggregation_lock:
+            changes = self.pending_reschedules.copy()
+            self.pending_reschedules.clear()
+
+        if not changes: return
+
+        logging.info(f"Processing {len(changes)} aggregated timeframe reschedules...")
+        await self.start_global_watcher()
+
+    async def start_global_watcher(self):
+        if self.global_watcher and not self.global_watcher.done():
+            self.global_watcher.cancel()
+
+        # Build list of [symbol, timeframe] for all pairs
+        watch_pairs = []
+        for s in self.config['pairs']:
+            tf = self.config['pairs'][s].get('timeframe', '1m')
+            watch_pairs.append([s, tf])
+
+        self.global_watcher = asyncio.create_task(watch_ohlcv_global_task(self.exchange, watch_pairs, self.config))
+
+# Global Watcher Manager
+watcher_manager = None
+
 # Global controls for dashboard
 pairs_scroll_offset = 0
 selected_pair_index = 0
@@ -363,25 +404,19 @@ async def get_optimal_timeframe(exchange, symbol, config):
         logging.warning(f"Error determining timeframe for {symbol}: {e}")
         return '1m', 0
 
-async def watch_ohlcv_timeframe_task(exchange, symbols, timeframe, config):
-    active_symbols = set(symbols)
-    logging.info(f"Starting OHLCV watcher for {timeframe} group: {list(active_symbols)}")
+async def watch_ohlcv_global_task(exchange, watch_pairs, config):
+    """
+    Single watcher task for all symbols across potentially different timeframes.
+    'watch_pairs' is a list of [symbol, timeframe].
+    """
+    logging.info(f"Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
 
-    async for data in exchange.watch_ohlcv_for_symbols(list(active_symbols), timeframe):
+    async for data in exchange.watch_ohlcv_for_symbols(watch_pairs):
         if shutdown_event.is_set(): break
 
-        if isinstance(data, tuple) and len(data) == 2:
-            symbol, candles = data
+        if isinstance(data, tuple) and len(data) == 3:
+            symbol, timeframe, candles = data
         else: continue
-
-        # Adaptive migration check
-        target_tf = config['pairs'].get(symbol, {}).get('timeframe', timeframe)
-        if target_tf != timeframe:
-            if symbol in active_symbols:
-                active_symbols.remove(symbol)
-                logging.info(f"[{symbol}] Migrating from {timeframe} watcher.")
-            if not active_symbols: break
-            continue
 
         async with ohlcv_lock:
             cache_key = f"{symbol}_{timeframe}"
@@ -470,45 +505,69 @@ async def sync_live_positions(exchange, data_manager, config):
 
         curr_price = ticker['last'] if ticker else 0
         if curr_price > 0:
-            entry_price = curr_price
-            entry_fee = 0
-            entry_total_base = amount * curr_price
-
             try:
-                my_trades = await exchange.fetch_my_trades(symbol, limit=10)
+                my_trades = await exchange.fetch_my_trades(symbol, limit=50)
                 if my_trades:
                     buys = [t for t in my_trades if t['side'] == 'buy']
                     if buys:
+                        # Sort by timestamp descending to get most recent first
                         buys.sort(key=lambda x: x['timestamp'], reverse=True)
-                        last_buy = buys[0]
-                        entry_price = last_buy['price']
 
-                        total_fee = 0
-                        accumulated_amount = 0
+                        remaining_amount = amount
+                        batches_added = 0
+
                         for b in buys:
-                            if accumulated_amount >= amount * 0.99:
+                            if remaining_amount <= amount * 0.001:  # Done
                                 break
+
                             trade_amt = b['amount']
+                            # Clip trade amount to remaining wallet amount
+                            take_amt = min(trade_amt, remaining_amount)
+
+                            # Calculate fee for this portion
+                            trade_fee = 0
                             if 'fee' in b and b['fee']:
                                 fee_cost = b['fee'].get('cost', 0)
                                 fee_currency = b['fee'].get('currency')
                                 _, quote = symbol.split('/')
+
                                 if fee_currency and fee_currency != quote:
                                     try:
                                         fticker = await exchange.fetch_ticker(f"{fee_currency}/{quote}")
-                                        if fticker: fee_cost *= fticker['last']
-                                    except: pass
-                                total_fee += fee_cost
-                            accumulated_amount += trade_amt
+                                        if fticker:
+                                            fee_cost *= fticker['last']
+                                    except:
+                                        pass
+                                # Pro-rate fee if we only take a portion of the trade
+                                trade_fee = (
+                                    fee_cost * take_amt / trade_amt) if trade_amt > 0 else 0
 
-                        entry_fee = total_fee
-                        entry_total_base = (amount * entry_price) + entry_fee
+                            entry_price = b['price']
+                            total_base = (take_amt * entry_price) + trade_fee
+
+                            data_manager.add_position(symbol, entry_price, take_amt, trade_fee, {
+                                                      "info": f"recovered_batch_{batches_added}"}, b['timestamp']/1000, total_base=total_base)
+
+                            remaining_amount -= take_amt
+                            batches_added += 1
+
+                        if remaining_amount > amount * 0.01:
+                            logging.warning(
+                                f"[{symbol}] Could only recover {amount - remaining_amount} out of {amount} from history. Adding residue as placeholder.")
+                            data_manager.add_position(symbol, curr_price, remaining_amount, 0, {
+                                                      "info": "residue_placeholder"}, time.time(), total_base=remaining_amount * curr_price)
+                else:
+                    # No history, fallback to current price
+                    data_manager.add_position(symbol, curr_price, amount, 0, {
+                                              "info": "no_history_fallback"}, time.time(), total_base=amount * curr_price)
             except Exception as e:
-                logging.warning(f"[{symbol}] Failed to recover trade history: {e}")
-
-            data_manager.add_position(symbol, entry_price, amount, entry_fee, {"info": "auto_populated"}, time.time(), total_base=entry_total_base)
+                logging.warning(
+                    f"[{symbol}] Failed to recover trade history: {e}. Using current price fallback.")
+                data_manager.add_position(symbol, curr_price, amount, 0, {
+                                          "info": "error_fallback"}, time.time(), total_base=amount * curr_price)
         else:
-            logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
+            logging.warning(
+                f"[{symbol}] Asset found in wallet but price unavailable.")
 
     logging.info(f"Syncing positions from {exchange_id} API done.")
 
@@ -600,7 +659,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             if new_tf != timeframe:
                 logging.info(f"[{symbol}] Timeframe change: {timeframe} -> {new_tf}")
                 config['pairs'][symbol]['timeframe'] = new_tf
-                asyncio.create_task(watch_ohlcv_timeframe_task(exchange, [symbol], new_tf, config))
+                if watcher_manager:
+                    await watcher_manager.schedule_reschedule(symbol, timeframe, new_tf)
 
         # 3. Multi-technique Evaluation
         pair_config = config['pairs'].get(symbol, {})
@@ -1106,7 +1166,6 @@ async def run_dashboard(mode, config):
 
 async def heartbeat_task():
     while not shutdown_event.is_set():
-        logging.info("Bot heartbeat: alive and watching...")
         await asyncio.sleep(30)
 
 def plot_scan(df, symbol, strategy_name, aggr_name, results):
@@ -1445,15 +1504,12 @@ async def main():
         asyncio.create_task(heartbeat_task())
     ]
 
-    # Adaptive OHLCV Watchers (Grouped by timeframe)
-    tf_groups = {}
-    for symbol in pairs:
-        tf = config['pairs'].get(symbol, {}).get('timeframe', '1m')
-        if tf not in tf_groups: tf_groups[tf] = []
-        tf_groups[tf].append(symbol)
+    # Initialize Watcher Manager
+    global watcher_manager
+    watcher_manager = WatcherManager(exchange, config)
 
-    for tf, syms in tf_groups.items():
-        background_tasks.append(asyncio.create_task(watch_ohlcv_timeframe_task(exchange, syms, tf, config)))
+    # Start Global OHLCV Watcher
+    await watcher_manager.start_global_watcher()
 
     # Dedicated analysis/trade worker
     background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
