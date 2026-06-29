@@ -381,7 +381,7 @@ async def input_task(exchange, config, data_manager, engine):
                     price = bot_state.get(chart_symbol, {}).get('price', 0)
                     if price > 0:
                         logging.info(f"[Manual] Triggering SELL for {chart_symbol}")
-                        asyncio.create_task(execute_sell(exchange, chart_symbol, {'close': price}, data_manager, engine, config))
+                        asyncio.create_task(execute_sell(exchange, chart_symbol, {'close': price}, data_manager, engine, config, force=True))
                 continue
 
             if key == readchar.key.TAB:
@@ -1246,7 +1246,7 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config):
     except Exception as e:
         logging.error(f"Buy failed for {symbol}: {e}")
 
-async def execute_sell(exchange, symbol, data, data_manager, engine, config):
+async def execute_sell(exchange, symbol, data, data_manager, engine, config, force=False):
     async with bot_lock:
         positions = data_manager.get_position(symbol)
         if not positions: return
@@ -1263,15 +1263,16 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config):
     elif balance:
         free_balance = balance.get(asset, 0)
 
-    # Identify all profitable lots
-    profitable_lot_indices = []
+    # Identify lots to sell (profitable or all if forced)
+    sell_lot_indices = []
     total_sell_amount = 0
     for i, pos in enumerate(positions):
-        if engine.is_profitable(price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount']):
-            profitable_lot_indices.append(i)
+        is_profitable = engine.is_profitable(price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount'])
+        if force or is_profitable:
+            sell_lot_indices.append(i)
             total_sell_amount += pos['amount']
 
-    if not profitable_lot_indices:
+    if not sell_lot_indices:
         return
 
     # Cap total sell amount to actual free balance
@@ -1304,12 +1305,12 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config):
             # However, DataManager.close_position handles indices.
             # We must be careful: if we pop multiple times, indices change.
             # It's better to close them one by one starting from the highest index.
-            profitable_lot_indices.sort(reverse=True)
+            sell_lot_indices.sort(reverse=True)
 
             remaining_received = total_received
             remaining_amount = total_sell_amount
 
-            for i in profitable_lot_indices:
+            for i in sell_lot_indices:
                 pos = positions[i]
                 # Proportion of this lot in the total amount sold
                 # We use min(pos['amount'], remaining_amount) in case free_balance capped the total
