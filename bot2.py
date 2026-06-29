@@ -1105,6 +1105,7 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                     'price': latest_base['close'],
                     'ema_f': latest_base.get('ema_f', 0),
                     'ema_s': latest_base.get('ema_s', 0),
+                    'macd_hist': latest_base.get('macd_hist', 0),
                     'rsi': latest_base.get('rsi', 0),
                     'adx': latest_base.get('adx', 0),
                     'volatility': latest_base.get('volatility', 0),
@@ -1134,41 +1135,41 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                 bot_state[symbol]['candles_since_last_signal'] = 0
         else:
             async with bot_lock:
-            candles_since = bot_state[symbol].get('candles_since_last_signal', 0)
-            if not buy_signal and not sell_signal:
-                candles_since += 1
-            else:
-                candles_since = 0
-            bot_state[symbol]['candles_since_last_signal'] = candles_since
+                candles_since = bot_state[symbol].get('candles_since_last_signal', 0)
+                if not buy_signal and not sell_signal:
+                    candles_since += 1
+                else:
+                    candles_since = 0
+                bot_state[symbol]['candles_since_last_signal'] = candles_since
 
-            last_opt = bot_state[symbol].get('last_optimization_ts', 0)
-            curr_time = time.time()
-            # Rationalize optimization: at least 10 minutes between scans, and respect candle threshold
-            if candles_since >= config.get('no_signal_threshold', 20) and (curr_time - last_opt > 600) and symbol not in active_scans:
-                global bench_executor
-                if not bench_executor:
-                    bench_executor = concurrent.futures.ProcessPoolExecutor(
-                        max_workers=os.cpu_count() or 4,
-                        initializer=worker_process_init
-                    )
-                bot_state[symbol]['last_optimization_ts'] = curr_time
-                task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
-                                          symbol, config, timeframe, ['normal'], STRATEGIES[:10], df, engine, device)
-                active_scans[symbol] = task
-                def optimization_done(fut):
-                    try:
-                        sym, best_s, best_p = fut.result()
-                        if best_s:
-                            config['pairs'][sym]['strategy'] = best_s
-                            asyncio.run_coroutine_threadsafe(update_expected_profit(sym, best_p), loop)
-                        if sym in active_scans: del active_scans[sym]
-                    except: pass
+                last_opt = bot_state[symbol].get('last_optimization_ts', 0)
+                curr_time = time.time()
+                # Rationalize optimization: at least 10 minutes between scans, and respect candle threshold
+                if candles_since >= config.get('no_signal_threshold', 20) and (curr_time - last_opt > 600) and symbol not in active_scans:
+                    global bench_executor
+                    if not bench_executor:
+                        bench_executor = concurrent.futures.ProcessPoolExecutor(
+                            max_workers=os.cpu_count() or 4,
+                            initializer=worker_process_init
+                        )
+                    bot_state[symbol]['last_optimization_ts'] = curr_time
+                    task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
+                                              symbol, config, timeframe, ['normal'], STRATEGIES[:10], df, engine, device)
+                    active_scans[symbol] = task
+                    def optimization_done(fut):
+                        try:
+                            sym, best_s, best_p = fut.result()
+                            if best_s:
+                                config['pairs'][sym]['strategy'] = best_s
+                                asyncio.run_coroutine_threadsafe(update_expected_profit(sym, best_p), loop)
+                            if sym in active_scans: del active_scans[sym]
+                        except: pass
 
-                async def update_expected_profit(sym, profit):
-                    async with bot_lock:
-                        bot_state[sym]['expected_profit'] = profit
+                    async def update_expected_profit(sym, profit):
+                        async with bot_lock:
+                            bot_state[sym]['expected_profit'] = profit
 
-                task.add_done_callback(optimization_done)
+                    task.add_done_callback(optimization_done)
 
         # Update State
         async with bot_lock:
@@ -1176,6 +1177,7 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                 'price': latest_base['close'],
                 'ema_f': latest_base.get('ema_f', 0),
                 'ema_s': latest_base.get('ema_s', 0),
+                'macd_hist': latest_base.get('macd_hist', 0),
                 'rsi': latest_base.get('rsi', 0),
                 'adx': latest_base.get('adx', 0),
                 'volatility': latest_base.get('volatility', 0),
