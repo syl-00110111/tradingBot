@@ -49,6 +49,8 @@ class CCXTExchange2(ExchangeInterface2):
 
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
         try:
+            if limit > 1000:
+                return await self.fetch_ohlcv_10k(symbol, timeframe, limit=limit)
             return await asyncio.wait_for(
                 self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit),
                 timeout=30

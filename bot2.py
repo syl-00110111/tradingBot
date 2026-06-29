@@ -18,6 +18,32 @@ import queue
 import pandas as pd
 import torch
 import concurrent.futures
+
+# Immediate Torch and Environment Thread Limiting for Windows Stability
+if platform.system().lower() == 'windows':
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+    os.environ['NUMEXPR_NUM_THREADS'] = '1'
+    try:
+        import torch
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except:
+        pass
+
+def emergency_log(msg):
+    try:
+        timestamp = datetime.now().isoformat()
+        with open("bot_debug.log", "a", encoding='utf-8') as f:
+            f.write(f"{timestamp} - {msg}\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except:
+        pass
+
+emergency_log("BOT SCRIPT LOADED")
 import plotext as plt_ascii
 from datetime import datetime, timedelta, timezone
 
@@ -131,13 +157,6 @@ def handle_stop_signal(sig=None, frame=None):
 # Sound Queue
 sound_queue = queue.Queue()
 
-def emergency_log(msg):
-    try:
-        with open("bot_debug.log", "a") as f:
-            f.write(f"{datetime.now()} - {msg}\n")
-            f.flush()
-    except:
-        pass
 
 def sound_worker(q):
     while True:
@@ -772,15 +791,25 @@ def worker_process_init():
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
     global global_executor
     is_windows = platform.system().lower() == 'windows'
-    default_workers = 2 if is_windows else 4
+    # Cap workers on Windows to avoid silent ThreadPool crashes
+    default_workers = 1 if is_windows else 4
     max_workers = config.get('max_analysis_workers', default_workers)
+    if is_windows:
+        max_workers = 1 # Force 1 worker for extreme stability during debug
+
+    # Global catch for the entire task
+    try:
+        await _dedicated_analysis_task_impl(exchange, config, data_manager, pattern_manager, engine, device, max_workers)
+    except BaseException as e:
+        emergency_log(f"FATAL: dedicated_analysis_task crashed: {type(e).__name__} - {e}")
+        raise
+
+async def _dedicated_analysis_task_impl(exchange, config, data_manager, pattern_manager, engine, device, max_workers):
+    global global_executor
 
     emergency_log(f"Dedicated analysis task entry. Workers: {max_workers}, Device: {device}")
 
     try:
-        # Limit Torch internal threading globally to prevent resource contention/crashes on Windows
-        torch.set_num_threads(1)
-
         if not global_executor:
             emergency_log("Initializing global ThreadPoolExecutor")
             # Switch to ThreadPoolExecutor for Windows/Stability.
@@ -824,7 +853,7 @@ async def dedicated_analysis_task(exchange, config, data_manager, pattern_manage
             emergency_log(f"Worker {w_id} loop exited (shutdown_event set)")
 
         emergency_log(f"Creating {max_workers} worker tasks")
-        workers = [asyncio.create_task(worker(i)) for i in range(max_workers)]
+        workers = [asyncio.create_task(worker(i), name=f"AnalysisWorker-{i}") for i in range(max_workers)]
         # Use return_exceptions=True to prevent gather from failing the whole bot
         emergency_log("Workers gathered, waiting...")
         await asyncio.gather(*workers, return_exceptions=True)
@@ -866,6 +895,7 @@ def run_optimization_for_symbol_sync(symbol, config, timeframe, aggrs, strategie
     return symbol, best_strat, best_profit
 
 async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
+    emergency_log(f"analyze_and_trade entry: {symbol} ({timeframe})")
     logging.debug(f"[{symbol}] Starting analysis pass ({timeframe})")
     try:
         # Check suspensions
@@ -898,9 +928,6 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         # Calculations must remain aligned with the assigned timeframe
         if timeframe != '1s':
             # Resample 1s data to assigned timeframe
-            # Note: timeframe is '1m', '3m', etc. Pandas understands these.
-            # Using 'min' instead of 'm' for pandas compatibility if needed,
-            # but usually '1T' or '1min' is safest. Bot uses '1m', '3m' etc.
             pd_tf = timeframe.replace('m', 'min').replace('s', 's')
             df = df_1s.resample(pd_tf).agg({
                 'open': 'first',
@@ -912,15 +939,19 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         else:
             df = df_1s
 
-        if len(df) < 20: return
+        if len(df) < 20:
+            emergency_log(f"[{symbol}] Insufficient candles after resample: {len(df)}")
+            return
 
         loop = asyncio.get_event_loop()
 
         # 1. Expert Mode indicators & Regime detection
+        emergency_log(f"[{symbol}] Calling get_signals (Regime detection)")
         if executor:
             df = await loop.run_in_executor(executor, get_signals, df, {'device': device})
         else:
             df = get_signals(df, {'device': device})
+        emergency_log(f"[{symbol}] get_signals completed (Regime detection)")
 
         latest_base = df.iloc[-1]
         market_regime = latest_base.get('regime', 'trend_following')
@@ -1165,7 +1196,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         elif sell_signal:
             await execute_sell(exchange, symbol, latest_base, data_manager, engine, config)
 
-    except Exception as e:
+    except BaseException as e:
+        emergency_log(f"CRITICAL: analyze_and_trade failed for {symbol}: {type(e).__name__} - {e}")
         logging.error(f"Analysis error for {symbol}: {e}")
 
 async def execute_buy(exchange, symbol, data, data_manager, engine, config):
@@ -1700,10 +1732,11 @@ async def main():
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    # Initial candles must correspond to the one-second timeframe (limit 2000)
+                    # Fetch more candles to support higher timeframes resampled from 1s
+                    # 5000 candles at 1s = ~83 minutes. Enough for 20 candles of 3m (60m).
                     tf = '1s'
                     logging.info(f"Fetching initial 1s candles for {symbol}...")
-                    ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=2000)
+                    ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=5000)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     for col in ['open', 'high', 'low', 'close', 'volume']:
