@@ -227,6 +227,26 @@ class DataManager:
             else: break
         return streak
 
+    def get_last_trade_exit_timestamp(self, symbol):
+        """
+        Récupère l'horodatage de la dernière transaction clôturée pour un symbole.
+
+        Paramètres
+        ----------
+        symbol : str
+            Le symbole de la paire de trading.
+
+        Retourne
+        -------
+        float
+            L'horodatage de clôture (Unix timestamp), ou 0 si aucune transaction trouvée.
+        """
+        history = self.data.get("trade_history", [])
+        for trade in reversed(history):
+            if trade.get("symbol") == symbol:
+                return trade.get("exit_timestamp", 0)
+        return 0
+
 class CacheManager:
     """
     Gestionnaire pour la mise en cache à court terme en mémoire des résultats de découverte.
