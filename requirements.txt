@@ -1,5 +1,5 @@
 ccxt
-pandas
+pandas <= 3.0.3
 pandas-ta
 rich
 readchar

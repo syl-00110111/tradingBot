@@ -8,3 +8,4 @@ api.json
 config.json
 trades_*.json
 fatal_error.log
+bot_debug.log
