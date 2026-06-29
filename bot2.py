@@ -288,19 +288,9 @@ def render_ascii_chart(symbol, config):
     if df_1s is None or df_1s.empty:
         return Text(f"No data available for {symbol}", style="bold red")
 
-    timeframe = get_timeframe(symbol, config)
-
-    if timeframe != '1s':
-        pd_tf = timeframe.replace('m', 'min')
-        df = df_1s.resample(pd_tf).agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-    else:
-        df = df_1s
+    # Always use 1s for candles view
+    timeframe = '1s'
+    df = df_1s
 
     df = df.tail(100)
     last_ts = int(df.index[-1].timestamp())
@@ -345,7 +335,7 @@ def render_ascii_chart(symbol, config):
     chart_cache = {"symbol": symbol, "last_update": last_ts, "content": content}
     return content
 
-async def input_task(config):
+async def input_task(exchange, config, data_manager, engine):
     global focused_panel, selected_pair_index, pairs_scroll_offset, logs_scroll_offset
     global expert_mode, marquee_enabled, show_help, show_chart, chart_symbol
     global pairs_pause_until, logs_pause_until
@@ -382,6 +372,16 @@ async def input_task(config):
                 if key in [readchar.key.ENTER, readchar.key.ESC, 'q', 'Q', 'h', 'H']:
                     show_chart = False
                     show_help = False
+                elif show_chart and chart_symbol and key.lower() == 'b':
+                    price = bot_state.get(chart_symbol, {}).get('price', 0)
+                    if price > 0:
+                        logging.info(f"[Manual] Triggering BUY for {chart_symbol}")
+                        asyncio.create_task(execute_buy(exchange, chart_symbol, {'close': price}, data_manager, engine, config))
+                elif show_chart and chart_symbol and key.lower() == 's':
+                    price = bot_state.get(chart_symbol, {}).get('price', 0)
+                    if price > 0:
+                        logging.info(f"[Manual] Triggering SELL for {chart_symbol}")
+                        asyncio.create_task(execute_sell(exchange, chart_symbol, {'close': price}, data_manager, engine, config))
                 continue
 
             if key == readchar.key.TAB:
@@ -1592,7 +1592,7 @@ def make_dashboard(config):
     # 3. Status Bar
     status_text = Text()
     status_text.append(f"Update: {now.strftime('%H:%M:%S')} | ", style="bold brown")
-    status_text.append("TAB: Switch | Arrows: Scroll | H: Help | X: Expert | M: Marquee | Exit: Ctrl+C", style="bold red")
+    status_text.append("TAB: Switch | Arrows: Scroll | H: Help | X: Expert | M: Marquee | B/S: Buy/Sell (Candles) | Exit: Ctrl+C", style="bold red")
 
     display_width = console.width - 4
     max_status_offset = max(0, len(status_text) - display_width)
@@ -1613,6 +1613,8 @@ def make_dashboard(config):
         help_text.append("  TAB    : Switch focus between Logs and Pairs\n")
         help_text.append("  UP/DN  : Move selection / Scroll the focused panel\n")
         help_text.append("  ENTER  : Show/Hide K-Lines for selected symbol\n")
+        help_text.append("  B      : Manual BUY (only in Candle View)\n")
+        help_text.append("  S      : Manual SELL (only in Candle View)\n")
         help_text.append("  X      : Toggle Expert Mode\n")
         help_text.append("  M      : Toggle Marquee Effect\n")
         help_text.append("  H      : Close this help menu\n")
@@ -1820,7 +1822,7 @@ async def main():
     background_tasks = [
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager)),
-        asyncio.create_task(input_task(config)),
+        asyncio.create_task(input_task(exchange, config, data_manager, engine)),
         asyncio.create_task(heartbeat_task())
     ]
 
