@@ -407,7 +407,7 @@ def get_signals(df, mode_config, is_scan=False):
     if needs_recalc:
         # Ensure OHLCV columns are numeric to avoid conversion errors from object type
         for col in ['open', 'high', 'low', 'close', 'volume']:
-            if col in df.columns and df[col].dtype == 'object':
+            if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
         # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU

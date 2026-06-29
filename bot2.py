@@ -759,8 +759,17 @@ def worker_process_init():
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
     max_workers = config.get('max_analysis_workers', 4)
     logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
+
+    # Use 'spawn' start method for process pool to avoid CUDA/fork issues
+    import multiprocessing as mp
+    try:
+        ctx = mp.get_context('spawn')
+    except:
+        ctx = mp
+
     executor = concurrent.futures.ProcessPoolExecutor(
         max_workers=os.cpu_count() or 4,
+        mp_context=ctx,
         initializer=worker_process_init
     )
 
@@ -1703,7 +1712,22 @@ async def main():
     await sync_live_positions(exchange, data_manager, config)
 
     # Dedicated analysis/trade worker
-    background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
+    def task_exception_handler(task):
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logging.error(f"Background task failed: {e}", exc_info=True)
+            # Create a fatal error log for persistent storage
+            with open("fatal_error.log", "a") as f:
+                f.write(f"{datetime.now()} - FATAL TASK ERROR: {str(e)}\n")
+                import traceback
+                f.write(traceback.format_exc())
+
+    analysis_task = asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device))
+    analysis_task.add_done_callback(task_exception_handler)
+    background_tasks.append(analysis_task)
 
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(4)
