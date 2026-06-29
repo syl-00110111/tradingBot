@@ -1233,11 +1233,17 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config):
 
             order = await exchange.create_order(symbol, 'buy', amount)
             if order:
-                fee = order.get('fee', {}).get('cost', 0)
+                filled = order.get('filled', 0) or amount
                 final_price = order.get('price') or price
-                total_base = (amount * final_price) + fee
-                data_manager.add_position(symbol, final_price, amount, fee, {}, time.time(), total_base=total_base)
-                logging.info(f"[{symbol}] BUY executed at {final_price}")
+                cost = order.get('cost') or (filled * final_price)
+
+                fee_cost = order.get('fee', {}).get('cost', 0)
+                fee_currency = order.get('fee', {}).get('currency')
+                fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+
+                total_base = cost + fee
+                data_manager.add_position(symbol, final_price, filled, fee, {}, time.time(), total_base=total_base)
+                logging.info(f"[{symbol}] BUY executed at {final_price} (Filled: {filled})")
                 play_sound("buy")
                 async with bot_lock:
                     bot_state[symbol]['position'] = data_manager.get_position(symbol)
@@ -1297,38 +1303,44 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     try:
         order = await exchange.create_order(symbol, 'sell', total_sell_amount)
         if order:
-            total_fee = order.get('fee', {}).get('cost', 0)
+            filled_amount = order.get('filled', 0) or total_sell_amount
             actual_price = order.get('price') or price
-            total_received = (total_sell_amount * actual_price) - total_fee
+            cost_received = order.get('cost') or (filled_amount * actual_price)
 
-            # Close positions in reverse order to maintain index integrity if using list.pop
-            # However, DataManager.close_position handles indices.
-            # We must be careful: if we pop multiple times, indices change.
-            # It's better to close them one by one starting from the highest index.
+            fee_cost = order.get('fee', {}).get('cost', 0)
+            fee_currency = order.get('fee', {}).get('currency')
+            total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+
+            total_net_received = cost_received - total_fee
+
+            # Close positions in reverse order to maintain index integrity
             sell_lot_indices.sort(reverse=True)
 
-            remaining_received = total_received
-            remaining_amount = total_sell_amount
+            remaining_filled = filled_amount
 
             for i in sell_lot_indices:
-                pos = positions[i]
-                # Proportion of this lot in the total amount sold
-                # We use min(pos['amount'], remaining_amount) in case free_balance capped the total
-                lot_sell_amt = min(pos['amount'], remaining_amount)
-                if lot_sell_amt <= 0: continue
+                if remaining_filled <= 1e-10: break
 
-                proportion = lot_sell_amt / total_sell_amount
-                lot_received = total_received * proportion
+                pos = positions[i]
+                lot_close_amt = min(pos['amount'], remaining_filled)
+                if lot_close_amt <= 0: continue
+
+                # Proportion of this fill attributed to this lot
+                proportion = lot_close_amt / filled_amount
+                lot_net_received = total_net_received * proportion
                 lot_fee = total_fee * proportion
 
-                # Calculate profit for this specific lot
-                entry_cost_part = pos.get('entry_total_base', 0) * (lot_sell_amt / pos['amount'])
-                lot_profit = lot_received - entry_cost_part
+                # Proportional entry cost for the part of the lot being closed
+                entry_cost_part = pos.get('entry_total_base', 0) * (lot_close_amt / pos['amount'])
+                lot_profit = lot_net_received - entry_cost_part
 
-                data_manager.close_position(symbol, actual_price, lot_fee, lot_profit, {}, time.time(), total_base=lot_received, lot_index=i)
-                remaining_amount -= lot_sell_amt
+                data_manager.close_position(
+                    symbol, actual_price, lot_fee, lot_profit, {}, time.time(),
+                    total_base=lot_net_received, lot_index=i, amount=lot_close_amt
+                )
+                remaining_filled -= lot_close_amt
 
-            logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Amount: {total_sell_amount}, Profit: {total_received:.2f})")
+            logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Filled: {filled_amount}, Profit: {total_net_received:.4f})")
             play_sound("sell")
 
             async with bot_lock:

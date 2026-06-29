@@ -20,6 +20,7 @@ class ExchangeInterface2:
     async def fetch_balance(self): raise NotImplementedError
     async def load_markets(self): raise NotImplementedError
     async def fetch_trading_fee(self, symbol): raise NotImplementedError
+    async def get_fee_in_quote(self, symbol, fee_cost, fee_currency): raise NotImplementedError
     async def fetch_my_trades(self, symbol, limit=10): raise NotImplementedError
     async def fetch_trades(self, symbol, limit=100): raise NotImplementedError
     def amount_to_precision(self, symbol, amount): raise NotImplementedError
@@ -215,6 +216,32 @@ class CCXTExchange2(ExchangeInterface2):
             logging.error(f"Error fetching trades for {symbol}: {e}");
             return []
 
+    async def get_fee_in_quote(self, symbol, fee_cost, fee_currency):
+        if not fee_currency: return fee_cost
+        _, quote = symbol.split('/')
+        if fee_currency == quote: return fee_cost
+
+        try:
+            # Try to find a ticker for fee_currency/quote
+            pair = f"{fee_currency}/{quote}"
+            ticker = await self.fetch_ticker(pair)
+            if ticker:
+                return fee_cost * ticker['last']
+        except:
+            pass
+
+        # Fallback: if we can't find a direct ticker, maybe it's fee_currency/USDT and quote/USDT
+        if quote != 'USDT':
+            try:
+                ticker_fee = await self.fetch_ticker(f"{fee_currency}/USDT")
+                ticker_quote = await self.fetch_ticker(f"{quote}/USDT")
+                if ticker_fee and ticker_quote:
+                    return fee_cost * (ticker_fee['last'] / ticker_quote['last'])
+            except:
+                pass
+
+        return fee_cost # Final fallback
+
     def amount_to_precision(self, symbol, amount):
         return self.exchange.amount_to_precision(symbol, amount)
 
@@ -340,6 +367,11 @@ class MockExchange2(ExchangeInterface2):
         if self.real_exchange:
             return await self.real_exchange.fetch_my_trades(symbol, limit)
         return []
+
+    async def get_fee_in_quote(self, symbol, fee_cost, fee_currency):
+        if self.real_exchange:
+            return await self.real_exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+        return fee_cost
 
     def amount_to_precision(self, symbol, amount):
         return str(amount)
