@@ -451,13 +451,13 @@ def get_signals(df, mode_config, is_scan=False):
         # Whale Detection Proxy (Common)
         df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
         df['vol_std_whale'] = df['volume'].rolling(window=20).std()
-        df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
+        df['whale_active'] = np.where(df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale']), 1, 0)
 
         # Market Regime Proxy (Common) - Improved Detection
         # Typically: ADX < 25 = Ranging/Mean Reversion, ADX >= 25 = Trending
         # We also use volatility relative to its mean.
         df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
-        df['is_mean_rev'] = ((df['adx'] < 25) | (df['volatility'] > 1.5 * df['vol_ma_regime'])).astype(int)
+        df['is_mean_rev'] = np.where((df['adx'] < 25) | (df['volatility'] > 1.5 * df['vol_ma_regime']), 1, 0)
         df['regime'] = np.where(df['is_mean_rev'] == 1, 'mean_reversion', 'trend_following')
 
     # Initialize default score and tendency if not present

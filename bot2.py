@@ -2,6 +2,13 @@
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import asyncio
+import multiprocessing as mp
+# Set spawn method globally at the start for stability with CUDA/Torch
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeWarning:
+    pass
+
 import json
 import time
 import logging
@@ -41,6 +48,9 @@ from monte_carlo2 import MonteCarloEngine
 analysis_queue = asyncio.PriorityQueue()
 analysis_set = set()
 analysis_tracking_lock = asyncio.Lock()
+
+# Global ProcessPoolExecutor to avoid repeated creation and overhead
+global_executor = None
 
 class WatcherManager:
     def __init__(self, exchange, config):
@@ -757,28 +767,24 @@ def worker_process_init():
         pass
 
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
+    global global_executor
     max_workers = config.get('max_analysis_workers', 4)
     logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
 
-    # Use 'spawn' start method for process pool to avoid CUDA/fork issues
-    import multiprocessing as mp
-    try:
+    if not global_executor:
         ctx = mp.get_context('spawn')
-    except:
-        ctx = mp
-
-    executor = concurrent.futures.ProcessPoolExecutor(
-        max_workers=os.cpu_count() or 4,
-        mp_context=ctx,
-        initializer=worker_process_init
-    )
+        global_executor = concurrent.futures.ProcessPoolExecutor(
+            max_workers=max(1, (os.cpu_count() or 4)),
+            mp_context=ctx,
+            initializer=worker_process_init
+        )
 
     async def worker():
         while not shutdown_event.is_set():
             symbol, timeframe = None, None
             try:
                 priority, (symbol, timeframe) = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
-                await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor)
+                await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, global_executor)
 
                 # Update last analysis timestamp
                 async with bot_lock:
@@ -836,6 +842,7 @@ def run_optimization_for_symbol_sync(symbol, config, timeframe, aggrs, strategie
     return symbol, best_strat, best_profit
 
 async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
+    logging.debug(f"[{symbol}] Starting analysis pass ({timeframe})")
     try:
         # Check suspensions
         now_ts = time.time()
@@ -1091,14 +1098,15 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             curr_time = time.time()
             # Rationalize optimization: at least 10 minutes between scans, and respect candle threshold
             if candles_since >= config.get('no_signal_threshold', 20) and (curr_time - last_opt > 600) and symbol not in active_scans:
-                global bench_executor
-                if not bench_executor:
-                    bench_executor = concurrent.futures.ProcessPoolExecutor(
-                        max_workers=os.cpu_count() or 4,
+                global global_executor
+                if not global_executor:
+                    global_executor = concurrent.futures.ProcessPoolExecutor(
+                        max_workers=max(1, (os.cpu_count() or 4)),
+                        mp_context=mp.get_context('spawn'),
                         initializer=worker_process_init
                     )
                 bot_state[symbol]['last_optimization_ts'] = curr_time
-                task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
+                task = loop.run_in_executor(global_executor, run_optimization_for_symbol_sync,
                                           symbol, config, timeframe, ['normal'], STRATEGIES[:10], df, engine, device)
                 active_scans[symbol] = task
                 def optimization_done(fut):
@@ -1783,8 +1791,8 @@ async def main():
                 await asyncio.wait(all_tasks, timeout=3)
             except: pass
 
-        global bench_executor
-        if bench_executor: bench_executor.shutdown(wait=False)
+        global global_executor
+        if global_executor: global_executor.shutdown(wait=False)
 
         try:
             await exchange.close()
@@ -1799,13 +1807,26 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Emergency console print to verify it starts
+        print(f"[{datetime.now()}] Bot v2 process starting...")
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    except Exception as e:
-        # Final emergency log
+    except KeyboardInterrupt:
+        print(f"[{datetime.now()}] Bot v2 stopped by user.")
+    except BaseException as e:
+        # Capture SystemExit and all other errors for diagnostics
+        err_msg = str(e) or "Unknown fatal error/exit"
+        try:
+            logging.error(f"FATAL: {err_msg}")
+        except:
+            pass
+        print(f"[{datetime.now()}] FATAL CRASH: {err_msg}")
         with open("fatal_error.log", "a") as f:
-            f.write(f"{datetime.now()} - FATAL ERROR: {str(e)}\n")
+            f.write(f"{datetime.now()} - FATAL ERROR: {err_msg}\n")
             import traceback
             f.write(traceback.format_exc())
-        console.print_exception()
+        if not isinstance(e, SystemExit):
+            try:
+                console.print_exception()
+            except:
+                import traceback
+                traceback.print_exc()
