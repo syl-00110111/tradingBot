@@ -132,9 +132,9 @@ class DataManager:
             for pos in self.data["open_positions"][symbol]:
                 pos["ignore_sell"] = value
 
-    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, lot_index=0):
+    def close_position(self, symbol, exit_price, exit_fee, profit, trigger_data, timestamp, total_base=0, lot_index=0, amount=None):
         """
-        Ferme un lot spécifique et le déplace vers l'historique des transactions.
+        Ferme tout ou partie d'un lot spécifique et le déplace vers l'historique des transactions.
 
         Paramètres
         ----------
@@ -154,6 +154,8 @@ class DataManager:
             Le montant total reçu en devise de base (par défaut 0).
         lot_index : int, optional
             L'index du lot à fermer (par défaut 0).
+        amount : float, optional
+            La quantité spécifique à fermer (si None, ferme tout le lot).
 
         Retourne
         -------
@@ -161,16 +163,37 @@ class DataManager:
             Les données de la transaction enregistrée, ou None si aucun lot n'a été trouvé.
         """
         if symbol in self.data["open_positions"] and len(self.data["open_positions"][symbol]) > lot_index:
-            position = self.data["open_positions"][symbol].pop(lot_index)
+            lot = self.data["open_positions"][symbol][lot_index]
 
-            # Si plus de positions pour ce symbole, on supprime la clé
-            if not self.data["open_positions"][symbol]:
-                self.data["open_positions"].pop(symbol)
+            close_amount = amount if amount is not None else lot["amount"]
+
+            # Use epsilon to avoid float precision issues when checking if lot is fully closed
+            if amount is None or abs(close_amount - lot["amount"]) < 1e-10:
+                # Full closure
+                position = self.data["open_positions"][symbol].pop(lot_index)
+                if not self.data["open_positions"][symbol]:
+                    self.data["open_positions"].pop(symbol)
+
+                trade_entry_fee = position.get("entry_fee", 0)
+                trade_entry_total_base = position.get("entry_total_base", 0)
+            else:
+                # Partial closure
+                proportion = close_amount / lot["amount"]
+                trade_entry_fee = lot.get("entry_fee", 0) * proportion
+                trade_entry_total_base = lot.get("entry_total_base", 0) * proportion
+
+                # Update remaining lot
+                lot["amount"] -= close_amount
+                # Re-calculating entry_fee and entry_total_base for the remaining part
+                if "entry_fee" in lot: lot["entry_fee"] -= trade_entry_fee
+                if "entry_total_base" in lot: lot["entry_total_base"] -= trade_entry_total_base
+
+                position = lot # for the trade history below
 
             trade = {
                 "symbol": symbol, "entry_price": position["entry_price"], "exit_price": exit_price,
-                "amount": position["amount"], "entry_fee": position.get("entry_fee", 0),
-                "entry_total_base": position.get("entry_total_base", 0), "exit_fee": exit_fee,
+                "amount": close_amount, "entry_fee": trade_entry_fee,
+                "entry_total_base": trade_entry_total_base, "exit_fee": exit_fee,
                 "exit_total_base": total_base, "profit": profit, "entry_trigger": position.get("trigger_data", {}),
                 "exit_trigger": trigger_data, "entry_timestamp": position["timestamp"], "exit_timestamp": timestamp,
                 "sell_signals_received": position.get("sell_signals_received", 0)
