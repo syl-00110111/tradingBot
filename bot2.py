@@ -3,12 +3,6 @@
 
 import asyncio
 import multiprocessing as mp
-# Set spawn method globally at the start for stability with CUDA/Torch
-try:
-    mp.set_start_method('spawn', force=True)
-except RuntimeWarning:
-    pass
-
 import json
 import time
 import logging
@@ -44,12 +38,17 @@ from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
 
-# Analysis Queue and Tracking
-analysis_queue = asyncio.PriorityQueue()
-analysis_set = set()
-analysis_tracking_lock = asyncio.Lock()
+# Global synchronization objects (Initialized in main)
+shutdown_event = None
+bot_lock = None
+ohlcv_lock = None
+analysis_tracking_lock = None
+analysis_queue = None
 
-# Global ProcessPoolExecutor to avoid repeated creation and overhead
+# Analysis Tracking
+analysis_set = set()
+
+# Global Executor to avoid repeated creation and overhead
 global_executor = None
 
 class WatcherManager:
@@ -105,7 +104,7 @@ expert_mode = False
 show_help = False
 startup_complete = False
 marquee_enabled = False
-shutdown_event = asyncio.Event()
+shutdown_event = None # Initialized in main()
 ui_task = None
 background_tasks = []
 active_scans = {}
@@ -129,30 +128,38 @@ def handle_stop_signal(sig=None, frame=None):
         os._exit(1)
     shutdown_event.set()
 
-# Sound Queue and Worker for non-blocking audio
+# Sound Queue
 sound_queue = queue.Queue()
 
-def sound_worker():
+def emergency_log(msg):
+    try:
+        with open("bot_debug.log", "a") as f:
+            f.write(f"{datetime.now()} - {msg}\n")
+            f.flush()
+    except:
+        pass
+
+def sound_worker(q):
     while True:
         try:
-            item = sound_queue.get()
+            item = q.get()
             if item is None: break
             action, config = item
 
             system = platform.system().lower()
             if system == "windows":
                 import winsound
-                if action == "startup":
-                    for _ in range(5):
-                        winsound.Beep(random.randint(440, 880), 100)
-                elif action == "buy":
-                    # Use MessageBeep for better compatibility with sound cards
-                    winsound.MessageBeep(winsound.MB_OK)
-                    # Also try Beep as fallback/extra
-                    winsound.Beep(1000, 250)
-                elif action == "sell":
-                    winsound.MessageBeep(winsound.MB_ICONHAND)
-                    winsound.Beep(600, 250)
+                try:
+                    if action == "startup":
+                        for _ in range(5):
+                            winsound.Beep(random.randint(440, 880), 100)
+                    elif action == "buy":
+                        winsound.MessageBeep(winsound.MB_OK)
+                        winsound.Beep(1000, 250)
+                    elif action == "sell":
+                        winsound.MessageBeep(winsound.MB_ICONHAND)
+                        winsound.Beep(600, 250)
+                except: pass
             else:
                 if action == "startup":
                     sys.stdout.write("\a")
@@ -161,22 +168,18 @@ def sound_worker():
                 elif action == "sell":
                     sys.stdout.write("\a\a")
                 sys.stdout.flush()
-            sound_queue.task_done()
+            q.task_done()
         except Exception:
             pass
 
-# Start the dedicated sound thread
-threading.Thread(target=sound_worker, daemon=True).start()
-
 def play_sound(action, config=None):
-    sound_queue.put((action, config))
+    if sound_queue:
+        sound_queue.put((action, config))
 
 # State shared between tasks
 bot_state = {}
 pair_suspensions = {}
 current_balances = {}
-bot_lock = asyncio.Lock()
-ohlcv_lock = asyncio.Lock()
 
 console = Console()
 
@@ -768,47 +771,68 @@ def worker_process_init():
 
 async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
     global global_executor
-    max_workers = config.get('max_analysis_workers', 4)
-    logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
+    is_windows = platform.system().lower() == 'windows'
+    default_workers = 2 if is_windows else 4
+    max_workers = config.get('max_analysis_workers', default_workers)
 
-    if not global_executor:
-        ctx = mp.get_context('spawn')
-        global_executor = concurrent.futures.ProcessPoolExecutor(
-            max_workers=max(1, (os.cpu_count() or 4)),
-            mp_context=ctx,
-            initializer=worker_process_init
-        )
-
-    async def worker():
-        while not shutdown_event.is_set():
-            symbol, timeframe = None, None
-            try:
-                priority, (symbol, timeframe) = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
-                await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, global_executor)
-
-                # Update last analysis timestamp
-                async with bot_lock:
-                    if symbol in bot_state:
-                        bot_state[symbol]['last_analysis_ts'] = time.time()
-
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logging.error(f"Error in analysis worker: {e}")
-            finally:
-                if symbol:
-                    async with analysis_tracking_lock:
-                        if symbol in analysis_set:
-                            analysis_set.remove(symbol)
-                    analysis_queue.task_done()
+    emergency_log(f"Dedicated analysis task entry. Workers: {max_workers}, Device: {device}")
 
     try:
-        workers = [asyncio.create_task(worker()) for _ in range(max_workers)]
-        await asyncio.gather(*workers)
-    finally:
-        executor.shutdown(wait=False)
+        # Limit Torch internal threading globally to prevent resource contention/crashes on Windows
+        torch.set_num_threads(1)
+
+        if not global_executor:
+            emergency_log("Initializing global ThreadPoolExecutor")
+            # Switch to ThreadPoolExecutor for Windows/Stability.
+            # Torch releases GIL, making threads efficient for calculation.
+            # This avoids heavy RAM usage and spawn/fork crashes.
+            global_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(1, (os.cpu_count() or 4))
+            )
+
+        logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
+        emergency_log("Workers about to be created")
+
+        async def worker(w_id):
+            emergency_log(f"Worker {w_id} task object created")
+            logging.info(f"Worker {w_id} starting.")
+            while not shutdown_event.is_set():
+                symbol, timeframe = None, None
+                try:
+                    priority, (symbol, timeframe) = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
+                    logging.info(f"Worker {w_id} processing {symbol} ({timeframe})")
+                    await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, global_executor)
+
+                    # Update last analysis timestamp
+                    async with bot_lock:
+                        if symbol in bot_state:
+                            bot_state[symbol]['last_analysis_ts'] = time.time()
+
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    emergency_log(f"Worker {w_id} exception: {e}")
+                    logging.error(f"Error in analysis worker for {symbol}: {e}")
+                finally:
+                    if symbol:
+                        async with analysis_tracking_lock:
+                            if symbol in analysis_set:
+                                analysis_set.remove(symbol)
+                        analysis_queue.task_done()
+            emergency_log(f"Worker {w_id} loop exited (shutdown_event set)")
+
+        emergency_log(f"Creating {max_workers} worker tasks")
+        workers = [asyncio.create_task(worker(i)) for i in range(max_workers)]
+        # Use return_exceptions=True to prevent gather from failing the whole bot
+        emergency_log("Workers gathered, waiting...")
+        await asyncio.gather(*workers, return_exceptions=True)
+        emergency_log("Workers gather completed")
+    except Exception as e:
+        logging.error(f"Fatal error in dedicated_analysis_task: {e}", exc_info=True)
+        # Re-raise to ensure it's handled by task_exception_handler
+        raise e
 
 def run_optimization_for_symbol_sync(symbol, config, timeframe, aggrs, strategies, df, engine, device):
     from indicators2 import get_signals
@@ -1100,10 +1124,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             if candles_since >= config.get('no_signal_threshold', 20) and (curr_time - last_opt > 600) and symbol not in active_scans:
                 global global_executor
                 if not global_executor:
-                    global_executor = concurrent.futures.ProcessPoolExecutor(
-                        max_workers=max(1, (os.cpu_count() or 4)),
-                        mp_context=mp.get_context('spawn'),
-                        initializer=worker_process_init
+                    global_executor = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=max(1, (os.cpu_count() or 4))
                     )
                 bot_state[symbol]['last_optimization_ts'] = curr_time
                 task = loop.run_in_executor(global_executor, run_optimization_for_symbol_sync,
@@ -1538,6 +1560,18 @@ async def heartbeat_task():
         await asyncio.sleep(30)
 
 async def main():
+    global shutdown_event, bot_lock, ohlcv_lock, analysis_tracking_lock, analysis_queue
+
+    # Initialize all asyncio synchronization objects within the active loop
+    shutdown_event = asyncio.Event()
+    bot_lock = asyncio.Lock()
+    ohlcv_lock = asyncio.Lock()
+    analysis_tracking_lock = asyncio.Lock()
+    analysis_queue = asyncio.PriorityQueue()
+
+    # Sound worker start
+    threading.Thread(target=sound_worker, args=(sound_queue,), daemon=True).start()
+
     parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot v2 (Asynchronous)')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--fast-start', action='store_true', help='Skip fetching initial candles')
@@ -1547,7 +1581,9 @@ async def main():
     # Hardware Acceleration Detection
     global device, gpu_enabled, use_mkldnn
     use_mkldnn = False
-    if args.no_gpu:
+    system_name = platform.system().lower()
+    logging.info(f"System: {platform.system()} {platform.release()} ({platform.machine()})")
+    if args.no_gpu or system_name == 'windows':
         device = torch.device('cpu')
         gpu_enabled = False
     else:
@@ -1573,6 +1609,7 @@ async def main():
             gpu_enabled = True
         else:
             try:
+                if system_name == 'windows': raise Exception("Windows GPU via Torch can be unstable in this async context, defaulting to CPU.")
                 import intel_extension_for_pytorch as ipex
                 if torch.xpu.is_available():
                     device = torch.device('xpu')
@@ -1581,6 +1618,8 @@ async def main():
             except:
                 device = torch.device('cpu')
                 gpu_enabled = False
+
+    logging.info(f"Hardware Detection: Device={device}, GPU={gpu_enabled}, MKLDNN={use_mkldnn}")
 
     config = load_config()
 
@@ -1806,27 +1845,55 @@ async def main():
             console.print(f"[{log['timestamp']}] {log['msg']}")
 
 if __name__ == "__main__":
+    # 1. Essential for multiprocessing on Windows
     try:
-        # Emergency console print to verify it starts
-        print(f"[{datetime.now()}] Bot v2 process starting...")
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print(f"[{datetime.now()}] Bot v2 stopped by user.")
-    except BaseException as e:
-        # Capture SystemExit and all other errors for diagnostics
-        err_msg = str(e) or "Unknown fatal error/exit"
+        mp.freeze_support()
+    except:
+        pass
+
+    # 2. Standardize on spawn method at the entry point for stability
+    if platform.system().lower() != 'windows':
         try:
-            logging.error(f"FATAL: {err_msg}")
+            mp.set_start_method('spawn', force=True)
         except:
             pass
-        print(f"[{datetime.now()}] FATAL CRASH: {err_msg}")
+
+    # 3. Main execution loop with enhanced error capture
+    try:
+        print(f"[{datetime.now()}] Bot v2 process starting...", flush=True)
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n[{datetime.now()}] Bot v2 stopped by user (Ctrl+C).", flush=True)
+    except SystemExit as e:
+        print(f"[{datetime.now()}] Bot v2 exited via sys.exit({e.code})", flush=True)
+        with open("fatal_error.log", "a") as f:
+            f.write(f"{datetime.now()} - SystemExit: {e.code}\n")
+            import traceback
+            traceback.print_stack(file=f)
+    except BaseException as e:
+        err_msg = str(e) or f"Exception type: {type(e).__name__}"
+        print(f"[{datetime.now()}] FATAL CRASH: {err_msg}", flush=True)
+
+        # Log to file
         with open("fatal_error.log", "a") as f:
             f.write(f"{datetime.now()} - FATAL ERROR: {err_msg}\n")
             import traceback
             f.write(traceback.format_exc())
-        if not isinstance(e, SystemExit):
+            f.flush()
+
+        # Windows specific exit prevention to see the error
+        if platform.system().lower() == 'windows':
+            print("\nPress Any Key to close...", flush=True)
             try:
-                console.print_exception()
+                import msvcrt
+                msvcrt.getch()
             except:
-                import traceback
-                traceback.print_exc()
+                time.sleep(10)
+
+        # Try to show pretty traceback if possible
+        try:
+            from rich.console import Console
+            Console().print_exception()
+        except:
+            import traceback
+            traceback.print_exc()
