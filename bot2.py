@@ -1263,47 +1263,77 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config):
     elif balance:
         free_balance = balance.get(asset, 0)
 
-    any_sold = False
-    for i in range(len(positions) - 1, -1, -1):
-        pos = positions[i]
+    # Identify all profitable lots
+    profitable_lot_indices = []
+    total_sell_amount = 0
+    for i, pos in enumerate(positions):
         if engine.is_profitable(price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount']):
-            try:
-                # Use minimum of recorded position amount and actual free balance
-                sell_amount = min(pos['amount'], free_balance)
+            profitable_lot_indices.append(i)
+            total_sell_amount += pos['amount']
 
-                # Minimum notional/amount check
-                market = exchange.markets.get(symbol)
-                if market and 'limits' in market:
-                    min_amt = market['limits']['amount']['min'] or 0
-                    if sell_amount < min_amt:
-                        logging.warning(f"[{symbol}] Sell amount {sell_amount} is below minimum {min_amt}. Skipping.")
-                        continue
+    if not profitable_lot_indices:
+        return
 
-                if sell_amount <= 0:
-                    logging.warning(f"[{symbol}] No free balance to sell for lot {i}. Skipping.")
-                    continue
+    # Cap total sell amount to actual free balance
+    total_sell_amount = min(total_sell_amount, free_balance)
+    if total_sell_amount <= 0:
+        return
 
-                order = await exchange.create_order(symbol, 'sell', sell_amount)
-                if order:
-                    # Update free_balance for next lot in same loop
-                    free_balance -= sell_amount
-                    fee = order.get('fee', {}).get('cost', 0)
-                    actual_price = order.get('price') or price
-                    # Accurate calculation based on actual amount sold
-                    total_received = (sell_amount * actual_price) - fee
-                    # Calculate proportional entry cost if we sold less than the full lot
-                    proportion = (sell_amount / pos['amount']) if pos['amount'] > 0 else 1.0
-                    entry_cost_part = pos.get('entry_total_base', 0) * proportion
-                    profit = total_received - entry_cost_part
+    # Minimum notional/amount check for the entire bundle
+    market = exchange.markets.get(symbol)
+    if market and 'limits' in market:
+        min_amt = market.get('limits', {}).get('amount', {}).get('min') or 0
+        min_cost = market.get('limits', {}).get('cost', {}).get('min') or 0
 
-                    data_manager.close_position(symbol, actual_price, fee, profit, {}, time.time(), total_base=total_received, lot_index=i)
-                    logging.info(f"[{symbol}] SELL executed at {actual_price} (Amount: {sell_amount}, Profit: {profit:.2f})")
-                    play_sound("sell")
-                    any_sold = True
-            except Exception as e:
-                logging.error(f"Sell failed for {symbol} lot {i}: {e}")
+        if total_sell_amount < min_amt:
+            logging.warning(f"[{symbol}] Aggregated sell amount {total_sell_amount} is below minimum {min_amt}. Skipping.")
+            return
 
-    if any_sold:
+        if (total_sell_amount * price) < min_cost:
+            logging.warning(f"[{symbol}] Aggregated sell cost {total_sell_amount * price} is below minimum notional {min_cost}. Skipping.")
+            return
+
+    try:
+        order = await exchange.create_order(symbol, 'sell', total_sell_amount)
+        if order:
+            total_fee = order.get('fee', {}).get('cost', 0)
+            actual_price = order.get('price') or price
+            total_received = (total_sell_amount * actual_price) - total_fee
+
+            # Close positions in reverse order to maintain index integrity if using list.pop
+            # However, DataManager.close_position handles indices.
+            # We must be careful: if we pop multiple times, indices change.
+            # It's better to close them one by one starting from the highest index.
+            profitable_lot_indices.sort(reverse=True)
+
+            remaining_received = total_received
+            remaining_amount = total_sell_amount
+
+            for i in profitable_lot_indices:
+                pos = positions[i]
+                # Proportion of this lot in the total amount sold
+                # We use min(pos['amount'], remaining_amount) in case free_balance capped the total
+                lot_sell_amt = min(pos['amount'], remaining_amount)
+                if lot_sell_amt <= 0: continue
+
+                proportion = lot_sell_amt / total_sell_amount
+                lot_received = total_received * proportion
+                lot_fee = total_fee * proportion
+
+                # Calculate profit for this specific lot
+                entry_cost_part = pos.get('entry_total_base', 0) * (lot_sell_amt / pos['amount'])
+                lot_profit = lot_received - entry_cost_part
+
+                data_manager.close_position(symbol, actual_price, lot_fee, lot_profit, {}, time.time(), total_base=lot_received, lot_index=i)
+                remaining_amount -= lot_sell_amt
+
+            logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Amount: {total_sell_amount}, Profit: {total_received:.2f})")
+            play_sound("sell")
+
+            async with bot_lock:
+                bot_state[symbol]['position'] = data_manager.get_position(symbol)
+    except Exception as e:
+        logging.error(f"Aggregated sell failed for {symbol}: {e}")
         async with bot_lock:
             bot_state[symbol]['position'] = data_manager.get_position(symbol)
 
