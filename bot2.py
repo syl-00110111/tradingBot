@@ -484,6 +484,9 @@ async def get_optimal_timeframe(exchange, symbol, config):
 
     try:
         ticker = await exchange.fetch_ticker(symbol)
+        if not ticker:
+            raise ValueError("Ticker returned None")
+
         ohlcv = await exchange.fetch_ohlcv(symbol, '1h', limit=60)
         trades = await exchange.fetch_trades(symbol, limit=1000)
 
@@ -545,7 +548,8 @@ async def get_optimal_timeframe(exchange, symbol, config):
     except Exception as e:
         err_msg = str(e)
         logging.warning(f"Error determining timeframe for {symbol}: {err_msg}. Defaulting to 1m.")
-        return '1m', 0, [f"Error: {err_msg}"]
+        # Return exactly two values as expected by the caller
+        return '1m', 0
 
 async def watch_ohlcv_global_task(exchange, watch_pairs, config):
     """
@@ -1185,19 +1189,50 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config):
     price = data['close']
     fee_rate = await exchange.fetch_trading_fee(symbol)
 
+    # Fetch actual balance to avoid "insufficient balance" errors due to external trades or fees
+    asset = symbol.split('/')[0]
+    balance = await exchange.fetch_balance()
+    free_balance = 0
+    if balance and 'free' in balance:
+        free_balance = balance['free'].get(asset, 0)
+    elif balance:
+        free_balance = balance.get(asset, 0)
+
     any_sold = False
     for i in range(len(positions) - 1, -1, -1):
         pos = positions[i]
         if engine.is_profitable(price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount']):
             try:
-                order = await exchange.create_order(symbol, 'sell', pos['amount'])
+                # Use minimum of recorded position amount and actual free balance
+                sell_amount = min(pos['amount'], free_balance)
+
+                # Minimum notional/amount check
+                market = exchange.markets.get(symbol)
+                if market and 'limits' in market:
+                    min_amt = market['limits']['amount']['min'] or 0
+                    if sell_amount < min_amt:
+                        logging.warning(f"[{symbol}] Sell amount {sell_amount} is below minimum {min_amt}. Skipping.")
+                        continue
+
+                if sell_amount <= 0:
+                    logging.warning(f"[{symbol}] No free balance to sell for lot {i}. Skipping.")
+                    continue
+
+                order = await exchange.create_order(symbol, 'sell', sell_amount)
                 if order:
+                    # Update free_balance for next lot in same loop
+                    free_balance -= sell_amount
                     fee = order.get('fee', {}).get('cost', 0)
                     actual_price = order.get('price') or price
-                    total_received = (pos['amount'] * actual_price) - fee
-                    profit = total_received - pos.get('entry_total_base', 0)
+                    # Accurate calculation based on actual amount sold
+                    total_received = (sell_amount * actual_price) - fee
+                    # Calculate proportional entry cost if we sold less than the full lot
+                    proportion = (sell_amount / pos['amount']) if pos['amount'] > 0 else 1.0
+                    entry_cost_part = pos.get('entry_total_base', 0) * proportion
+                    profit = total_received - entry_cost_part
+
                     data_manager.close_position(symbol, actual_price, fee, profit, {}, time.time(), total_base=total_received, lot_index=i)
-                    logging.info(f"[{symbol}] SELL executed at {actual_price} (Profit: {profit:.2f})")
+                    logging.info(f"[{symbol}] SELL executed at {actual_price} (Amount: {sell_amount}, Profit: {profit:.2f})")
                     play_sound("sell")
                     any_sold = True
             except Exception as e:
