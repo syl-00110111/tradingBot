@@ -1269,36 +1269,58 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     elif balance:
         free_balance = balance.get(asset, 0)
 
-    # Identify lots to sell (profitable or all if forced)
+    # Stage 1: Collect profitable lots (or all if forced)
     sell_lot_indices = []
     total_sell_amount = 0
+    total_entry_cost = 0
     for i, pos in enumerate(positions):
         is_profitable = engine.is_profitable(price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount'])
         if force or is_profitable:
             sell_lot_indices.append(i)
             total_sell_amount += pos['amount']
+            total_entry_cost += pos.get('entry_total_base', 0)
 
     if not sell_lot_indices:
         return
 
-    # Cap total sell amount to actual free balance
-    total_sell_amount = min(total_sell_amount, free_balance)
-    if total_sell_amount <= 0:
-        return
-
-    # Minimum notional/amount check for the entire bundle
+    # Stage 2: If under limit, try adding non-profitable lots to reach limit IF entire bundle remains profitable
     market = exchange.markets.get(symbol)
+    min_amt = 0
+    min_cost = 0
     if market and 'limits' in market:
         min_amt = market.get('limits', {}).get('amount', {}).get('min') or 0
         min_cost = market.get('limits', {}).get('cost', {}).get('min') or 0
 
-        if total_sell_amount < min_amt:
-            logging.warning(f"[{symbol}] Aggregated sell amount {total_sell_amount} is below minimum {min_amt}. Skipping.")
-            return
+    if not force and (total_sell_amount < min_amt or (total_sell_amount * price) < min_cost):
+        other_indices = [i for i in range(len(positions)) if i not in sell_lot_indices]
+        # Sort by performance (closest to break-even first)
+        other_indices.sort(key=lambda idx: price / positions[idx]['entry_price'], reverse=True)
 
-        if (total_sell_amount * price) < min_cost:
-            logging.warning(f"[{symbol}] Aggregated sell cost {total_sell_amount * price} is below minimum notional {min_cost}. Skipping.")
-            return
+        for idx in other_indices:
+            pos = positions[idx]
+            new_amount = total_sell_amount + pos['amount']
+            new_entry_cost = total_entry_cost + pos.get('entry_total_base', 0)
+            # estimated net proceeds for the whole bundle
+            new_net_proceeds = new_amount * price * (1 - fee_rate)
+
+            if new_net_proceeds > new_entry_cost:
+                sell_lot_indices.append(idx)
+                total_sell_amount = new_amount
+                total_entry_cost = new_entry_cost
+                if total_sell_amount >= min_amt and (total_sell_amount * price) >= min_cost:
+                    break
+
+    # Cap total sell amount to actual free balance
+    if total_sell_amount > free_balance:
+        total_sell_amount = free_balance
+
+    # Final check against exchange limits
+    if total_sell_amount < min_amt:
+        logging.warning(f"[{symbol}] Bundle sell amount {total_sell_amount:.4f} still below minimum {min_amt}. Skipping.")
+        return
+    if (total_sell_amount * price) < min_cost:
+        logging.warning(f"[{symbol}] Bundle sell cost {total_sell_amount * price:.4f} still below minimum notional {min_cost}. Skipping.")
+        return
 
     try:
         order = await exchange.create_order(symbol, 'sell', total_sell_amount)
@@ -1317,28 +1339,38 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
             sell_lot_indices.sort(reverse=True)
 
             remaining_filled = filled_amount
+            remaining_net_received = total_net_received
+            remaining_fee = total_fee
 
-            for i in sell_lot_indices:
+            for idx, i in enumerate(sell_lot_indices):
                 if remaining_filled <= 1e-10: break
 
                 pos = positions[i]
                 lot_close_amt = min(pos['amount'], remaining_filled)
                 if lot_close_amt <= 0: continue
 
-                # Proportion of this fill attributed to this lot
-                proportion = lot_close_amt / filled_amount
-                lot_net_received = total_net_received * proportion
-                lot_fee = total_fee * proportion
+                # Distribution logic: for the last lot or full remainder, use remaining values to avoid precision drift
+                if idx == len(sell_lot_indices) - 1 or lot_close_amt >= remaining_filled - 1e-10:
+                    current_lot_received = remaining_net_received
+                    current_lot_fee = remaining_fee
+                    lot_close_amt = remaining_filled
+                else:
+                    proportion = lot_close_amt / filled_amount
+                    current_lot_received = total_net_received * proportion
+                    current_lot_fee = total_fee * proportion
 
                 # Proportional entry cost for the part of the lot being closed
                 entry_cost_part = pos.get('entry_total_base', 0) * (lot_close_amt / pos['amount'])
-                lot_profit = lot_net_received - entry_cost_part
+                lot_profit = current_lot_received - entry_cost_part
 
                 data_manager.close_position(
-                    symbol, actual_price, lot_fee, lot_profit, {}, time.time(),
-                    total_base=lot_net_received, lot_index=i, amount=lot_close_amt
+                    symbol, actual_price, current_lot_fee, lot_profit, {}, time.time(),
+                    total_base=current_lot_received, lot_index=i, amount=lot_close_amt
                 )
+
                 remaining_filled -= lot_close_amt
+                remaining_net_received -= current_lot_received
+                remaining_fee -= current_lot_fee
 
             logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Filled: {filled_amount}, Profit: {total_net_received:.4f})")
             play_sound("sell")
