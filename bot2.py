@@ -1319,6 +1319,11 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
             logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Filled: {filled_amount}, Profit: {total_net_received:.4f})")
             play_sound("sell")
 
+            # Post-sale dust cleanup
+            if await is_pair_dust(symbol, exchange, config):
+                data_manager.clear_positions(symbol)
+                logging.info(f"[{symbol}] Remaining balance is dust. Clearing open positions.")
+
             async with bot_lock:
                 bot_state[symbol]['position'] = data_manager.get_position(symbol)
     except Exception as e:
