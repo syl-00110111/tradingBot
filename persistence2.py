@@ -229,6 +229,13 @@ class DataManager:
         """
         return self.data["open_positions"].get(symbol)
 
+    def clear_positions(self, symbol):
+        """
+        Supprime toutes les positions ouvertes pour un symbole (utile pour le nettoyage de poussière).
+        """
+        if symbol in self.data["open_positions"]:
+            del self.data["open_positions"][symbol]
+
     def get_win_streak(self, symbol):
         """
         Calcule la série de victoires actuelle pour un symbole.
