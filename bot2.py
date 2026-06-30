@@ -39,8 +39,6 @@ from monte_carlo2 import MonteCarloEngine
 
 # Analysis Queue and Tracking
 analysis_queue = asyncio.PriorityQueue()
-analysis_set = set()
-analysis_tracking_lock = asyncio.Lock()
 
 class WatcherManager:
     def __init__(self, exchange, config):
@@ -597,21 +595,9 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                             if symbol in bot_state:
                                 bot_state[symbol]['price'] = candles[-1][4]
 
-                async with analysis_tracking_lock:
-                    if symbol not in analysis_set:
-                        last_anal = 0
-                        assigned_tf = get_timeframe(symbol, config)
-                        async with bot_lock:
-                            if symbol in bot_state:
-                                last_anal = bot_state[symbol].get('last_analysis_ts', 0)
-
-                        # Schedule analysis only if the assigned timeframe interval has passed
-                        interval = TIMEFRAME_SECONDS.get(assigned_tf, 60)
-                        if time.time() - last_anal >= interval:
-                            # Priority is (TF_Priority, last_anal) to ensure longer TFs are not starved
-                            priority = (get_tf_priority(assigned_tf), last_anal)
-                            await analysis_queue.put((priority, (symbol, assigned_tf)))
-                            analysis_set.add(symbol)
+                # No longer pushing analyses from the global watcher.
+                # A single pass is performed at startup, and workers re-enqueue pairs.
+                pass
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"WebSocket OHLCV reconnection error: {e}")
@@ -715,14 +701,16 @@ async def dedicated_analysis_task(exchange, config, data_manager, pattern_manage
     async def worker():
         while not shutdown_event.is_set():
             symbol, timeframe = None, None
+            last_anal = 0
             try:
                 priority, (symbol, timeframe) = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
                 await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor)
 
                 # Update last analysis timestamp
+                last_anal = time.time()
                 async with bot_lock:
                     if symbol in bot_state:
-                        bot_state[symbol]['last_analysis_ts'] = time.time()
+                        bot_state[symbol]['last_analysis_ts'] = last_anal
 
             except asyncio.TimeoutError:
                 continue
@@ -730,11 +718,13 @@ async def dedicated_analysis_task(exchange, config, data_manager, pattern_manage
                 break
             except Exception as e:
                 logging.error(f"Error in analysis worker: {e}")
+                last_anal = time.time() # Still re-enqueue on error
             finally:
                 if symbol:
-                    async with analysis_tracking_lock:
-                        if symbol in analysis_set:
-                            analysis_set.remove(symbol)
+                    # Re-enqueue the pair for continuous analysis (single instance per pair)
+                    # Use priority (TF_Priority, last_anal)
+                    priority = (get_tf_priority(timeframe), last_anal)
+                    await analysis_queue.put((priority, (symbol, timeframe)))
                     analysis_queue.task_done()
 
     try:
@@ -1360,11 +1350,8 @@ async def watch_orders_task(exchange, data_manager):
                 # fully WebSocket-driven for fills.
 
 def get_timeframe(symbol, config):
-    """Utility to get the current timeframe for a symbol consistently."""
-    tf = config.get('pairs', {}).get(symbol, {}).get('timeframe')
-    if not tf or not isinstance(tf, str):
-        return '1m'
-    return tf.lower().strip()
+    """Utility to get the current timeframe for a symbol consistently. Forced to 1s."""
+    return '1s'
 
 def get_tf_priority(tf):
     """Higher timeframe = Lower number = Higher priority in PriorityQueue."""
@@ -1799,14 +1786,11 @@ async def main():
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
-    # Seed analysis queue with initial pairs (priority 0)
-    async with analysis_tracking_lock:
-        for symbol in pairs:
-            # We still analyze based on assigned timeframe
-            tf = get_timeframe(symbol, config)
-            priority = (get_tf_priority(tf), 0)
-            await analysis_queue.put((priority, (symbol, tf)))
-            analysis_set.add(symbol)
+    # Seed analysis queue with initial pairs (priority 0) - exactly one instance per pair
+    for symbol in pairs:
+        tf = get_timeframe(symbol, config)
+        priority = (get_tf_priority(tf), 0)
+        await analysis_queue.put((priority, (symbol, tf)))
 
     # Start WebSocket Tasks
     logging.info("[bold green]Starting WebSocket tasks...")
