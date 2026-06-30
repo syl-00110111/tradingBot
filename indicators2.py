@@ -384,7 +384,7 @@ def get_signals(df, mode_config, is_scan=False):
     _mc_engine.set_device(device)
 
     # Common indicators for tendency and background analysis (Expert Mode)
-    if df.empty or len(df) < 4000: return df
+    if df.empty or len(df) < 250: return df
 
     # For multi-technique scanning, we check if the requested EMA/RSI settings
     # match what's already in the dataframe. If not, we MUST recalculate.
