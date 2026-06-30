@@ -1167,7 +1167,9 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 
                 total_base = cost + fee
                 data_manager.add_position(symbol, final_price, filled, fee, {}, time.time(), total_base=total_base)
-                logging.info(f"[{symbol}] BUY executed at {final_price} (Filled: {filled})")
+
+                _, quote = symbol.split('/')
+                logging.info(f"[{symbol}] BUY executed at {format_price(final_price)} (Filled: {format_amt(filled)}, Spent: {format_price(total_base)} {quote})")
                 play_sound("buy")
                 async with bot_lock:
                     bot_state[symbol]['position'] = data_manager.get_position(symbol)
@@ -1314,7 +1316,8 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                 remaining_fee -= current_lot_fee
 
             actual_total_profit = total_net_received - total_entry_cost_of_filled
-            logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Filled: {filled_amount}, Profit: {actual_total_profit:.4f})")
+            _, quote = symbol.split('/')
+            logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Profit: {format_price(actual_total_profit)}, Received: {format_price(total_net_received)} {quote})")
             play_sound("sell")
 
             # Post-sale dust cleanup
