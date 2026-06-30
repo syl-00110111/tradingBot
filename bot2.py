@@ -579,11 +579,12 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                     df_1s = ohlcv_cache[cache_key_1s]
 
                     # 1. Update 1s cache efficiently
-                    for candle in candles:
-                        ts = pd.to_datetime(candle[0], unit='ms')
-                        df_1s.loc[ts] = [float(x) for x in candle[1:]]
+                    new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
+                    new_candles_df.set_index('timestamp', inplace=True)
 
-                    # Sort and tail 1s history (10k is ~2.7h)
+                    df_1s = pd.concat([df_1s, new_candles_df])
+                    df_1s = df_1s[~df_1s.index.duplicated(keep='last')]
                     df_1s.sort_index(inplace=True)
                     ohlcv_cache[cache_key_1s] = df_1s.tail(10000)
 
@@ -596,22 +597,18 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
 
                         target_df = ohlcv_cache[target_key]
 
-                        # Find the first 1s candle that could affect the target timeframe
-                        # We resample everything from the start of the earliest bucket covered by the new candles
                         pd_tf = target_tf.replace('m', 'min').replace('s', 's')
                         first_new_ts = pd.to_datetime(candles[0][0], unit='ms')
                         bucket_start = first_new_ts.floor(pd_tf)
 
-                        # Resample only the affected portion of the 1s buffer
                         affected_1s = df_1s.loc[bucket_start:]
                         if not affected_1s.empty:
                             resampled_new = affected_1s.resample(pd_tf).agg({
                                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
                             }).dropna()
 
-                            for ts, row in resampled_new.iterrows():
-                                target_df.loc[ts] = row
-
+                            target_df = pd.concat([target_df, resampled_new])
+                            target_df = target_df[~target_df.index.duplicated(keep='last')]
                             target_df.sort_index(inplace=True)
                             ohlcv_cache[target_key] = target_df.tail(10000)
 
@@ -651,8 +648,9 @@ async def sync_live_positions(exchange, data_manager, config):
         all_tickers = await exchange.fetch_tickers()
     except: pass
 
-    for asset, amount in free_balances.items():
-        if asset in base_currencies or amount <= 0: continue
+    async def process_asset(asset, amount):
+        nonlocal sellable_found
+        if asset in base_currencies or amount <= 0: return
 
         symbol = None
         for bc in base_currencies:
@@ -660,14 +658,14 @@ async def sync_live_positions(exchange, data_manager, config):
             if candidate in pairs_dict:
                 symbol = candidate
                 break
-        if not symbol: continue
+        if not symbol: return
 
         existing_pos_list = data_manager.get_position(symbol)
         if existing_pos_list:
             total_existing_amount = sum(p['amount'] for p in existing_pos_list)
             if abs(total_existing_amount - amount) / amount < 0.001:
                 sellable_found = True
-                continue
+                return
 
         is_dust = False
         try:
@@ -681,16 +679,15 @@ async def sync_live_positions(exchange, data_manager, config):
             elif amount <= 0.000001: is_dust = True
         except: pass
 
-        if is_dust: continue
+        if is_dust: return
         sellable_found = True
 
-        # Try to find the weighted average entry price from trade history
         avg_price = 0
         total_cost = 0
         accumulated_amount = 0
         try:
-            trades = await exchange.fetch_my_trades(symbol, limit=50)
-            # Sort trades by timestamp descending to get most recent first
+            # Add timeout to prevent hanging on slow responses
+            trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=50), timeout=10)
             trades.sort(key=lambda t: t['timestamp'], reverse=True)
 
             for t in trades:
@@ -704,8 +701,6 @@ async def sync_live_positions(exchange, data_manager, config):
 
             if accumulated_amount > 0:
                 avg_price = total_cost / accumulated_amount
-                # If we couldn't find enough buy trades to cover the balance,
-                # we use the average of what we found, or fallback to current price for the rest
                 if accumulated_amount < amount * 0.99:
                     ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
                     curr_p = ticker['last'] if ticker else 0
@@ -721,8 +716,6 @@ async def sync_live_positions(exchange, data_manager, config):
             avg_price = ticker['last'] if ticker else 0
 
         if avg_price > 0:
-            # Mark these as pre-launch to avoid automated selling if desired,
-            # though here we have a real entry price now.
             data_manager.add_position(
                 symbol, avg_price, amount, 0,
                 {"info": "launch_sync", "auto_sell_disabled": True}, time.time(),
@@ -731,6 +724,9 @@ async def sync_live_positions(exchange, data_manager, config):
             logging.info(f"[{symbol}] Synced balance: {amount} at calculated avg price {format_price(avg_price)}")
         else:
             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
+
+    # Parallelize processing of all assets
+    await asyncio.gather(*[process_asset(a, am) for a, am in free_balances.items()])
 
     # Update global bot_state for dashboard
     async with bot_lock:
@@ -851,7 +847,7 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             if cache_key not in ohlcv_cache: return
             df = ohlcv_cache[cache_key].copy()
 
-        if df.empty or len(df) < 4000: return
+        if df.empty or len(df) < 250: return
 
         loop = asyncio.get_event_loop()
 
@@ -1600,6 +1596,10 @@ async def main():
     global ui_task, background_tasks, startup_complete
     ui_task = asyncio.create_task(run_dashboard(config))
 
+    # Indicate startup has begun
+    startup_complete = True
+    logging.info("[bold cyan]System initialization started...")
+
     # Initial Batch
     for symbol in pairs:
         pair_cfg = config['pairs'][symbol]
@@ -1637,10 +1637,10 @@ async def main():
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    # 1. Always fetch historical 1s candles (Target: 4000)
+                    # 1. Always fetch historical 1s candles (Target: 10000)
                     tf = get_timeframe(symbol, config)
-                    logging.info(f"Fetching initial 1s candles for {symbol} (Target: 4000)...")
-                    ohlcv_1s = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=4000)
+                    logging.info(f"Fetching initial 1s candles for {symbol} (Target: 10000)...")
+                    ohlcv_1s = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=10000)
                     df_1s = pd.DataFrame(ohlcv_1s, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
                     for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -1715,7 +1715,6 @@ async def main():
 
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(4)
-    startup_complete = True
     logging.info("[bold green]Bot v2 fully operational.")
 
     # Trigger initial chart and display update
