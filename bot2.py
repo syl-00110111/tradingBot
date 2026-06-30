@@ -785,7 +785,7 @@ def run_optimization_for_symbol_sync(symbol, config, timeframe, aggrs, strategie
 
     return symbol, best_strat, best_profit
 
-async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
+async def analyze_and_trade_2(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
     try:
         # Check suspensions
         now_ts = time.time()
@@ -1106,6 +1106,108 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         if buy_signal:
             await execute_buy(exchange, symbol, latest_base, data_manager, engine, config)
         elif sell_signal:
+            await execute_sell(exchange, symbol, latest_base, data_manager, engine, config)
+
+    except Exception as e:
+        logging.error(f"Analysis error for {symbol}: {e}")
+
+async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
+    try:
+        # Check suspensions
+        now_ts = time.time()
+        is_suspended = False
+        if symbol in pair_suspensions:
+            susp = pair_suspensions[symbol]
+            if now_ts < susp.get('until', 0):
+                is_suspended = True
+            elif susp.get('reason') == 'budget':
+                balance = current_balances
+                base_curr = symbol.split('/')[1]
+                free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
+                if free_bal >= susp.get('amount_required', 0) * 1.2:
+                    logging.info(f"[{symbol}] Budget recovered. Resuming pair.")
+                    del pair_suspensions[symbol]
+                else:
+                    is_suspended = True
+            else:
+                del pair_suspensions[symbol]
+
+        # We now use pre-aggregated candles from the cache for the target timeframe
+        cache_key = f"{symbol}_{timeframe}"
+        async with ohlcv_lock:
+            if cache_key not in ohlcv_cache: return
+            df = ohlcv_cache[cache_key].copy()
+
+        if df.empty or len(df) < 4000: return
+
+        latest_base = df.iloc[-1]
+
+        loop = asyncio.get_event_loop()
+
+        # 2. Adaptive Timeframe Discovery
+        last_tf_check = config.get('pairs', {}).get(symbol, {}).get('_last_tf_check', 0)
+        if time.time() - last_tf_check > 900:
+            new_tf, score = await get_optimal_timeframe(exchange, symbol, config)
+            config.setdefault('pairs', {}).setdefault(symbol, {})['_last_tf_check'] = time.time()
+            if new_tf != timeframe:
+                config['pairs'][symbol]['timeframe'] = new_tf
+                if watcher_manager:
+                    await watcher_manager.schedule_reschedule(symbol, timeframe, new_tf)
+
+        # 3. Multi-technique Evaluation
+        pair_config = config['pairs'].get(symbol, {})
+        techniques = pair_config.get('techniques', [])
+        buy_count = 0
+        sell_count = 0
+        total_score = 0
+
+        for t in techniques:
+            strat = t.get('strategy')
+            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
+            mode_settings['strategy'] = strat
+            mode_settings['device'] = device
+            async with bot_lock:
+                bot_state[symbol]['strategy'] = f"{strat} (Lite)"
+
+            res_df = await loop.run_in_executor(executor, get_signals, df.copy(), mode_settings)
+            if not res_df.empty:
+                latest = res_df.iloc[-1]
+                has_buy = latest.get('buy_signal')
+                has_sell = latest.get('sell_signal')
+                if has_buy:
+                    total_score += 1
+                    buy_count += 1
+
+                if has_sell:
+                    sell_count += 1
+                    total_score += 1
+
+        # Signal Subtraction
+        diff = buy_count - sell_count
+        final_buy_count = max(0, diff)
+        final_sell_count = max(0, -diff)
+
+        buy_candidate = final_buy_count > 0
+        sell_candidate = final_sell_count > 0
+
+        # Update State
+        async with bot_lock:
+            bot_state[symbol].update({
+                'price': latest_base['close'],
+                'ema_f': latest_base.get('ema_f', 0),
+                'ema_s': latest_base.get('ema_s', 0),
+                'macd_hist': latest_base.get('macd_hist', 0),
+                'rsi': latest_base.get('rsi', 0),
+                'adx': latest_base.get('adx', 0),
+                'volatility': latest_base.get('volatility', 0),
+                'score': total_score,
+                'tendency': "Bullish" if total_score > 0 else ("Bearish" if total_score < 0 else "Neutral"),
+                'last_signal': 'Buy' if buy_candidate else ('Sell' if sell_candidate else 'Waiting')
+            })
+
+        if buy_candidate:
+            await execute_buy(exchange, symbol, latest_base, data_manager, engine, config)
+        elif sell_candidate:
             await execute_sell(exchange, symbol, latest_base, data_manager, engine, config)
 
     except Exception as e:
