@@ -78,6 +78,10 @@ class WatcherManager:
 # Global Watcher Manager
 watcher_manager = None
 
+# Track orders placed by the bot to process them via WebSocket confirmation
+pending_orders = {} # order_id -> metadata_dict
+pending_orders_lock = asyncio.Lock()
+
 # Global controls for dashboard
 pairs_scroll_offset = 0
 selected_pair_index = 0
@@ -948,23 +952,14 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                 return
 
             order = await exchange.create_order(symbol, 'buy', amount)
-            if order:
-                filled = order.get('filled', 0) or amount
-                final_price = order.get('price') or price
-                cost = order.get('cost') or (filled * final_price)
-
-                fee_cost = order.get('fee', {}).get('cost', 0)
-                fee_currency = order.get('fee', {}).get('currency')
-                fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
-
-                total_val = cost + fee
-                data_manager.add_position(symbol, final_price, filled, fee, {}, time.time(), total_base=total_val)
-
-                _, quote = symbol.split('/')
-                logging.info(f"[{symbol}] BUY executed at {format_price(final_price)} (Filled: {format_amt(filled)}, Spent: {format_price(total_val)} {quote})")
-                play_sound("buy")
-                async with bot_lock:
-                    bot_state[symbol]['position'] = data_manager.get_position(symbol)
+            if order and 'id' in order:
+                async with pending_orders_lock:
+                    pending_orders[str(order['id'])] = {
+                        'symbol': symbol,
+                        'side': 'buy',
+                        'timestamp': time.time(),
+                        'trigger_data': {}
+                    }
             else:
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
     except Exception as e:
@@ -1055,70 +1050,15 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
 
     try:
         order = await exchange.create_order(symbol, 'sell', total_sell_amount)
-        if order:
-            filled_amount = order.get('filled', 0) or total_sell_amount
-            actual_price = order.get('price') or price
-            cost_received = order.get('cost') or (filled_amount * actual_price)
-
-            fee_cost = order.get('fee', {}).get('cost', 0)
-            fee_currency = order.get('fee', {}).get('currency')
-            total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
-
-            total_net_received = cost_received - total_fee
-
-            # Close positions in reverse order to maintain index integrity
-            sell_lot_indices.sort(reverse=True)
-
-            remaining_filled = filled_amount
-            remaining_net_received = total_net_received
-            remaining_fee = total_fee
-
-            total_entry_cost_of_filled = 0
-            for idx, i in enumerate(sell_lot_indices):
-                if remaining_filled <= 1e-10: break
-
-                pos = positions[i]
-                lot_close_amt = min(pos['amount'], remaining_filled)
-                if lot_close_amt <= 0: continue
-
-                # Distribution logic: for the last lot or full remainder, use remaining values to avoid precision drift
-                if idx == len(sell_lot_indices) - 1 or lot_close_amt >= remaining_filled - 1e-10:
-                    current_lot_received = remaining_net_received
-                    current_lot_fee = remaining_fee
-                    lot_close_amt = remaining_filled
-                else:
-                    proportion = lot_close_amt / filled_amount
-                    current_lot_received = total_net_received * proportion
-                    current_lot_fee = total_fee * proportion
-
-                # Proportional entry cost for the part of the lot being closed
-                entry_cost_proportion = (lot_close_amt / pos['amount']) if pos['amount'] > 0 else 1.0
-                entry_cost_part = pos.get('entry_total_base', 0) * entry_cost_proportion
-                total_entry_cost_of_filled += entry_cost_part
-
-                lot_profit = current_lot_received - entry_cost_part
-
-                data_manager.close_position(
-                    symbol, actual_price, current_lot_fee, lot_profit, {}, time.time(),
-                    total_base=current_lot_received, lot_index=i, amount=lot_close_amt
-                )
-
-                remaining_filled -= lot_close_amt
-                remaining_net_received -= current_lot_received
-                remaining_fee -= current_lot_fee
-
-            actual_total_profit = total_net_received - total_entry_cost_of_filled
-            _, quote = symbol.split('/')
-            logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Profit: {format_price(actual_total_profit)}, Received: {format_price(total_net_received)} {quote})")
-            play_sound("sell")
-
-            # Post-sale dust cleanup
-            if await is_pair_dust(symbol, exchange, config):
-                data_manager.clear_positions(symbol)
-                logging.info(f"[{symbol}] Remaining balance is dust. Clearing open positions.")
-
-            async with bot_lock:
-                bot_state[symbol]['position'] = data_manager.get_position(symbol)
+        if order and 'id' in order:
+            async with pending_orders_lock:
+                pending_orders[str(order['id'])] = {
+                    'symbol': symbol,
+                    'side': 'sell',
+                    'sell_lot_indices': sell_lot_indices,
+                    'timestamp': time.time(),
+                    'trigger_data': {}
+                }
     except Exception as e:
         logging.error(f"Aggregated sell failed for {symbol}: {e}")
         async with bot_lock:
@@ -1139,14 +1079,99 @@ async def watch_balance_task(exchange, data_manager):
                 await asyncio.sleep(5)
             else: break
 
-async def watch_orders_task(exchange, data_manager):
+async def watch_orders_task(exchange, data_manager, config, engine):
     logging.info("WebSocket: watch_orders task started.")
     while not shutdown_event.is_set():
         try:
             async for orders in exchange.watch_orders():
                 for order in orders:
                     if order['status'] == 'closed':
-                        logging.info(f"Order Completed: {order['symbol']} {order['side']} @ {order['price']}")
+                        order_id = str(order['id'])
+                        meta = None
+                        async with pending_orders_lock:
+                            if order_id in pending_orders:
+                                meta = pending_orders.pop(order_id)
+
+                        if meta:
+                            symbol = meta['symbol']
+                            side = meta['side']
+                            filled_amount = order.get('filled', 0.0)
+                            actual_price = order.get('price') or order.get('average', 0.0)
+                            cost = order.get('cost') or (filled_amount * actual_price)
+
+                            fee_cost = order.get('fee', {}).get('cost', 0.0)
+                            fee_currency = order.get('fee', {}).get('currency')
+                            total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+
+                            if side == 'buy':
+                                total_val = cost + total_fee
+                                data_manager.add_position(symbol, actual_price, filled_amount, total_fee, meta['trigger_data'], meta['timestamp'], total_base=total_val)
+
+                                _, quote = symbol.split('/')
+                                logging.info(f"[{symbol}] BUY executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Spent: {format_price(total_val)} {quote})")
+                                play_sound("buy")
+
+                            elif side == 'sell':
+                                total_net_received = cost - total_fee
+                                sell_lot_indices = meta['sell_lot_indices']
+                                sell_lot_indices.sort(reverse=True)
+
+                                async with bot_lock:
+                                    positions = data_manager.get_position(symbol)
+                                    if not positions: continue
+
+                                    remaining_filled = filled_amount
+                                    remaining_net_received = total_net_received
+                                    remaining_fee = total_fee
+                                    total_entry_cost_of_filled = 0.0
+
+                                    for idx, i in enumerate(sell_lot_indices):
+                                        if remaining_filled <= 1e-10: break
+                                        if i >= len(positions): continue
+
+                                        pos = positions[i]
+                                        lot_close_amt = min(pos['amount'], remaining_filled)
+                                        if lot_close_amt <= 0: continue
+
+                                        if idx == len(sell_lot_indices) - 1 or lot_close_amt >= remaining_filled - 1e-10:
+                                            current_lot_received = remaining_net_received
+                                            current_lot_fee = remaining_fee
+                                            lot_close_amt = remaining_filled
+                                        else:
+                                            proportion = lot_close_amt / filled_amount
+                                            current_lot_received = total_net_received * proportion
+                                            current_lot_fee = total_fee * proportion
+
+                                        entry_cost_proportion = (lot_close_amt / pos['amount']) if pos['amount'] > 0 else 1.0
+                                        entry_cost_part = pos.get('entry_total_base', 0.0) * entry_cost_proportion
+                                        total_entry_cost_of_filled += entry_cost_part
+                                        lot_profit = current_lot_received - entry_cost_part
+
+                                        data_manager.close_position(
+                                            symbol, actual_price, current_lot_fee, lot_profit, meta['trigger_data'], time.time(),
+                                            total_base=current_lot_received, lot_index=i, amount=lot_close_amt
+                                        )
+
+                                        remaining_filled -= lot_close_amt
+                                        remaining_net_received -= current_lot_received
+                                        remaining_fee -= current_lot_fee
+
+                                    actual_total_profit = total_net_received - total_entry_cost_of_filled
+                                    _, quote = symbol.split('/')
+                                    logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Profit: {format_price(actual_total_profit)}, Received: {format_price(total_net_received)} {quote})")
+                                    play_sound("sell")
+
+                                    # Post-sale dust cleanup
+                                    if await is_pair_dust(symbol, exchange, config):
+                                        data_manager.clear_positions(symbol)
+                                        logging.info(f"[{symbol}] Remaining balance is dust. Clearing open positions.")
+
+                            async with bot_lock:
+                                if symbol not in bot_state: bot_state[symbol] = {}
+                                bot_state[symbol]['position'] = data_manager.get_position(symbol)
+                        else:
+                            # logging.info(f"External Order Completed: {order['symbol']} {order['side']} @ {order['price']}")
+                            pass
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"WebSocket orders reconnection error: {e}")
@@ -1618,7 +1643,7 @@ async def main():
     logging.info("[bold green]Starting WebSocket tasks...")
     background_tasks = [
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
-        asyncio.create_task(watch_orders_task(exchange, data_manager)),
+        asyncio.create_task(watch_orders_task(exchange, data_manager, config, engine)),
         asyncio.create_task(input_task(exchange, config, data_manager, engine)),
         asyncio.create_task(heartbeat_task())
     ]
