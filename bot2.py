@@ -901,103 +901,82 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         buy_count = 0
         sell_count = 0
         total_score = 0
-        timed_out = False
 
         # If skipping intensive analysis, we only run the first technique (usually most relevant to regime)
         # and only one aggressiveness profile (normal).
-        try:
-            if skip_intensive:
-                async with asyncio.timeout(120): # 2-minute timeout for Lite analysis (unlikely to hit but safe)
-                    first_group = ordered_groups[0]
-                    if first_group in grouped_techniques:
-                        t = grouped_techniques[first_group][0]
-                        strat = t.get('strategy', 'ichimoku_cloud')
-                        async with bot_lock:
-                            bot_state[symbol]['strategy'] = f"{strat} (Lite)"
+        if skip_intensive:
+            first_group = ordered_groups[0]
+            if first_group in grouped_techniques:
+                t = grouped_techniques[first_group][0]
+                strat = t.get('strategy', 'ichimoku_cloud')
+                async with bot_lock:
+                    bot_state[symbol]['strategy'] = f"{strat} (Lite)"
 
-                        mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
+                mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
+                mode_settings['strategy'] = strat
+                mode_settings['device'] = device
+
+                res_df = await loop.run_in_executor(executor, get_signals, df.copy(), mode_settings)
+                if not res_df.empty:
+                    latest = res_df.iloc[-1]
+                    total_score = latest.get('score', 0)
+                    if latest.get('buy_signal'): buy_count = 1
+                    if latest.get('sell_signal'): sell_count = 1
+
+                    if buy_count or sell_count:
+                        async with bot_lock:
+                            bot_state[symbol]['last_strat_with_signal'] = strat
+                            bot_state[symbol]['aggr'] = mode_settings.get('effective_aggr', 'normal')
+        else:
+            for gname in ordered_groups:
+                if gname not in grouped_techniques: continue
+
+                for t in grouped_techniques[gname]:
+                    strat = t.get('strategy')
+                    strat_buy = False
+                    strat_sell = False
+
+                    async with bot_lock:
+                        bot_state[symbol]['strategy'] = strat
+
+                    aggr_list = t.get('aggr', ['normal'])
+                    if isinstance(aggr_list, str): aggr_list = [aggr_list]
+
+                    strat_tasks = []
+                    # Keep track of which settings produced which result
+                    settings_list = []
+                    for a in aggr_list:
+                        mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
                         mode_settings['strategy'] = strat
                         mode_settings['device'] = device
+                        settings_list.append(mode_settings)
+                        strat_tasks.append(loop.run_in_executor(executor, get_signals, df.copy(), mode_settings))
 
-                        res_df = await loop.run_in_executor(executor, get_signals, df.copy(), mode_settings)
-                        if not res_df.empty:
+                    if strat_tasks:
+                        done_results = await asyncio.gather(*strat_tasks)
+                        for idx, res_df in enumerate(done_results):
+                            if res_df.empty: continue
                             latest = res_df.iloc[-1]
-                            total_score = latest.get('score', 0)
-                            if latest.get('buy_signal'): buy_count = 1
-                            if latest.get('sell_signal'): sell_count = 1
+                            total_score += latest.get('score', 0)
 
-                            if buy_count or sell_count:
+                            has_buy = latest.get('buy_signal')
+                            has_sell = latest.get('sell_signal')
+
+                            if has_buy: strat_buy = True
+                            if has_sell: strat_sell = True
+
+                            if has_buy or has_sell:
+                                # Update the currently active aggressiveness profile in the UI
+                                effective_aggr = settings_list[idx].get('effective_aggr', aggr_list[idx])
                                 async with bot_lock:
-                                    bot_state[symbol]['last_strat_with_signal'] = strat
-                                    bot_state[symbol]['aggr'] = mode_settings.get('effective_aggr', 'normal')
-            else:
-                async with asyncio.timeout(120): # 2-minute timeout for intensive analysis
-                    for gname in ordered_groups:
-                        if gname not in grouped_techniques: continue
+                                    bot_state[symbol]['aggr'] = effective_aggr
 
-                        for t in grouped_techniques[gname]:
-                            strat = t.get('strategy')
-                            strat_buy = False
-                            strat_sell = False
+                        if strat_buy: buy_count += 1
+                        if strat_sell: sell_count += 1
 
+                        if strat_buy or strat_sell:
                             async with bot_lock:
-                                bot_state[symbol]['strategy'] = strat
-
-                            aggr_list = t.get('aggr', ['normal'])
-                            if isinstance(aggr_list, str): aggr_list = [aggr_list]
-
-                            strat_tasks = []
-                            # Keep track of which settings produced which result
-                            settings_list = []
-                            for a in aggr_list:
-                                mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
-                                mode_settings['strategy'] = strat
-                                mode_settings['device'] = device
-                                settings_list.append(mode_settings)
-                                strat_tasks.append(loop.run_in_executor(executor, get_signals, df.copy(), mode_settings))
-
-                            if strat_tasks:
-                                done_results = await asyncio.gather(*strat_tasks)
-                                for idx, res_df in enumerate(done_results):
-                                    if res_df.empty: continue
-                                    latest = res_df.iloc[-1]
-                                    total_score += latest.get('score', 0)
-
-                                    has_buy = latest.get('buy_signal')
-                                    has_sell = latest.get('sell_signal')
-
-                                    if has_buy: strat_buy = True
-                                    if has_sell: strat_sell = True
-
-                                    if has_buy or has_sell:
-                                        # Update the currently active aggressiveness profile in the UI
-                                        effective_aggr = settings_list[idx].get('effective_aggr', aggr_list[idx])
-                                        async with bot_lock:
-                                            bot_state[symbol]['aggr'] = effective_aggr
-
-                                if strat_buy: buy_count += 1
-                                if strat_sell: sell_count += 1
-
-                                if strat_buy or strat_sell:
-                                    async with bot_lock:
-                                        bot_state[symbol]['last_strat_with_signal'] = strat
-        except asyncio.TimeoutError:
-            timed_out = True
-            logging.warning(f"[{symbol}] Intensive analysis timed out after 120s. Falling back to emergency Sell-only check.")
-
-            # Emergency fallback: basic Sell signal check using Ichimoku (fast and reliable trend indicator)
-            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
-            mode_settings['strategy'] = 'ichimoku_cloud'
-            mode_settings['device'] = device
-
-            res_df = await loop.run_in_executor(executor, get_signals, df.copy(), mode_settings)
-            if not res_df.empty:
-                latest = res_df.iloc[-1]
-                if latest.get('sell_signal'):
-                    sell_count = 1
-                    async with bot_lock:
-                        bot_state[symbol]['last_strat_with_signal'] = 'ichimoku_cloud (Emergency)'
-                        bot_state[symbol]['strategy'] = 'Emergency Exit Check'
+                                bot_state[symbol]['last_strat_with_signal'] = strat
 
         # Signal Subtraction
         diff = buy_count - sell_count
@@ -1065,8 +1044,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             if sell_signal and mc_score > 0.9: sell_signal = False
 
         # 4. Background Optimization if no signals
-        if skip_intensive or timed_out:
-            # Skip optimization entirely if in Lite mode or after timeout
+        if skip_intensive:
+            # Skip optimization entirely if in Lite mode
             async with bot_lock:
                 bot_state[symbol]['candles_since_last_signal'] = 0
         else:
