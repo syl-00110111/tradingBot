@@ -663,9 +663,10 @@ async def sync_live_positions(exchange, data_manager, config):
         curr_price = ticker['last'] if ticker else 0
         if curr_price > 0:
             # Simplified sync: Use current price as entry price for the entire balance
+            # Mark these as pre-launch to avoid automated selling
             data_manager.add_position(
                 symbol, curr_price, amount, 0,
-                {"info": "launch_sync"}, time.time(),
+                {"info": "launch_sync", "auto_sell_disabled": True}, time.time(),
                 total_base=amount * curr_price
             )
             logging.info(f"[{symbol}] Synced balance: {amount} at current price {curr_price}")
@@ -1204,7 +1205,10 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     total_entry_cost = 0
     for i, pos in enumerate(positions):
         is_profitable = engine.is_profitable(price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount'])
-        if force or is_profitable:
+
+        # Respect auto_sell_disabled flag for automated sells
+        auto_disabled = pos.get('trigger_data', {}).get('auto_sell_disabled', False)
+        if (force or is_profitable) and (force or not auto_disabled):
             sell_lot_indices.append(i)
             total_sell_amount += pos['amount']
             total_entry_cost += pos.get('entry_total_base', 0)
@@ -1227,6 +1231,10 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
 
         for idx in other_indices:
             pos = positions[idx]
+            # Skip if auto-sell is disabled for this lot
+            if pos.get('trigger_data', {}).get('auto_sell_disabled', False):
+                continue
+
             new_amount = total_sell_amount + pos['amount']
             new_entry_cost = total_entry_cost + pos.get('entry_total_base', 0)
             # estimated net proceeds for the whole bundle
