@@ -356,7 +356,7 @@ STRATEGY_GROUPS = {
 }
 
 # Global MC engine for reuse
-_mc_engine = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
+_mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
 
 def get_signals(df, mode_config, is_scan=False):
     """
@@ -384,7 +384,7 @@ def get_signals(df, mode_config, is_scan=False):
     _mc_engine.set_device(device)
 
     # Common indicators for tendency and background analysis (Expert Mode)
-    if df.empty: return df
+    if df.empty or len(df) < 4000: return df
 
     # For multi-technique scanning, we check if the requested EMA/RSI settings
     # match what's already in the dataframe. If not, we MUST recalculate.

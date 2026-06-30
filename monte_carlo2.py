@@ -24,7 +24,7 @@ class MonteCarloEngine:
     timeframe_candles : int, optional
         Nombre d'étapes (bougies) à simuler dans le futur (par défaut 100).
     """
-    def __init__(self, num_simulations=500, timeframe_candles=100):
+    def __init__(self, num_simulations=1000, timeframe_candles=100):
         self.num_simulations = num_simulations
         self.timeframe_candles = timeframe_candles
         # Le device sera mis à jour par le bot au moment de l'exécution, par défaut sur CPU
@@ -129,7 +129,7 @@ class MonteCarloEngine:
         float
             Un score de facteur d'échelle entre 0,5 et 1,5 basé sur la probabilité de profit.
         """
-        if len(df) < 20: return 1.0
+        if len(df) < 4000: return 1.0
 
         close = df["close"].values
         valid_indices = ~np.isnan(close)
