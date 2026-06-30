@@ -23,6 +23,7 @@ class TradingEngine:
     def __init__(self, config):
         self.config = config
         self.risk_multiplier = float(config.get('global_risk_multiplier', 1.1))
+        self.min_profit_margin = float(config.get('min_profit_margin', 0.01))
 
     def get_dynamic_settings(self, adx, volatility, aggr='dynamic'):
         """
@@ -79,13 +80,13 @@ class TradingEngine:
 
         return settings
 
-    def get_min_exit_price(self, entry_price, fee_rate=0.001):
+    def get_min_exit_price(self, entry_price, fee_rate=0.001, min_profit=0):
         """
-        Calcule le prix de sortie minimum requis pour atteindre le seuil de rentabilité, frais inclus.
+        Calcule le prix de sortie minimum requis pour atteindre un profit cible, frais inclus.
 
         Utilise la formule précise :
-        Prix_sortie * (1 - f) = Prix_entrée * (1 + f)
-        Prix_sortie = Prix_entrée * (1 + f) / (1 - f)
+        Prix_sortie * (1 - f) = Prix_entrée * (1 + f) * (1 + profit)
+        Prix_sortie = Prix_entrée * (1 + f) * (1 + profit) / (1 - f)
 
         Paramètres
         ----------
@@ -93,19 +94,21 @@ class TradingEngine:
             Le prix auquel l'actif a été acheté.
         fee_rate : float, optional
             Le taux de commission de l'échange (par défaut 0.001 pour 0,1%).
+        min_profit : float, optional
+            Marge de profit net cible (par défaut 0).
 
         Retourne
         -------
         float
-            Le prix de sortie d'équilibre.
+            Le prix de sortie cible.
         """
-        # Équilibre précis : Price_exit * (1 - f) = Price_entry * (1 + f)
-        # Price_exit = Price_entry * (1 + f) / (1 - f)
-        return entry_price * (1 + fee_rate) / (1 - fee_rate)
+        # Équilibre précis : Price_exit * (1 - f) = Price_entry * (1 + f) * (1 + profit)
+        # Price_exit = Price_entry * (1 + f) * (1 + profit) / (1 - f)
+        return entry_price * (1 + fee_rate) * (1 + min_profit) / (1 - fee_rate)
 
     def is_profitable(self, current_price, entry_price, fee_rate=0.001, entry_total_base=0, amount=0):
         """
-        Vérifie si la clôture d'une position au prix actuel serait profitable.
+        Vérifie si la clôture d'une position au prix actuel dépasse la marge de profit cible.
 
         Paramètres
         ----------
@@ -123,12 +126,13 @@ class TradingEngine:
         Retourne
         -------
         bool
-            True si le profit net est positif après frais, False sinon.
+            True si le profit net atteint la marge cible après frais, False sinon.
         """
         if entry_total_base > 0 and amount > 0:
-            # Profit = (Price_exit * Amount * (1 - f)) - Entry_total_base
-            return (current_price * amount * (1 - fee_rate)) > entry_total_base
-        return current_price > self.get_min_exit_price(entry_price, fee_rate)
+            # Net_Proceeds = (Price_exit * Amount * (1 - f))
+            # Target = Entry_total_base * (1 + min_profit_margin)
+            return (current_price * amount * (1 - fee_rate)) >= (entry_total_base * (1 + self.min_profit_margin))
+        return current_price >= self.get_min_exit_price(entry_price, fee_rate, self.min_profit_margin)
 
     def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
         """
