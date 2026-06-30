@@ -568,29 +568,49 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                 else: continue
 
                 async with ohlcv_lock:
-                    cache_key = f"{symbol}_{timeframe}"
-                    if cache_key not in ohlcv_cache:
-                        ohlcv_cache[cache_key] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    cache_key_1s = f"{symbol}_{timeframe}" # timeframe is '1s'
+                    if cache_key_1s not in ohlcv_cache:
+                        ohlcv_cache[cache_key_1s] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
-                    df = ohlcv_cache[cache_key]
-                    new_data = []
+                    df_1s = ohlcv_cache[cache_key_1s]
+
+                    # 1. Update 1s cache efficiently
                     for candle in candles:
                         ts = pd.to_datetime(candle[0], unit='ms')
-                        if ts in df.index:
-                            df.loc[ts] = [float(x) for x in candle[1:]]
-                        else:
-                            new_data.append(candle)
+                        df_1s.loc[ts] = [float(x) for x in candle[1:]]
 
-                    if new_data:
-                        new_df = pd.DataFrame(new_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], unit='ms')
-                        for col in ['open', 'high', 'low', 'close', 'volume']:
-                            new_df[col] = pd.to_numeric(new_df[col], errors='coerce')
-                        new_df.set_index('timestamp', inplace=True)
-                        # Maintain a larger history for 1s candles (5000)
-                        df = pd.concat([df, new_df]).tail(5000)
+                    # Sort and tail 1s history (10k is ~2.7h)
+                    df_1s.sort_index(inplace=True)
+                    ohlcv_cache[cache_key_1s] = df_1s.tail(10000)
 
-                        ohlcv_cache[cache_key] = df
+                    # 2. Update target timeframe cache
+                    target_tf = get_timeframe(symbol, config)
+                    if target_tf != '1s':
+                        target_key = f"{symbol}_{target_tf}"
+                        if target_key not in ohlcv_cache:
+                            ohlcv_cache[target_key] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+
+                        target_df = ohlcv_cache[target_key]
+
+                        # Find the first 1s candle that could affect the target timeframe
+                        # We resample everything from the start of the earliest bucket covered by the new candles
+                        pd_tf = target_tf.replace('m', 'min').replace('s', 's')
+                        first_new_ts = pd.to_datetime(candles[0][0], unit='ms')
+                        bucket_start = first_new_ts.floor(pd_tf)
+
+                        # Resample only the affected portion of the 1s buffer
+                        affected_1s = df_1s.loc[bucket_start:]
+                        if not affected_1s.empty:
+                            resampled_new = affected_1s.resample(pd_tf).agg({
+                                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+                            }).dropna()
+
+                            for ts, row in resampled_new.iterrows():
+                                target_df.loc[ts] = row
+
+                            target_df.sort_index(inplace=True)
+                            ohlcv_cache[target_key] = target_df.tail(10000)
+
                         async with bot_lock:
                             if symbol in bot_state:
                                 bot_state[symbol]['price'] = candles[-1][4]
@@ -786,32 +806,13 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             else:
                 del pair_suspensions[symbol]
 
-        # All symbols are managed via 1s WebSocket, so we always pull from 1s cache
-        cache_key_1s = f"{symbol}_1s"
+        # We now use pre-aggregated candles from the cache for the target timeframe
+        cache_key = f"{symbol}_{timeframe}"
         async with ohlcv_lock:
-            if cache_key_1s not in ohlcv_cache: return
-            df_1s = ohlcv_cache[cache_key_1s].copy()
+            if cache_key not in ohlcv_cache: return
+            df = ohlcv_cache[cache_key].copy()
 
-        if df_1s.empty or len(df_1s) < 20: return
-
-        # Calculations must remain aligned with the assigned timeframe
-        if timeframe != '1s':
-            # Resample 1s data to assigned timeframe
-            # Note: timeframe is '1m', '3m', etc. Pandas understands these.
-            # Using 'min' instead of 'm' for pandas compatibility if needed,
-            # but usually '1T' or '1min' is safest. Bot uses '1m', '3m' etc.
-            pd_tf = timeframe.replace('m', 'min').replace('s', 's')
-            df = df_1s.resample(pd_tf).agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
-        else:
-            df = df_1s
-
-        if len(df) < 20: return
+        if df.empty or len(df) < 4000: return
 
         loop = asyncio.get_event_loop()
 
@@ -1038,7 +1039,7 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
         # Monte Carlo Validation
         if buy_signal or (sell_signal and has_position):
-            mc = MonteCarloEngine(num_simulations=50, timeframe_candles=20)
+            mc = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
             mc.set_device(device)
             mc_score = mc.validate_strategy(df)
             if buy_signal and mc_score < 1.1: buy_signal = False
@@ -1165,11 +1166,11 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                 fee_currency = order.get('fee', {}).get('currency')
                 fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
 
-                total_base = cost + fee
-                data_manager.add_position(symbol, final_price, filled, fee, {}, time.time(), total_base=total_base)
+                total_val = cost + fee
+                data_manager.add_position(symbol, final_price, filled, fee, {}, time.time(), total_base=total_val)
 
                 _, quote = symbol.split('/')
-                logging.info(f"[{symbol}] BUY executed at {format_price(final_price)} (Filled: {format_amt(filled)}, Spent: {format_price(total_base)} {quote})")
+                logging.info(f"[{symbol}] BUY executed at {format_price(final_price)} (Filled: {format_amt(filled)}, Spent: {format_price(total_val)} {quote})")
                 play_sound("buy")
                 async with bot_lock:
                     bot_state[symbol]['position'] = data_manager.get_position(symbol)
@@ -1364,8 +1365,9 @@ async def watch_orders_task(exchange, data_manager):
                 # fully WebSocket-driven for fills.
 
 def get_timeframe(symbol, config):
-    """Utility to get the current timeframe for a symbol consistently. Forced to 1s."""
-    return '1s'
+    """Utility to get the current timeframe for a symbol consistently."""
+    pair_cfg = config.get('pairs', {}).get(symbol, {})
+    return pair_cfg.get('timeframe') or config.get('default_timeframe', '1m')
 
 def get_tf_priority(tf):
     """Higher timeframe = Lower number = Higher priority in PriorityQueue."""
@@ -1783,20 +1785,35 @@ async def main():
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    # Initial candles must correspond to the one-second timeframe (limit 2000)
-                    tf = '1s'
-                    logging.info(f"Fetching initial 1s candles for {symbol}...")
-                    ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=2000)
+                    # 1. Fetch historical candles for the target timeframe (min 4000)
+                    tf = get_timeframe(symbol, config)
+                    logging.info(f"Fetching initial {tf} candles for {symbol} (Target: 4000)...")
+                    ohlcv = await exchange.fetch_ohlcv_10k(symbol, tf, limit=4000)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     for col in ['open', 'high', 'low', 'close', 'volume']:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                     df.set_index('timestamp', inplace=True)
                     ohlcv_cache[f"{symbol}_{tf}"] = df
-                    logging.info(f"[{symbol}] Loaded {len(df)} candles (1s).")
+                    logging.info(f"[{symbol}] Loaded {len(df)} candles ({tf}).")
+
+                    # 2. Also ensure 1s cache exists for live updates
+                    if tf != '1s':
+                        ohlcv_1s = await exchange.fetch_ohlcv(symbol, '1s', limit=100)
+                        df_1s = pd.DataFrame(ohlcv_1s, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
+                        for col in ['open', 'high', 'low', 'close', 'volume']:
+                            df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
+                        df_1s.set_index('timestamp', inplace=True)
+                        ohlcv_cache[f"{symbol}_1s"] = df_1s
+
                 except Exception as e:
                     logging.error(f"Failed to load candles for {symbol}: {e}")
-                    ohlcv_cache[f"{symbol}_1s"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    # Fallback empty dataframes to avoid crashes
+                    tf = get_timeframe(symbol, config)
+                    empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    ohlcv_cache[f"{symbol}_{tf}"] = empty_df
+                    ohlcv_cache[f"{symbol}_1s"] = empty_df
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
