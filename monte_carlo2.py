@@ -24,7 +24,7 @@ class MonteCarloEngine:
     timeframe_candles : int, optional
         Nombre d'étapes (bougies) à simuler dans le futur (par défaut 100).
     """
-    def __init__(self, num_simulations=5000, timeframe_candles=100):
+    def __init__(self, num_simulations=500, timeframe_candles=100):
         self.num_simulations = num_simulations
         self.timeframe_candles = timeframe_candles
         # Le device sera mis à jour par le bot au moment de l'exécution, par défaut sur CPU
