@@ -785,332 +785,6 @@ def run_optimization_for_symbol_sync(symbol, config, timeframe, aggrs, strategie
 
     return symbol, best_strat, best_profit
 
-async def analyze_and_trade_2(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
-    try:
-        # Check suspensions
-        now_ts = time.time()
-        is_suspended = False
-        if symbol in pair_suspensions:
-            susp = pair_suspensions[symbol]
-            if now_ts < susp.get('until', 0):
-                is_suspended = True
-            elif susp.get('reason') == 'budget':
-                balance = current_balances
-                base_curr = symbol.split('/')[1]
-                free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
-                if free_bal >= susp.get('amount_required', 0) * 1.2:
-                    logging.info(f"[{symbol}] Budget recovered. Resuming pair.")
-                    del pair_suspensions[symbol]
-                else:
-                    is_suspended = True
-            else:
-                del pair_suspensions[symbol]
-
-        # We now use pre-aggregated candles from the cache for the target timeframe
-        cache_key = f"{symbol}_{timeframe}"
-        async with ohlcv_lock:
-            if cache_key not in ohlcv_cache: return
-            df = ohlcv_cache[cache_key].copy()
-
-        if df.empty or len(df) < 4000: return
-
-        loop = asyncio.get_event_loop()
-
-        # 1. Expert Mode indicators & Regime detection
-        if executor:
-            df = await loop.run_in_executor(executor, get_signals, df, {'device': device})
-        else:
-            df = get_signals(df, {'device': device})
-
-        latest_base = df.iloc[-1]
-        market_regime = latest_base.get('regime', 'trend_following')
-        logging.debug(f"[{symbol}] Market Regime detected: {market_regime}")
-
-        # 2. Adaptive Timeframe Discovery
-        last_tf_check = config.get('pairs', {}).get(symbol, {}).get('_last_tf_check', 0)
-        if time.time() - last_tf_check > 900:
-            new_tf, score = await get_optimal_timeframe(exchange, symbol, config)
-            config.setdefault('pairs', {}).setdefault(symbol, {})['_last_tf_check'] = time.time()
-            if new_tf != timeframe:
-                config['pairs'][symbol]['timeframe'] = new_tf
-                if watcher_manager:
-                    await watcher_manager.schedule_reschedule(symbol, timeframe, new_tf)
-
-        # 3. Multi-technique Evaluation
-        pair_config = config['pairs'].get(symbol, {})
-
-        # Skipping logic for intensive analysis: Complete sale < 10min ago and only dust left
-        last_exit = data_manager.get_last_trade_exit_timestamp(symbol)
-        is_recent_sale = (time.time() - last_exit) < 600 # 10 minutes
-        is_dust = False
-        if is_recent_sale:
-            is_dust = await is_pair_dust(symbol, exchange, config)
-
-        skip_intensive = is_recent_sale and is_dust
-        techniques = pair_config.get('techniques', [])
-        if not techniques:
-            # Prioritize current regime, then others
-            regime_strats = STRATEGY_GROUPS.get(market_regime, [])
-            other_regime = 'trend_following' if market_regime == 'mean_reversion' else 'mean_reversion'
-            other_regime_strats = STRATEGY_GROUPS.get(other_regime, [])
-            misc_strats = STRATEGY_GROUPS.get('other', [])
-
-            ordered_strats = regime_strats + misc_strats + other_regime_strats
-            techniques = [{"strategy": s, "aggr": ["normal", "aggressive", "dynamic"]} for s in ordered_strats]
-        else:
-            # Reorder existing techniques to prioritize the detected regime
-            def technique_priority(t):
-                strat = t.get('strategy')
-                if strat in STRATEGY_GROUPS.get(market_regime, []):
-                    return 0
-                if strat in STRATEGY_GROUPS.get('other', []):
-                    return 1
-                return 2
-            techniques = sorted(techniques, key=technique_priority)
-
-        # Filtering mechanism: Prioritize current regime or generic, but keep ALL techniques
-        # We don't want to drop user-configured strategies even if they aren't in a group.
-        def is_relevant(t):
-            strat = t.get('strategy')
-            return strat in STRATEGY_GROUPS.get(market_regime, []) or strat in STRATEGY_GROUPS.get('other', [])
-
-        filtered_techniques = [t for t in techniques if is_relevant(t)]
-        other_techniques = [t for t in techniques if not is_relevant(t)]
-
-        # Combine them, ensuring priority techniques are first
-        final_techniques = filtered_techniques + other_techniques
-
-        # Group techniques by their STRATEGY_GROUPS category
-        grouped_techniques = {}
-        for t in final_techniques:
-            strat = t.get('strategy')
-            found_group = 'other'
-            for gname, strats in STRATEGY_GROUPS.items():
-                if strat in strats:
-                    found_group = gname
-                    break
-            if found_group not in grouped_techniques:
-                grouped_techniques[found_group] = []
-            grouped_techniques[found_group].append(t)
-
-        ordered_groups = [market_regime]
-        other_regime = 'trend_following' if market_regime == 'mean_reversion' else 'mean_reversion'
-        if 'other' in grouped_techniques: ordered_groups.append('other')
-        if other_regime in grouped_techniques: ordered_groups.append(other_regime)
-        for gname in grouped_techniques:
-            if gname not in ordered_groups: ordered_groups.append(gname)
-
-        buy_count = 0
-        sell_count = 0
-        total_score = 0
-
-        # If skipping intensive analysis, we only run the first technique (usually most relevant to regime)
-        # and only one aggressiveness profile (normal).
-        if skip_intensive:
-            first_group = ordered_groups[0]
-            if first_group in grouped_techniques:
-                t = grouped_techniques[first_group][0]
-                strat = t.get('strategy', 'ichimoku_cloud')
-                async with bot_lock:
-                    bot_state[symbol]['strategy'] = f"{strat} (Lite)"
-
-                mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
-                mode_settings['strategy'] = strat
-                mode_settings['device'] = device
-
-                res_df = await loop.run_in_executor(executor, get_signals, df.copy(), mode_settings)
-                if not res_df.empty:
-                    latest = res_df.iloc[-1]
-                    total_score = latest.get('score', 0)
-                    if latest.get('buy_signal'): buy_count = 1
-                    if latest.get('sell_signal'): sell_count = 1
-
-                    if buy_count or sell_count:
-                        async with bot_lock:
-                            bot_state[symbol]['last_strat_with_signal'] = strat
-                            bot_state[symbol]['aggr'] = mode_settings.get('effective_aggr', 'normal')
-        else:
-            for gname in ordered_groups:
-                if gname not in grouped_techniques: continue
-
-                for t in grouped_techniques[gname]:
-                    strat = t.get('strategy')
-                    strat_buy = False
-                    strat_sell = False
-
-                    async with bot_lock:
-                        bot_state[symbol]['strategy'] = strat
-
-                    aggr_list = t.get('aggr', ['normal'])
-                    if isinstance(aggr_list, str): aggr_list = [aggr_list]
-
-                    strat_tasks = []
-                    # Keep track of which settings produced which result
-                    settings_list = []
-                    for a in aggr_list:
-                        mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
-                        mode_settings['strategy'] = strat
-                        mode_settings['device'] = device
-                        settings_list.append(mode_settings)
-                        strat_tasks.append(loop.run_in_executor(executor, get_signals, df.copy(), mode_settings))
-
-                    if strat_tasks:
-                        done_results = await asyncio.gather(*strat_tasks)
-                        for idx, res_df in enumerate(done_results):
-                            if res_df.empty: continue
-                            latest = res_df.iloc[-1]
-                            total_score += latest.get('score', 0)
-
-                            has_buy = latest.get('buy_signal')
-                            has_sell = latest.get('sell_signal')
-
-                            if has_buy: strat_buy = True
-                            if has_sell: strat_sell = True
-
-                            if has_buy or has_sell:
-                                # Update the currently active aggressiveness profile in the UI
-                                effective_aggr = settings_list[idx].get('effective_aggr', aggr_list[idx])
-                                async with bot_lock:
-                                    bot_state[symbol]['aggr'] = effective_aggr
-
-                        if strat_buy: buy_count += 1
-                        if strat_sell: sell_count += 1
-
-                        if strat_buy or strat_sell:
-                            async with bot_lock:
-                                bot_state[symbol]['last_strat_with_signal'] = strat
-
-        # Signal Subtraction
-        diff = buy_count - sell_count
-        final_buy_count = max(0, diff)
-        final_sell_count = max(0, -diff)
-
-        buy_candidate = final_buy_count > 0
-        sell_candidate = final_sell_count > 0
-
-        # Signal logic: current analysis loop strength (rationalized)
-        async with bot_lock:
-            if symbol not in bot_state: bot_state[symbol] = {}
-
-            # If no signal found, update Aggr to reflect current dynamic state of the first technique
-            if not buy_candidate and not sell_candidate and techniques:
-                t = techniques[0]
-                a = t.get('aggr', ['normal'])
-                if isinstance(a, list): a = a[0]
-                m_set = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=a)
-                bot_state[symbol]['aggr'] = m_set.get('effective_aggr', a)
-
-            if buy_candidate:
-                signal_strength_buy = final_buy_count
-                signal_strength_sell = 0
-            elif sell_candidate:
-                signal_strength_sell = final_sell_count
-                signal_strength_buy = 0
-            else:
-                signal_strength_buy = 0
-                signal_strength_sell = 0
-
-            bot_state[symbol]['consecutive_buys'] = signal_strength_buy
-            bot_state[symbol]['consecutive_sells'] = signal_strength_sell
-
-        # Skipping logic for predominantly signals
-        pos = data_manager.get_position(symbol)
-        has_position = pos is not None and len(pos) > 0
-        if (sell_candidate and not has_position) or (buy_candidate and is_suspended):
-            async with bot_lock:
-                bot_state[symbol].update({
-                    'price': latest_base['close'],
-                    'ema_f': latest_base.get('ema_f', 0),
-                    'ema_s': latest_base.get('ema_s', 0),
-                    'macd_hist': latest_base.get('macd_hist', 0),
-                    'rsi': latest_base.get('rsi', 0),
-                    'adx': latest_base.get('adx', 0),
-                    'volatility': latest_base.get('volatility', 0),
-                    'score': total_score,
-                    'tendency': "Bullish" if total_score > 0 else ("Bearish" if total_score < 0 else "Neutral"),
-                    'last_signal': 'Sell' if sell_candidate else 'Buy',
-                    'last_analysis_ts': time.time()
-                })
-            return
-
-        # Thresholds (Stability)
-        buy_signal = signal_strength_buy >= 1
-        sell_signal = signal_strength_sell >= 1
-
-        # Monte Carlo Validation
-        if buy_signal or (sell_signal and has_position):
-            mc = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
-            mc.set_device(device)
-            mc_score = mc.validate_strategy(df)
-            if buy_signal and mc_score < 1.1: buy_signal = False
-            if sell_signal and mc_score > 0.9: sell_signal = False
-
-        # 4. Background Optimization if no signals
-        if skip_intensive:
-            # Skip optimization entirely if in Lite mode
-            async with bot_lock:
-                bot_state[symbol]['candles_since_last_signal'] = 0
-        else:
-            async with bot_lock:
-                candles_since = bot_state[symbol].get('candles_since_last_signal', 0)
-                if not buy_signal and not sell_signal:
-                    candles_since += 1
-                else:
-                    candles_since = 0
-                bot_state[symbol]['candles_since_last_signal'] = candles_since
-
-                last_opt = bot_state[symbol].get('last_optimization_ts', 0)
-                curr_time = time.time()
-                # Rationalize optimization: at least 10 minutes between scans, and respect candle threshold
-                if candles_since >= config.get('no_signal_threshold', 20) and (curr_time - last_opt > 600) and symbol not in active_scans:
-                    global bench_executor
-                    if not bench_executor:
-                        bench_executor = concurrent.futures.ProcessPoolExecutor(
-                            max_workers=os.cpu_count() or 4,
-                            initializer=worker_process_init
-                        )
-                    bot_state[symbol]['last_optimization_ts'] = curr_time
-                    task = loop.run_in_executor(bench_executor, run_optimization_for_symbol_sync,
-                                              symbol, config, timeframe, ['normal'], STRATEGIES[:10], df, engine, device)
-                    active_scans[symbol] = task
-                    def optimization_done(fut):
-                        try:
-                            sym, best_s, best_p = fut.result()
-                            if best_s:
-                                config['pairs'][sym]['strategy'] = best_s
-                                asyncio.run_coroutine_threadsafe(update_expected_profit(sym, best_p), loop)
-                            if sym in active_scans: del active_scans[sym]
-                        except: pass
-
-                    async def update_expected_profit(sym, profit):
-                        async with bot_lock:
-                            bot_state[sym]['expected_profit'] = profit
-
-                    task.add_done_callback(optimization_done)
-
-        # Update State
-        async with bot_lock:
-            bot_state[symbol].update({
-                'price': latest_base['close'],
-                'ema_f': latest_base.get('ema_f', 0),
-                'ema_s': latest_base.get('ema_s', 0),
-                'macd_hist': latest_base.get('macd_hist', 0),
-                'rsi': latest_base.get('rsi', 0),
-                'adx': latest_base.get('adx', 0),
-                'volatility': latest_base.get('volatility', 0),
-                'score': total_score,
-                'tendency': "Bullish" if total_score > 0 else ("Bearish" if total_score < 0 else "Neutral"),
-                'last_signal': 'Buy' if buy_signal else ('Sell' if sell_signal else 'Waiting')
-            })
-
-        if buy_signal:
-            await execute_buy(exchange, symbol, latest_base, data_manager, engine, config)
-        elif sell_signal:
-            await execute_sell(exchange, symbol, latest_base, data_manager, engine, config)
-
-    except Exception as e:
-        logging.error(f"Analysis error for {symbol}: {e}")
-
 async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
     try:
         # Check suspensions
@@ -1140,9 +814,15 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
         if df.empty or len(df) < 4000: return
 
-        latest_base = df.iloc[-1]
-
         loop = asyncio.get_event_loop()
+
+        # Populate common indicators
+        if executor:
+            df = await loop.run_in_executor(executor, get_signals, df, {'device': device})
+        else:
+            df = get_signals(df, {'device': device})
+
+        latest_base = df.iloc[-1]
 
         # 2. Adaptive Timeframe Discovery
         last_tf_check = config.get('pairs', {}).get(symbol, {}).get('_last_tf_check', 0)
@@ -1157,35 +837,42 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         # 3. Multi-technique Evaluation
         pair_config = config['pairs'].get(symbol, {})
         techniques = pair_config.get('techniques', [])
+        if not techniques:
+            techniques = [{"strategy": s} for s in STRATEGIES]
+
         buy_count = 0
         sell_count = 0
         total_score = 0
 
-        for t in techniques:
+        async def evaluate_technique(t):
             strat = t.get('strategy')
             mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
             mode_settings['strategy'] = strat
             mode_settings['device'] = device
-            async with bot_lock:
-                bot_state[symbol]['strategy'] = f"{strat} (Lite)"
 
             res_df = await loop.run_in_executor(executor, get_signals, df.copy(), mode_settings)
             if not res_df.empty:
                 latest = res_df.iloc[-1]
-                has_buy = latest.get('buy_signal')
-                has_sell = latest.get('sell_signal')
-                if has_buy:
-                    total_score += 1
-                    buy_count += 1
+                return (latest.get('buy_signal', False), latest.get('sell_signal', False), strat)
+            return (False, False, strat)
 
-                if has_sell:
-                    sell_count += 1
-                    total_score += 1
+        if techniques:
+            # Parallel evaluation for efficiency
+            results = await asyncio.gather(*[evaluate_technique(t) for t in techniques])
+
+            last_strat = results[-1][2] if results else "N/A"
+            for has_buy, has_sell, strat in results:
+                if has_buy: buy_count += 1
+                if has_sell: sell_count += 1
+
+            async with bot_lock:
+                if symbol not in bot_state: bot_state[symbol] = {}
+                bot_state[symbol]['strategy'] = last_strat
 
         # Signal Subtraction
-        diff = buy_count - sell_count
-        final_buy_count = max(0, diff)
-        final_sell_count = max(0, -diff)
+        total_score = buy_count - sell_count
+        final_buy_count = max(0, total_score)
+        final_sell_count = max(0, -total_score)
 
         buy_candidate = final_buy_count > 0
         sell_candidate = final_sell_count > 0
@@ -1201,11 +888,13 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
                 'adx': latest_base.get('adx', 0),
                 'volatility': latest_base.get('volatility', 0),
                 'score': total_score,
+                'consecutive_buys': final_buy_count,
+                'consecutive_sells': final_sell_count,
                 'tendency': "Bullish" if total_score > 0 else ("Bearish" if total_score < 0 else "Neutral"),
                 'last_signal': 'Buy' if buy_candidate else ('Sell' if sell_candidate else 'Waiting')
             })
 
-        if buy_candidate:
+        if buy_candidate and not is_suspended:
             await execute_buy(exchange, symbol, latest_base, data_manager, engine, config)
         elif sell_candidate:
             await execute_sell(exchange, symbol, latest_base, data_manager, engine, config)
