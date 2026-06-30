@@ -217,12 +217,12 @@ class CCXTExchange2(ExchangeInterface2):
             return []
 
     async def get_fee_in_quote(self, symbol, fee_cost, fee_currency):
-        if not fee_currency: return fee_cost
+        if not fee_currency or not fee_cost: return fee_cost
         _, quote = symbol.split('/')
         if fee_currency == quote: return fee_cost
 
         try:
-            # Try to find a ticker for fee_currency/quote
+            # Try to find a ticker for fee_currency/quote (direct pair)
             pair = f"{fee_currency}/{quote}"
             ticker = await self.fetch_ticker(pair)
             if ticker:
@@ -230,15 +230,17 @@ class CCXTExchange2(ExchangeInterface2):
         except:
             pass
 
-        # Fallback: if we can't find a direct ticker, maybe it's fee_currency/USDT and quote/USDT
-        if quote != 'USDT':
+        # Try indirect paths via bridge currencies
+        bridges = ['USDT', 'USDC', 'BTC', 'ETH']
+        for bridge in bridges:
+            if quote == bridge or fee_currency == bridge: continue
             try:
-                ticker_fee = await self.fetch_ticker(f"{fee_currency}/USDT")
-                ticker_quote = await self.fetch_ticker(f"{quote}/USDT")
+                ticker_fee = await self.fetch_ticker(f"{fee_currency}/{bridge}")
+                ticker_quote = await self.fetch_ticker(f"{quote}/{bridge}")
                 if ticker_fee and ticker_quote:
                     return fee_cost * (ticker_fee['last'] / ticker_quote['last'])
             except:
-                pass
+                continue
 
         return fee_cost # Final fallback
 
