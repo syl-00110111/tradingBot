@@ -615,9 +615,9 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                             target_df.sort_index(inplace=True)
                             ohlcv_cache[target_key] = target_df.tail(10000)
 
-                        async with bot_lock:
-                            if symbol in bot_state:
-                                bot_state[symbol]['price'] = candles[-1][4]
+                    async with bot_lock:
+                        if symbol in bot_state:
+                            bot_state[symbol]['price'] = candles[-1][4]
 
                 # No longer pushing analyses from the global watcher.
                 # A single pass is performed at startup, and workers re-enqueue pairs.
@@ -684,16 +684,51 @@ async def sync_live_positions(exchange, data_manager, config):
         if is_dust: continue
         sellable_found = True
 
-        curr_price = ticker['last'] if ticker else 0
-        if curr_price > 0:
-            # Simplified sync: Use current price as entry price for the entire balance
-            # Mark these as pre-launch to avoid automated selling
+        # Try to find the weighted average entry price from trade history
+        avg_price = 0
+        total_cost = 0
+        accumulated_amount = 0
+        try:
+            trades = await exchange.fetch_my_trades(symbol, limit=50)
+            # Sort trades by timestamp descending to get most recent first
+            trades.sort(key=lambda t: t['timestamp'], reverse=True)
+
+            for t in trades:
+                if t['side'] == 'buy':
+                    remaining_to_fill = amount - accumulated_amount
+                    if remaining_to_fill <= 0: break
+
+                    trade_amt = min(t['amount'], remaining_to_fill)
+                    total_cost += trade_amt * t['price']
+                    accumulated_amount += trade_amt
+
+            if accumulated_amount > 0:
+                avg_price = total_cost / accumulated_amount
+                # If we couldn't find enough buy trades to cover the balance,
+                # we use the average of what we found, or fallback to current price for the rest
+                if accumulated_amount < amount * 0.99:
+                    ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
+                    curr_p = ticker['last'] if ticker else 0
+                    if curr_p > 0:
+                        rest_amount = amount - accumulated_amount
+                        total_cost += rest_amount * curr_p
+                        avg_price = total_cost / amount
+        except Exception as e:
+            logging.warning(f"[{symbol}] Error fetching trade history for sync: {e}")
+
+        if avg_price <= 0:
+            ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
+            avg_price = ticker['last'] if ticker else 0
+
+        if avg_price > 0:
+            # Mark these as pre-launch to avoid automated selling if desired,
+            # though here we have a real entry price now.
             data_manager.add_position(
-                symbol, curr_price, amount, 0,
+                symbol, avg_price, amount, 0,
                 {"info": "launch_sync", "auto_sell_disabled": True}, time.time(),
-                total_base=amount * curr_price
+                total_base=amount * avg_price
             )
-            logging.info(f"[{symbol}] Synced balance: {amount} at current price {curr_price}")
+            logging.info(f"[{symbol}] Synced balance: {amount} at calculated avg price {format_price(avg_price)}")
         else:
             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
 
@@ -1349,6 +1384,7 @@ def make_dashboard(config):
         entry_str = "-"
         fee_str = "-"
         if pos:
+            _, quote = symbol.split('/')
             if isinstance(pos, list):
                 total_amount = sum(p['amount'] for p in pos)
                 total_cost = sum(p['entry_price'] * p['amount'] for p in pos)
@@ -1356,11 +1392,11 @@ def make_dashboard(config):
                 total_fee = sum(p.get('entry_fee', 0) for p in pos)
                 amt_str = f"{format_amt(total_amount)} ({len(pos)})"
                 entry_str = format_price(avg_entry_price)
-                fee_str = format_price(total_fee)
+                fee_str = f"{format_price(total_fee)} {quote}"
             else:
                 amt_str = format_amt(pos['amount'])
                 entry_str = format_price(pos['entry_price'])
-                fee_str = format_price(pos.get('entry_fee', 0))
+                fee_str = f"{format_price(pos.get('entry_fee', 0))} {quote}"
 
         macd_hist = data.get('macd_hist', 0)
         macd_str = f"{macd_hist:.4e}" if abs(macd_hist) < 0.001 else f"{macd_hist:.4f}"
@@ -1601,27 +1637,29 @@ async def main():
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    # 1. Fetch historical candles for the target timeframe (min 4000)
+                    # 1. Always fetch historical 1s candles (Target: 4000)
                     tf = get_timeframe(symbol, config)
-                    logging.info(f"Fetching initial {tf} candles for {symbol} (Target: 4000)...")
-                    ohlcv = await exchange.fetch_ohlcv_10k(symbol, tf, limit=4000)
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    logging.info(f"Fetching initial 1s candles for {symbol} (Target: 4000)...")
+                    ohlcv_1s = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=4000)
+                    df_1s = pd.DataFrame(ohlcv_1s, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
                     for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                    df.set_index('timestamp', inplace=True)
-                    ohlcv_cache[f"{symbol}_{tf}"] = df
-                    logging.info(f"[{symbol}] Loaded {len(df)} candles ({tf}).")
+                        df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
+                    df_1s.set_index('timestamp', inplace=True)
+                    ohlcv_cache[f"{symbol}_1s"] = df_1s
+                    logging.info(f"[{symbol}] Loaded {len(df_1s)} candles (1s).")
 
-                    # 2. Also ensure 1s cache exists for live updates
+                    # 2. If target timeframe is not 1s, aggregate 1s candles
                     if tf != '1s':
-                        ohlcv_1s = await exchange.fetch_ohlcv(symbol, '1s', limit=100)
-                        df_1s = pd.DataFrame(ohlcv_1s, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
-                        for col in ['open', 'high', 'low', 'close', 'volume']:
-                            df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
-                        df_1s.set_index('timestamp', inplace=True)
-                        ohlcv_cache[f"{symbol}_1s"] = df_1s
+                        logging.info(f"[{symbol}] Aggregating 1s candles to {tf}...")
+                        pd_tf = tf.replace('m', 'min').replace('s', 's')
+                        target_df = df_1s.resample(pd_tf).agg({
+                            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+                        }).dropna()
+                        ohlcv_cache[f"{symbol}_{tf}"] = target_df
+                        logging.info(f"[{symbol}] Created {len(target_df)} candles ({tf}) via aggregation.")
+                    else:
+                        ohlcv_cache[f"{symbol}_{tf}"] = df_1s
 
                 except Exception as e:
                     logging.error(f"Failed to load candles for {symbol}: {e}")
