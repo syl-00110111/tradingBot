@@ -676,69 +676,15 @@ async def sync_live_positions(exchange, data_manager, config):
 
         curr_price = ticker['last'] if ticker else 0
         if curr_price > 0:
-            try:
-                my_trades = await exchange.fetch_my_trades(symbol, limit=50)
-                if my_trades:
-                    buys = [t for t in my_trades if t['side'] == 'buy']
-                    if buys:
-                        # Sort by timestamp descending to get most recent first
-                        buys.sort(key=lambda x: x['timestamp'], reverse=True)
-
-                        remaining_amount = amount
-                        batches_added = 0
-
-                        for b in buys:
-                            if remaining_amount <= amount * 0.001:  # Done
-                                break
-
-                            trade_amt = b['amount']
-                            # Clip trade amount to remaining wallet amount
-                            take_amt = min(trade_amt, remaining_amount)
-
-                            # Calculate fee for this portion
-                            trade_fee = 0
-                            if 'fee' in b and b['fee']:
-                                fee_cost = b['fee'].get('cost', 0)
-                                fee_currency = b['fee'].get('currency')
-                                _, quote = symbol.split('/')
-
-                                if fee_currency and fee_currency != quote:
-                                    try:
-                                        fticker = await exchange.fetch_ticker(f"{fee_currency}/{quote}")
-                                        if fticker:
-                                            fee_cost *= fticker['last']
-                                    except:
-                                        pass
-                                # Pro-rate fee if we only take a portion of the trade
-                                trade_fee = (
-                                    fee_cost * take_amt / trade_amt) if trade_amt > 0 else 0
-
-                            entry_price = b['price']
-                            total_base = (take_amt * entry_price) + trade_fee
-
-                            data_manager.add_position(symbol, entry_price, take_amt, trade_fee, {
-                                                      "info": f"recovered_batch_{batches_added}"}, b['timestamp']/1000, total_base=total_base)
-
-                            remaining_amount -= take_amt
-                            batches_added += 1
-
-                        if remaining_amount > amount * 0.01:
-                            logging.warning(
-                                f"[{symbol}] Could only recover {amount - remaining_amount} out of {amount} from history. Adding residue as placeholder.")
-                            data_manager.add_position(symbol, curr_price, remaining_amount, 0, {
-                                                      "info": "residue_placeholder"}, time.time(), total_base=remaining_amount * curr_price)
-                else:
-                    # No history, fallback to current price
-                    data_manager.add_position(symbol, curr_price, amount, 0, {
-                                              "info": "no_history_fallback"}, time.time(), total_base=amount * curr_price)
-            except Exception as e:
-                logging.warning(
-                    f"[{symbol}] Failed to recover trade history: {e}. Using current price fallback.")
-                data_manager.add_position(symbol, curr_price, amount, 0, {
-                                          "info": "error_fallback"}, time.time(), total_base=amount * curr_price)
+            # Simplified sync: Use current price as entry price for the entire balance
+            data_manager.add_position(
+                symbol, curr_price, amount, 0,
+                {"info": "launch_sync"}, time.time(),
+                total_base=amount * curr_price
+            )
+            logging.info(f"[{symbol}] Synced balance: {amount} at current price {curr_price}")
         else:
-            logging.warning(
-                f"[{symbol}] Asset found in wallet but price unavailable.")
+            logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
 
     # Update global bot_state for dashboard
     async with bot_lock:
