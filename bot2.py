@@ -887,7 +887,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
         async def evaluate_technique(t, df_in):
             strat = t.get('strategy')
-            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
+            aggr = t.get('aggr', ['normal'])[0] if isinstance(t.get('aggr'), list) else t.get('aggr', 'normal')
+            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=aggr)
             mode_settings['strategy'] = strat
             # Force CPU for subprocesses
             mode_settings['device'] = torch.device('cpu')
@@ -895,8 +896,20 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             res_df = await loop.run_in_executor(executor, get_signals, df_in, mode_settings)
             if not res_df.empty:
                 latest = res_df.iloc[-1]
-                return (latest.get('buy_signal', False), latest.get('sell_signal', False), strat)
-            return (False, False, strat)
+
+                # Simple backtest profit metric (last 100 candles)
+                profit = 0
+                test_df = res_df.tail(100)
+                pos = None
+                for _, row in test_df.iterrows():
+                    if row['buy_signal'] and pos is None:
+                        pos = row['close']
+                    elif row['sell_signal'] and pos is not None:
+                        profit += (row['close'] - pos)
+                        pos = None
+
+                return (latest.get('buy_signal', False), latest.get('sell_signal', False), strat, mode_settings.get('effective_aggr', aggr), profit)
+            return (False, False, strat, aggr, 0)
 
         if techniques:
             # Copy dataframe once before parallel processing
@@ -904,14 +917,28 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             # Parallel evaluation for efficiency
             results = await asyncio.gather(*[evaluate_technique(t, df_copy) for t in techniques])
 
-            last_strat = results[-1][2] if results else "N/A"
-            for has_buy, has_sell, strat in results:
+            best_profit = -999999
+            best_strat = "N/A"
+            best_aggr = "normal"
+
+            for has_buy, has_sell, strat, eff_aggr, profit in results:
                 if has_buy: buy_count += 1
                 if has_sell: sell_count += 1
 
+                # Logic to pick the "best" strategy to display
+                # Priority: Signal present > Highest profit
+                has_signal = has_buy or has_sell
+                if has_signal or profit > best_profit:
+                    if has_signal or (best_strat == "N/A" or not (results[results.index((has_buy, has_sell, strat, eff_aggr, profit))][0] or results[results.index((has_buy, has_sell, strat, eff_aggr, profit))][1])):
+                        best_profit = profit
+                        best_strat = strat
+                        best_aggr = eff_aggr
+
             async with bot_lock:
                 if symbol not in bot_state: bot_state[symbol] = {}
-                bot_state[symbol]['strategy'] = last_strat
+                bot_state[symbol]['strategy'] = best_strat
+                bot_state[symbol]['aggr'] = best_aggr
+                bot_state[symbol]['expected_profit'] = best_profit
 
         # Signal Subtraction
         total_score = buy_count - sell_count
@@ -948,6 +975,13 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
 async def execute_buy(exchange, symbol, data, data_manager, engine, config, manual=False):
     global current_balances
+
+    # Check for pending orders to avoid duplicates
+    async with pending_orders_lock:
+        for po in pending_orders.values():
+            if po['symbol'] == symbol and po['side'] == 'buy':
+                return
+
     async with bot_lock:
         pos = data_manager.get_position(symbol)
         max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
@@ -1006,6 +1040,12 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
         logging.error(f"Buy failed for {symbol}: {e}")
 
 async def execute_sell(exchange, symbol, data, data_manager, engine, config, force=False):
+    # Check for pending orders to avoid duplicates
+    async with pending_orders_lock:
+        for po in pending_orders.values():
+            if po['symbol'] == symbol and po['side'] == 'sell':
+                return
+
     async with bot_lock:
         positions = data_manager.get_position(symbol)
         if not positions: return
@@ -1409,7 +1449,7 @@ def make_dashboard(config):
         macd_hist = data.get('macd_hist', 0)
         macd_str = f"{macd_hist:.4e}" if abs(macd_hist) < 0.001 else f"{macd_hist:.4f}"
 
-        display_strat = data.get('last_strat_with_signal') or data.get('strategy') or config.get('pairs', {}).get(symbol, {}).get('strategy', 'N/A')
+        display_strat = data.get('strategy') or config.get('pairs', {}).get(symbol, {}).get('strategy', 'N/A')
 
         if expert_mode:
             row_vals = [
