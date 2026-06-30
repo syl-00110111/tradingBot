@@ -1037,7 +1037,7 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
         # Monte Carlo Validation
         if buy_signal or (sell_signal and has_position):
-            mc = MonteCarloEngine(num_simulations=500, timeframe_candles=20)
+            mc = MonteCarloEngine(num_simulations=50, timeframe_candles=20)
             mc.set_device(device)
             mc_score = mc.validate_strategy(df)
             if buy_signal and mc_score < 1.1: buy_signal = False

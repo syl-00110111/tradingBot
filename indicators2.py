@@ -356,7 +356,7 @@ STRATEGY_GROUPS = {
 }
 
 # Global MC engine for reuse
-_mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=20)
+_mc_engine = MonteCarloEngine(num_simulations=100, timeframe_candles=20)
 
 def get_signals(df, mode_config, is_scan=False):
     """
