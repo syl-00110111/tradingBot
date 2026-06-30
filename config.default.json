@@ -1,6 +1,6 @@
 {
-    "max_open_positions": 10,
-    "max_lots_per_symbol": 1,
+    "max_open_positions": 20,
+    "max_lots_per_symbol": 2,
     "max_trade_percentage": 10.0,
     "dynamic_pair_multiplier": 1.4,
     "global_risk_multiplier": 1.1,
@@ -28,5 +28,5 @@
             "high": 40
         }
     },
-    "max_analysis_workers": 16
+    "max_analysis_workers": 32
 }
