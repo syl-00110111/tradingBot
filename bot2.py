@@ -1223,7 +1223,7 @@ async def watch_orders_task(exchange, data_manager, config, engine):
 def get_timeframe(symbol, config):
     """Utility to get the current timeframe for a symbol consistently."""
     pair_cfg = config.get('pairs', {}).get(symbol, {})
-    return pair_cfg.get('timeframe') or config.get('default_timeframe', '1m')
+    return pair_cfg.get('timeframe') or config.get('default_timeframe', '1s')
 
 def get_tf_priority(tf):
     """Higher timeframe = Lower number = Higher priority in PriorityQueue."""
