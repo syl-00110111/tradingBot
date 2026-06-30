@@ -374,7 +374,7 @@ async def input_task(exchange, config, data_manager, engine):
                     price = bot_state.get(chart_symbol, {}).get('price', 0)
                     if price > 0:
                         logging.info(f"[Manual] Triggering BUY for {chart_symbol}")
-                        asyncio.create_task(execute_buy(exchange, chart_symbol, {'close': price}, data_manager, engine, config))
+                        asyncio.create_task(execute_buy(exchange, chart_symbol, {'close': price}, data_manager, engine, config, manual=True))
                 elif show_chart and chart_symbol and key.lower() == 's':
                     price = bot_state.get(chart_symbol, {}).get('price', 0)
                     if price > 0:
@@ -1130,12 +1130,20 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
     except Exception as e:
         logging.error(f"Analysis error for {symbol}: {e}")
 
-async def execute_buy(exchange, symbol, data, data_manager, engine, config):
+async def execute_buy(exchange, symbol, data, data_manager, engine, config, manual=False):
     global current_balances
     async with bot_lock:
         pos = data_manager.get_position(symbol)
         max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
-        if pos is not None and len(pos) >= max_lots: return
+        if pos is not None and len(pos) >= max_lots:
+            if manual: logging.warning(f"[{symbol}] Manual BUY ignored: max_lots_per_symbol ({max_lots}) reached.")
+            return
+
+        open_positions = data_manager.get_open_positions()
+        max_open = config.get('max_open_positions', 10)
+        if symbol not in open_positions and len(open_positions) >= max_open:
+            if manual: logging.warning(f"[{symbol}] Manual BUY ignored: max_open_positions ({max_open}) reached.")
+            return
 
     try:
         price = data['close']
