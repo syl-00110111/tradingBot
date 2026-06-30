@@ -725,8 +725,13 @@ async def sync_live_positions(exchange, data_manager, config):
         else:
             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
 
-    # Parallelize processing of all assets
-    await asyncio.gather(*[process_asset(a, am) for a, am in free_balances.items()])
+    # Parallelize processing of all assets with a semaphore to avoid rate limits
+    sync_semaphore = asyncio.Semaphore(3)
+    async def process_with_semaphore(asset, amount):
+        async with sync_semaphore:
+            await process_asset(asset, amount)
+
+    await asyncio.gather(*[process_with_semaphore(a, am) for a, am in free_balances.items()])
 
     # Update global bot_state for dashboard
     async with bot_lock:
@@ -853,7 +858,8 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
         # Populate common indicators
         if executor:
-            df = await loop.run_in_executor(executor, get_signals, df, {'device': device})
+            # We force CPU for subprocesses to avoid CUDA fork issues
+            df = await loop.run_in_executor(executor, get_signals, df, {'device': torch.device('cpu')})
         else:
             df = get_signals(df, {'device': device})
 
@@ -879,21 +885,24 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
         sell_count = 0
         total_score = 0
 
-        async def evaluate_technique(t):
+        async def evaluate_technique(t, df_in):
             strat = t.get('strategy')
             mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr='normal')
             mode_settings['strategy'] = strat
-            mode_settings['device'] = device
+            # Force CPU for subprocesses
+            mode_settings['device'] = torch.device('cpu')
 
-            res_df = await loop.run_in_executor(executor, get_signals, df.copy(), mode_settings)
+            res_df = await loop.run_in_executor(executor, get_signals, df_in, mode_settings)
             if not res_df.empty:
                 latest = res_df.iloc[-1]
                 return (latest.get('buy_signal', False), latest.get('sell_signal', False), strat)
             return (False, False, strat)
 
         if techniques:
+            # Copy dataframe once before parallel processing
+            df_copy = df.copy()
             # Parallel evaluation for efficiency
-            results = await asyncio.gather(*[evaluate_technique(t) for t in techniques])
+            results = await asyncio.gather(*[evaluate_technique(t, df_copy) for t in techniques])
 
             last_strat = results[-1][2] if results else "N/A"
             for has_buy, has_sell, strat in results:
@@ -1233,16 +1242,19 @@ async def is_pair_dust(symbol, exchange, config):
     based on exchange minimums.
     """
     asset = symbol.split('/')[0]
+
+    # We do NOT use bot_lock here because this is called within blocks
+    # that ALREADY hold bot_lock in watch_orders_task, avoiding deadlocks.
+    bal_data = current_balances
     amount = 0
-    async with bot_lock:
-        if current_balances and isinstance(current_balances, dict):
-            if 'free' in current_balances:
-                free_data = current_balances['free']
-                amount = free_data.get(asset, 0) if isinstance(free_data, dict) else 0
-            else:
-                amount = current_balances.get(asset, 0)
-                if isinstance(amount, dict):
-                    amount = amount.get('free', 0)
+    if bal_data and isinstance(bal_data, dict):
+        if 'free' in bal_data:
+            free_data = bal_data['free']
+            amount = free_data.get(asset, 0) if isinstance(free_data, dict) else 0
+        else:
+            amount = bal_data.get(asset, 0)
+            if isinstance(amount, dict):
+                amount = amount.get('free', 0)
 
     market = exchange.markets.get(symbol)
     if not market: return False
@@ -1596,8 +1608,6 @@ async def main():
     global ui_task, background_tasks, startup_complete
     ui_task = asyncio.create_task(run_dashboard(config))
 
-    # Indicate startup has begun
-    startup_complete = True
     logging.info("[bold cyan]System initialization started...")
 
     # Initial Batch
@@ -1699,7 +1709,8 @@ async def main():
     # Now that watchers are set up, perform initial sync and balance retrieval
     try:
         logging.info("Retrieving initial balances...")
-        initial_balance = await exchange.fetch_balance()
+        # Add timeout to balance retrieval
+        initial_balance = await asyncio.wait_for(exchange.fetch_balance(), timeout=30)
         async with bot_lock:
             global current_balances
             current_balances = initial_balance
@@ -1708,13 +1719,19 @@ async def main():
 
     # Synchronizing positions from the exchange API
     logging.info(f"Synchronizing positions from the {exchange_id.capitalize()} API...")
-    await sync_live_positions(exchange, data_manager, config)
+    try:
+        await asyncio.wait_for(sync_live_positions(exchange, data_manager, config), timeout=120)
+    except asyncio.TimeoutError:
+        logging.error("Balance synchronization timed out. Proceeding with partial data.")
+    except Exception as e:
+        logging.error(f"Error during balance synchronization: {e}")
 
     # Dedicated analysis/trade worker
     background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
 
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(4)
+    startup_complete = True
     logging.info("[bold green]Bot v2 fully operational.")
 
     # Trigger initial chart and display update
