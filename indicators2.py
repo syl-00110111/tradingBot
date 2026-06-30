@@ -332,33 +332,26 @@ def torch_adx(high, low, close, length=14):
     adx = torch_ema(dx, 2 * length - 1)
     return adx
 STRATEGIES = [
-    'ichimoku_cloud', 'parabolic_sar',
-    'bollinger_bands', 'donchian_channels',
-    'stochastic_rsi', 'williams_r', 'vwap_momentum',
-    'renko_proxy', 'ema_rsi_volume',
-    'mc_mean_reversion', 'mc_momentum', 'mc_dynamic_allocation', 'mc_market_making',
-    'mc_stop_loss_eval', 'mc_options_pricing',
-    'whale_detection_proxy', 'pump_dump_proxy', 'scientific_ensemble',
-    'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'adx_trend_strength',
-    'pairs_trading_proxy', 'halving_cycle_proxy', 'listing_surge_proxy', 'tema_crossover',
-    'heikin_ashi', 'candle_patterns', 'sinewave_cycle'
+    'ichimoku_cloud',
+    'bollinger_bands',
+    'williams_r', 'vwap_momentum',
+    'whale_detection_proxy', 'scientific_ensemble',
+    'sentiment_momentum_proxy', 'liquidation_cascade_proxy',
+    'tema_crossover',
+    'heikin_ashi'
 ]
 
 STRATEGY_GROUPS = {
     'trend_following': [
-        'ichimoku_cloud', 'parabolic_sar', 'vwap_momentum', 'renko_proxy',
-        'ema_rsi_volume', 'mc_momentum', 'adx_trend_strength', 'halving_cycle_proxy',
-        'tema_crossover', 'heikin_ashi', 'donchian_channels'
+        'ichimoku_cloud', 'vwap_momentum',
+        'tema_crossover', 'heikin_ashi'
     ],
     'mean_reversion': [
-        'bollinger_bands', 'stochastic_rsi', 'williams_r', 'mc_mean_reversion',
-        'mc_market_making', 'pairs_trading_proxy', 'sinewave_cycle'
+        'bollinger_bands', 'williams_r'
     ],
     'other': [
-        'mc_dynamic_allocation', 'mc_stop_loss_eval', 'mc_options_pricing',
-        'whale_detection_proxy', 'pump_dump_proxy', 'scientific_ensemble',
-        'sentiment_momentum_proxy', 'liquidation_cascade_proxy', 'listing_surge_proxy',
-        'candle_patterns'
+        'whale_detection_proxy', 'scientific_ensemble',
+        'sentiment_momentum_proxy', 'liquidation_cascade_proxy'
     ]
 }
 
