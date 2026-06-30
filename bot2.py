@@ -1180,7 +1180,13 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
         positions = data_manager.get_position(symbol)
         if not positions: return
 
-    price = data['close']
+    # Use ticker price if possible for more accurate profitability check
+    try:
+        ticker = await exchange.fetch_ticker(symbol)
+        price = ticker['last'] if ticker else data['close']
+    except:
+        price = data['close']
+
     fee_rate = await exchange.fetch_trading_fee(symbol)
 
     # Fetch actual balance to avoid "insufficient balance" errors due to external trades or fees
@@ -1265,6 +1271,7 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
             remaining_net_received = total_net_received
             remaining_fee = total_fee
 
+            total_entry_cost_of_filled = 0
             for idx, i in enumerate(sell_lot_indices):
                 if remaining_filled <= 1e-10: break
 
@@ -1283,7 +1290,10 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                     current_lot_fee = total_fee * proportion
 
                 # Proportional entry cost for the part of the lot being closed
-                entry_cost_part = pos.get('entry_total_base', 0) * (lot_close_amt / pos['amount'])
+                entry_cost_proportion = (lot_close_amt / pos['amount']) if pos['amount'] > 0 else 1.0
+                entry_cost_part = pos.get('entry_total_base', 0) * entry_cost_proportion
+                total_entry_cost_of_filled += entry_cost_part
+
                 lot_profit = current_lot_received - entry_cost_part
 
                 data_manager.close_position(
@@ -1295,7 +1305,8 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                 remaining_net_received -= current_lot_received
                 remaining_fee -= current_lot_fee
 
-            logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Filled: {filled_amount}, Profit: {total_net_received:.4f})")
+            actual_total_profit = total_net_received - total_entry_cost_of_filled
+            logging.info(f"[{symbol}] Aggregated SELL executed at {actual_price} (Filled: {filled_amount}, Profit: {actual_total_profit:.4f})")
             play_sound("sell")
 
             # Post-sale dust cleanup
