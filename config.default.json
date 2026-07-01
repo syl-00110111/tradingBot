@@ -11,7 +11,7 @@
         "multiplier": 1.2
     },
     "no_signal_threshold": 240,
-    "confirmation_window": 2,
+
     "tema_length": 9,
     "ema_fast": 5,
     "ema_slow": 20,
