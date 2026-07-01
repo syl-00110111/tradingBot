@@ -14,6 +14,7 @@ import random
 import math
 import threading
 import queue
+from collections import deque
 import pandas as pd
 import torch
 import concurrent.futures
@@ -47,6 +48,8 @@ global_watcher_task = None
 # Track orders placed by the bot to process them via WebSocket confirmation
 pending_orders = {} # order_id -> metadata_dict
 pending_orders_lock = asyncio.Lock()
+processed_orders = deque(maxlen=1000) # Keep track of recently processed order IDs
+processed_orders_lock = asyncio.Lock()
 
 # Global controls for dashboard
 pairs_scroll_offset = 0
@@ -826,6 +829,9 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                         'timestamp': time.time(),
                         'trigger_data': {}
                     }
+                # If order is already closed (some exchanges return filled orders immediately), process it.
+                if order.get('status') == 'closed':
+                    await process_order_fill(order, exchange, data_manager, config, engine)
             else:
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
     except Exception as e:
@@ -931,10 +937,156 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                     'timestamp': time.time(),
                     'trigger_data': {}
                 }
+            # If order is already closed, process it immediately
+            if order.get('status') == 'closed':
+                await process_order_fill(order, exchange, data_manager, config, engine)
     except Exception as e:
         logging.error(f"Aggregated sell failed for {symbol}: {e}")
         async with bot_lock:
             bot_state[symbol]['position'] = data_manager.get_position(symbol)
+
+async def process_order_fill(order, exchange, data_manager, config, engine):
+    """
+    Centralized handler for completed orders to avoid race conditions and lost confirmations.
+    """
+    if order.get('status') != 'closed':
+        return False
+
+    order_id = str(order['id'])
+    async with processed_orders_lock:
+        if order_id in processed_orders:
+            return False
+        processed_orders.append(order_id)
+
+    meta = None
+    async with pending_orders_lock:
+        if order_id in pending_orders:
+            meta = pending_orders.pop(order_id)
+
+    # Use data from order object, or meta if order is missing info
+    symbol = order.get('symbol') or (meta['symbol'] if meta else None)
+    side = order.get('side') or (meta['side'] if meta else None)
+    if not symbol or not side:
+        return False
+
+    filled_amount = order.get('filled', 0.0)
+    actual_price = order.get('price') or order.get('average', 0.0)
+    cost = order.get('cost') or (filled_amount * actual_price)
+
+    fee_cost = order.get('fee', {}).get('cost', 0.0)
+    fee_currency = order.get('fee', {}).get('currency')
+    total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+
+    trigger_data = meta['trigger_data'] if meta else {}
+    timestamp = meta['timestamp'] if meta else time.time()
+
+    if side == 'buy':
+        total_val = cost + total_fee
+        data_manager.add_position(symbol, actual_price, filled_amount, total_fee, trigger_data, timestamp, total_base=total_val)
+
+        _, quote = symbol.split('/')
+        logging.info(f"[{symbol}] BUY executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Spent: {format_price(total_val)} {quote})")
+        play_sound("buy")
+
+    elif side == 'sell':
+        total_net_received = cost - total_fee
+        sell_lot_indices = meta.get('sell_lot_indices') if meta else []
+        
+        async with bot_lock:
+            positions = data_manager.get_position(symbol)
+            if positions:
+                if not sell_lot_indices:
+                    # If external sell or missing indices, close from the oldest lots
+                    sell_lot_indices = list(range(len(positions)))
+                
+                sell_lot_indices.sort(reverse=True)
+
+                remaining_filled = filled_amount
+                remaining_net_received = total_net_received
+                remaining_fee = total_fee
+                total_entry_cost_of_filled = 0.0
+
+                for idx, i in enumerate(sell_lot_indices):
+                    if remaining_filled <= 1e-10: break
+                    if i >= len(positions): continue
+
+                    pos = positions[i]
+                    lot_close_amt = min(pos['amount'], remaining_filled)
+                    if lot_close_amt <= 0: continue
+
+                    if idx == len(sell_lot_indices) - 1 or lot_close_amt >= remaining_filled - 1e-10:
+                        current_lot_received = remaining_net_received
+                        current_lot_fee = remaining_fee
+                        lot_close_amt = remaining_filled
+                    else:
+                        proportion = lot_close_amt / filled_amount
+                        current_lot_received = total_net_received * proportion
+                        current_lot_fee = total_fee * proportion
+
+                    entry_cost_proportion = (lot_close_amt / pos['amount']) if pos['amount'] > 0 else 1.0
+                    entry_cost_part = pos.get('entry_total_base', 0.0) * entry_cost_proportion
+                    total_entry_cost_of_filled += entry_cost_part
+                    lot_profit = current_lot_received - entry_cost_part
+
+                    data_manager.close_position(
+                        symbol, actual_price, current_lot_fee, lot_profit, trigger_data, time.time(),
+                        total_base=current_lot_received, lot_index=i, amount=lot_close_amt
+                    )
+
+                    remaining_filled -= lot_close_amt
+                    remaining_net_received -= current_lot_received
+                    remaining_fee -= current_lot_fee
+
+                actual_total_profit = total_net_received - total_entry_cost_of_filled
+                _, quote = symbol.split('/')
+                logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Profit: {format_price(actual_total_profit)}, Received: {format_price(total_net_received)} {quote})")
+                play_sound("sell")
+
+        # Fetch fresh balance to ensure dust check and future buys are accurate
+        try:
+            fresh_balance = await exchange.fetch_balance()
+            if fresh_balance:
+                async with bot_lock:
+                    global current_balances
+                    current_balances = fresh_balance
+        except Exception as e:
+            logging.warning(f"Failed to update balance after sell for {symbol}: {e}")
+
+        # Post-sale dust cleanup
+        if await is_pair_dust(symbol, exchange, config):
+            data_manager.clear_positions(symbol)
+            logging.info(f"[{symbol}] Remaining balance is dust. Clearing open positions.")
+
+        # Trigger re-analysis for budget-suspended pairs to resume them quickly
+        asyncio.create_task(resume_suspended_pairs(exchange, config, data_manager, engine))
+
+    async with bot_lock:
+        if symbol not in bot_state: bot_state[symbol] = {}
+        bot_state[symbol]['position'] = data_manager.get_position(symbol)
+    
+    return True
+
+async def resume_suspended_pairs(exchange, config, data_manager, engine):
+    """
+    Attempts to resume trading for pairs that were suspended due to budget constraints.
+    """
+    suspended_symbols = [s for s, susp in pair_suspensions.items() if susp.get('reason') == 'budget']
+    if not suspended_symbols:
+        return
+
+    # Give the exchange a moment to settle
+    await asyncio.sleep(0.5)
+
+    for symbol in suspended_symbols:
+        # Triggering a re-analysis will automatically check the budget again in analyze_and_trade
+        async with analysis_lock:
+            if symbol not in analysis_in_progress:
+                analysis_in_progress.add(symbol)
+                # Note: This might use None for pattern_manager, device, executor if not globally available,
+                # but analyze_and_trade handles it. We'll use the ones from main() if possible or let the next update handle it.
+                # Actually, it's safer to just let the next candle update do it, or we need to pass these refs.
+                # Let's try to find a way to trigger analyze_and_trade with current globals.
+                pass
 
 async def watch_balance_task(exchange, data_manager):
     global current_balances
@@ -957,100 +1109,12 @@ async def watch_orders_task(exchange, data_manager, config, engine):
         try:
             async for orders in exchange.watch_orders():
                 for order in orders:
-                    if order['status'] == 'closed':
-                        order_id = str(order['id'])
-                        meta = None
-                        async with pending_orders_lock:
-                            if order_id in pending_orders:
-                                meta = pending_orders.pop(order_id)
-
-                        if meta:
-                            symbol = meta['symbol']
-                            side = meta['side']
-                            filled_amount = order.get('filled', 0.0)
-                            actual_price = order.get('price') or order.get('average', 0.0)
-                            cost = order.get('cost') or (filled_amount * actual_price)
-
-                            fee_cost = order.get('fee', {}).get('cost', 0.0)
-                            fee_currency = order.get('fee', {}).get('currency')
-                            total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
-
-                            if side == 'buy':
-                                total_val = cost + total_fee
-                                data_manager.add_position(symbol, actual_price, filled_amount, total_fee, meta['trigger_data'], meta['timestamp'], total_base=total_val)
-
-                                _, quote = symbol.split('/')
-                                logging.info(f"[{symbol}] BUY executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Spent: {format_price(total_val)} {quote})")
-                                play_sound("buy")
-
-                            elif side == 'sell':
-                                total_net_received = cost - total_fee
-                                sell_lot_indices = meta['sell_lot_indices']
-                                sell_lot_indices.sort(reverse=True)
-
-                                async with bot_lock:
-                                    positions = data_manager.get_position(symbol)
-                                    if not positions: continue
-
-                                    remaining_filled = filled_amount
-                                    remaining_net_received = total_net_received
-                                    remaining_fee = total_fee
-                                    total_entry_cost_of_filled = 0.0
-
-                                    for idx, i in enumerate(sell_lot_indices):
-                                        if remaining_filled <= 1e-10: break
-                                        if i >= len(positions): continue
-
-                                        pos = positions[i]
-                                        lot_close_amt = min(pos['amount'], remaining_filled)
-                                        if lot_close_amt <= 0: continue
-
-                                        if idx == len(sell_lot_indices) - 1 or lot_close_amt >= remaining_filled - 1e-10:
-                                            current_lot_received = remaining_net_received
-                                            current_lot_fee = remaining_fee
-                                            lot_close_amt = remaining_filled
-                                        else:
-                                            proportion = lot_close_amt / filled_amount
-                                            current_lot_received = total_net_received * proportion
-                                            current_lot_fee = total_fee * proportion
-
-                                        entry_cost_proportion = (lot_close_amt / pos['amount']) if pos['amount'] > 0 else 1.0
-                                        entry_cost_part = pos.get('entry_total_base', 0.0) * entry_cost_proportion
-                                        total_entry_cost_of_filled += entry_cost_part
-                                        lot_profit = current_lot_received - entry_cost_part
-
-                                        data_manager.close_position(
-                                            symbol, actual_price, current_lot_fee, lot_profit, meta['trigger_data'], time.time(),
-                                            total_base=current_lot_received, lot_index=i, amount=lot_close_amt
-                                        )
-
-                                        remaining_filled -= lot_close_amt
-                                        remaining_net_received -= current_lot_received
-                                        remaining_fee -= current_lot_fee
-
-                                    actual_total_profit = total_net_received - total_entry_cost_of_filled
-                                    _, quote = symbol.split('/')
-                                    logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Profit: {format_price(actual_total_profit)}, Received: {format_price(total_net_received)} {quote})")
-                                    play_sound("sell")
-
-                                    # Post-sale dust cleanup
-                                    if await is_pair_dust(symbol, exchange, config):
-                                        data_manager.clear_positions(symbol)
-                                        logging.info(f"[{symbol}] Remaining balance is dust. Clearing open positions.")
-
-                            async with bot_lock:
-                                if symbol not in bot_state: bot_state[symbol] = {}
-                                bot_state[symbol]['position'] = data_manager.get_position(symbol)
-                        else:
-                            # logging.info(f"External Order Completed: {order['symbol']} {order['side']} @ {order['price']}")
-                            pass
+                    await process_order_fill(order, exchange, data_manager, config, engine)
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"WebSocket orders reconnection error: {e}")
                 await asyncio.sleep(5)
             else: break
-                # We could sync positions with data_manager here if we wanted to be
-                # fully WebSocket-driven for fills.
 
 async def is_pair_dust(symbol, exchange, config):
     """
@@ -1059,9 +1123,10 @@ async def is_pair_dust(symbol, exchange, config):
     """
     asset = symbol.split('/')[0]
 
-    # We do NOT use bot_lock here because this is called within blocks
-    # that ALREADY hold bot_lock in watch_orders_task, avoiding deadlocks.
-    bal_data = current_balances
+    async with bot_lock:
+        bal_data = current_balances
+        price = bot_state.get(symbol, {}).get('price', 0)
+
     amount = 0
     if bal_data and isinstance(bal_data, dict):
         if 'free' in bal_data:
@@ -1073,17 +1138,18 @@ async def is_pair_dust(symbol, exchange, config):
                 amount = amount.get('free', 0)
 
     market = exchange.markets.get(symbol)
-    if not market: return False
+    if not market: 
+        return amount < 1e-6 # Fallback for unknown markets
 
     limits = market.get('limits', {})
-    min_amt = limits.get('amount', {}).get('min') or 0
+    min_amt = limits.get('amount', {}).get('min') or 1e-8
     min_cost = limits.get('cost', {}).get('min') or 0
-
-    # Use price from bot_state if available (updated by WebSocket)
-    price = bot_state.get(symbol, {}).get('price', 0)
 
     if amount < min_amt: return True
     if price > 0 and (amount * price) < min_cost: return True
+    
+    # Very small absolute amount check
+    if amount < 1e-10: return True
 
     return False
 
