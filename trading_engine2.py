@@ -55,7 +55,6 @@ class TradingEngine:
             "rsi_period": self.config.get('rsi_period'),
             "rsi_buy": self.config.get('rsi_buy'),
             "rsi_sell": self.config.get('rsi_sell'),
-            "confirmation_window": self.config.get('confirmation_window'),
             "effective_aggr": aggr
         }
 
@@ -82,7 +81,6 @@ class TradingEngine:
 
         # La haute volatilité ajoute un signal de confirmation supplémentaire globalement
         if volatility > 0.1:
-            settings["confirmation_window"] += 1
 
         return settings
 

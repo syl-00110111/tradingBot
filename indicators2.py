@@ -380,7 +380,7 @@ def get_signals(df, mode_config, is_scan=False):
         The input dataframe updated with signals and indicators.
     """
     strategy = mode_config.get('strategy')
-    device = mode_config.get('device')
+    device = mode_config.get('device') or torch.device('cpu')
     _mc_engine.set_device(device)
 
     # Common indicators for tendency and background analysis (Expert Mode)
@@ -518,29 +518,6 @@ def get_signals(df, mode_config, is_scan=False):
     elif strategy is not None:
         logging.warning(f"Strategy {strategy} not recognized.")
 
-    return df
-
-def apply_confirmation(df, window):
-    """
-    Applique une fenêtre de confirmation roulante.
-
-    A signal is confirmed if it persists or appears within the specified
-    rolling window.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Dataframe containing 'buy_candidate' and 'sell_candidate' columns.
-    window : int
-        The size of the rolling window.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Dataframe with 'buy_signal' and 'sell_signal' boolean columns.
-    """
-    df['buy_signal'] = df['buy_candidate'].rolling(window=window).max() > 0
-    df['sell_signal'] = df['sell_candidate'].rolling(window=window).max() > 0
     return df
 
 def detect_hammer(open_, high, low, close):
@@ -751,7 +728,7 @@ def handle_mc_strategies(df, strategy, config, is_scan):
             df.at[df.index[i], 'score'] = 1 if df.at[df.index[i], 'buy_candidate'] else (-1 if df.at[df.index[i], 'sell_candidate'] else 0)
             df.at[df.index[i], 'tendency'] = "Bullish" if call_p > put_p else "Bearish"
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 # --- 1. TREND FOLLOWING ---
 
@@ -790,7 +767,7 @@ def strategy_ichimoku(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['span_a'], "Bullish", np.where(df['close'] < df['span_b'], "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_psar(df, config):
     """
@@ -826,7 +803,7 @@ def strategy_psar(df, config):
     df['score'] = np.where(df['psar_long'].notna(), 1, np.where(df['psar_short'].notna(), -1, 0))
     df['tendency'] = np.where(df['psar_long'].notna(), "Bullish", np.where(df['psar_short'].notna(), "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 # --- 2. RANGE ---
 
@@ -866,7 +843,7 @@ def strategy_bollinger(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['bb_mid'], "Bullish", np.where(df['close'] < df['bb_mid'], "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 # --- 3. BREAKOUT ---
 
@@ -903,7 +880,7 @@ def strategy_donchian(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > (df['dc_upper'] + df['dc_lower'])/2, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_stoch_rsi(df, config):
     """
@@ -936,7 +913,7 @@ def strategy_stoch_rsi(df, config):
     df['score'] = np.where(df['stoch_k'] < 20, 1, np.where(df['stoch_k'] > 80, -1, 0))
     df['tendency'] = np.where(df['stoch_k'] > 50, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_williams_r(df, config):
     """
@@ -965,7 +942,7 @@ def strategy_williams_r(df, config):
     df['score'] = np.where(df['willr'] < -80, 1, np.where(df['willr'] > -20, -1, 0))
     df['tendency'] = np.where(df['willr'] > -50, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_vwap_momentum(df, config):
     """
@@ -994,7 +971,7 @@ def strategy_vwap_momentum(df, config):
     df['score'] = np.where(df['close'] > df['vwap'], 1, -1)
     df['tendency'] = np.where(df['close'] > df['vwap'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 # --- 5. SCALPING (Proxies) ---
 
@@ -1025,7 +1002,7 @@ def strategy_renko_proxy(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['open'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_ema_rsi_volume(df, config):
     """
@@ -1056,7 +1033,7 @@ def strategy_ema_rsi_volume(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['ema_9'] > df['ema_21'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_whale_detection(df, config):
     """
@@ -1095,7 +1072,7 @@ def strategy_whale_detection(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['close'].shift(1), "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_pump_dump(df, config):
     """
@@ -1134,7 +1111,7 @@ def strategy_pump_dump(df, config):
     df['score'] = np.where(df['pump_detected'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['price_change'] > 0, "Bullish", "Bearish")
 
-    return apply_confirmation(df, 1)
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_scientific_ensemble(df, config):
     """
@@ -1181,7 +1158,7 @@ def strategy_scientific_ensemble(df, config):
     # Keep the ensemble score but clip it for UI if needed or use it as is
     df['tendency'] = np.where(df['score'] > 0, "Bullish", np.where(df['score'] < 0, "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_sentiment_momentum(df, config):
     """
@@ -1219,7 +1196,7 @@ def strategy_sentiment_momentum(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['roc'] > 0, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_liquidation_cascade(df, config):
     """
@@ -1259,7 +1236,7 @@ def strategy_liquidation_cascade(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['close'].shift(1), "Bullish", "Bearish")
 
-    return apply_confirmation(df, 1)
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_adx_trend(df, config):
     """
@@ -1298,7 +1275,7 @@ def strategy_adx_trend(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['dmp'] > df['dmn'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_pairs_trading(df, config):
     """
@@ -1332,7 +1309,7 @@ def strategy_pairs_trading(df, config):
     df['score'] = np.where(df['z_score'] < 0, 1, -1)
     df['tendency'] = np.where(df['z_score'] > 0, "Bullish", "Bearish")
 
-    return apply_confirmation(df, 1)
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_halving_cycle(df, config):
     """
@@ -1367,7 +1344,7 @@ def strategy_halving_cycle(df, config):
     df['score'] = np.where(df['close'] > df['ema_50'], 1, -1)
     df['tendency'] = np.where(df['close'] > df['ema_200'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_listing_surge(df, config):
     """
@@ -1405,7 +1382,7 @@ def strategy_listing_surge(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['close'].shift(1), "Bullish", "Bearish")
 
-    return apply_confirmation(df, 1)
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_tema_crossover(df, config):
     """
@@ -1427,7 +1404,7 @@ def strategy_tema_crossover(df, config):
         Updated dataframe with buy/sell signals.
     """
     length = config.get('tema_length')
-    device = config.get('device', torch.device('cpu'))
+    device = config.get('device') or torch.device('cpu')
 
     # Check if tema_20 (default) was already calculated, otherwise calculate custom length
     col_name = f'tema_{length}_strat'
@@ -1447,7 +1424,7 @@ def strategy_tema_crossover(df, config):
     df['score'] = np.where(df['close'] > df[col_name], 1, -1)
     df['tendency'] = np.where(df['close'] > df[col_name], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_sinewave(df, config):
     """
@@ -1456,7 +1433,7 @@ def strategy_sinewave(df, config):
     Buy when Sine crosses above LeadSine.
     Sell when Sine crosses below LeadSine.
     """
-    device = config.get('device', torch.device('cpu'))
+    device = config.get('device') or torch.device('cpu')
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
         # Ensure numeric for Sinewave
         if 'close' in df.columns and df['close'].dtype == 'object':
@@ -1479,7 +1456,7 @@ def strategy_sinewave(df, config):
     df['score'] = np.where(df['sine'] > df['leadsine'], 1, -1)
     df['tendency'] = np.where(df['sine'] > df['leadsine'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_candle_patterns(df, config):
     """
@@ -1523,7 +1500,7 @@ def strategy_candle_patterns(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['close'].shift(1), "Bullish", "Bearish")
 
-    return apply_confirmation(df, 1)
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
 def strategy_heikin_ashi(df, config):
     """
@@ -1545,7 +1522,7 @@ def strategy_heikin_ashi(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    device = config.get('device', torch.device('cpu'))
+    device = config.get('device') or torch.device('cpu')
 
     if (device.type != 'cpu') or torch.backends.mkldnn.enabled:
         o_t = torch.tensor(df['open'].values, device=device, dtype=torch.float64)
@@ -1576,4 +1553,4 @@ def strategy_heikin_ashi(df, config):
     df['score'] = np.where(df['ha_close'] > df['ha_open'], 1, -1)
     df['tendency'] = np.where(df['ha_close'] > df['ha_open'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window'))
+    df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df

@@ -256,17 +256,17 @@ def format_price(price, precision=None):
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
     if price == 0: return "0"
+
+    # Scientific notation for very small numbers (more than 4 zeros after decimal)
+    if abs(price) < 0.00001:
+        return f"{price:.4e}"
+
     if precision is None:
-        if abs(price) < 0.000001:
-            formatted = f"{price:.10f}".rstrip('0').rstrip('.')
-            if len(formatted.split('.')[-1]) > 8: return f"{price:.4e}"
-            return formatted
         return f"{price:.10f}".rstrip('0').rstrip('.')
     else:
         p_int = precision_to_int(precision)
         formatted = f"{price:.{p_int}f}".rstrip('0').rstrip('.')
         if (formatted == "" or formatted == "0") and price != 0:
-            if abs(price) < 0.000001: return f"{price:.4e}"
             return f"{price:.10f}".rstrip('0').rstrip('.')
         return formatted if formatted != "" else "0"
 
@@ -274,13 +274,16 @@ def format_amt(amt, precision=None):
     if amt is None: return "-"
     if not isinstance(amt, (int, float)): return str(amt)
     if amt == 0: return "0"
+
+    if abs(amt) < 0.00001:
+        return f"{amt:.4e}"
+
     if precision is None:
         return f"{amt:.10f}".rstrip('0').rstrip('.')
     else:
         p_int = precision_to_int(precision)
         formatted = f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
         if (formatted == "" or formatted == "0") and amt != 0:
-            if abs(amt) < 0.000001: return f"{amt:.4e}"
             return f"{amt:.10f}".rstrip('0').rstrip('.')
         return formatted if formatted != "" else "0"
 
@@ -563,6 +566,7 @@ async def sync_live_positions(exchange, data_manager, config):
 
         avg_price = 0
         total_cost = 0
+        total_fee = 0
         accumulated_amount = 0
         try:
             # Add timeout to prevent hanging on slow responses
@@ -576,6 +580,14 @@ async def sync_live_positions(exchange, data_manager, config):
 
                     trade_amt = min(t['amount'], remaining_to_fill)
                     total_cost += trade_amt * t['price']
+
+                    if 'fee' in t and t['fee']:
+                        fee_cost = t['fee'].get('cost', 0)
+                        fee_currency = t['fee'].get('currency')
+                        if fee_cost > 0:
+                            actual_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+                            total_fee += actual_fee * (trade_amt / t['amount'])
+
                     accumulated_amount += trade_amt
 
             if accumulated_amount > 0:
@@ -585,7 +597,13 @@ async def sync_live_positions(exchange, data_manager, config):
                     curr_p = ticker['last'] if ticker else 0
                     if curr_p > 0:
                         rest_amount = amount - accumulated_amount
-                        total_cost += rest_amount * curr_p
+                        rest_cost = rest_amount * curr_p
+                        total_cost += rest_cost
+
+                        # Estimate remaining fee if some trades are missing
+                        if accumulated_amount > 0:
+                            total_fee += (total_fee / accumulated_amount) * rest_amount
+
                         avg_price = total_cost / amount
         except Exception as e:
             logging.warning(f"[{symbol}] Error fetching trade history for sync: {e}")
@@ -596,9 +614,9 @@ async def sync_live_positions(exchange, data_manager, config):
 
         if avg_price > 0:
             data_manager.add_position(
-                symbol, avg_price, amount, 0,
+                symbol, avg_price, amount, total_fee,
                 {"info": "launch_sync", "auto_sell_disabled": True}, time.time(),
-                total_base=amount * avg_price
+                total_base=total_cost + total_fee
             )
             logging.info(f"[{symbol}] Synced balance: {amount} at calculated avg price {format_price(avg_price)}")
         else:
@@ -712,6 +730,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
 
         mode_settings = engine.get_dynamic_settings(latest_base.get('adx'), latest_base.get('volatility'), aggr=aggr)
         mode_settings['strategy'] = strat
+        mode_settings['device'] = device
 
         if executor:
             df = await loop.run_in_executor(executor, get_signals, df, mode_settings)
