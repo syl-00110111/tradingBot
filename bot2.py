@@ -657,8 +657,13 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
 
         # Single Strategy Evaluation + Random Scan
         pair_config = config['pairs'].get(symbol, {})
-        current_strat = pair_config.get('strategy') or config.get('default_strategy')
-        current_aggr = pair_config.get('aggr') or config.get('default_aggr')
+        current_strat = pair_config.get('strategy') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('strategy') or bot_state.get(symbol, {}).get('strategy')
+        current_aggr = pair_config.get('aggr') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('aggr') or bot_state.get(symbol, {}).get('aggr')
+
+        if not current_strat:
+            current_strat = random.choice(STRATEGIES)
+        if not current_aggr:
+            current_aggr = random.choice(['normal', 'aggressive', 'dynamic'])
 
         # Randomly select a new technique to explore
         random_strat = random.choice(STRATEGIES)
@@ -1411,8 +1416,8 @@ async def main():
     # Initial Batch
     for symbol in pairs:
         pair_cfg = config['pairs'][symbol]
-        strat = pair_cfg.get('strategy') or config.get('default_strategy')
-        aggr = pair_cfg.get('aggr') or config.get('default_aggr')
+        strat = pair_cfg.get('strategy') or random.choice(STRATEGIES)
+        aggr = pair_cfg.get('aggr') or random.choice(['normal', 'aggressive', 'dynamic'])
 
         bot_state[symbol] = {
             'price': 0, 'rsi': 0, 'tendency': 'Neutral',

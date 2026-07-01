@@ -25,7 +25,7 @@ class TradingEngine:
         self.risk_multiplier = float(config.get('global_risk_multiplier'))
         self.min_profit_margin = float(config.get('min_profit_margin'))
 
-    def get_dynamic_settings(self, adx, volatility, aggr=None):
+    def get_dynamic_settings(self, adx, volatility, aggr='normal'):
         """
         Ajuste les paramètres des indicateurs techniques en fonction des régimes de marché
         actuels et de l'agressivité.
@@ -44,9 +44,6 @@ class TradingEngine:
         dict
             Un dictionnaire de paramètres d'indicateurs techniques.
         """
-        if aggr is None:
-            aggr = self.config.get('default_aggr')
-
         # Paramètres de base (Normal)
         settings = {
             "ema_fast": 20, "ema_slow": 50,

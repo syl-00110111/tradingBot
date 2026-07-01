@@ -18,8 +18,5 @@
     "macd_fast": 12,
     "macd_slow": 26,
     "macd_signal": 9,
-    "rsi_period": 14,
-    "default_strategy": "ichimoku_cloud",
-    "default_aggr": "dynamic",
-    "pairs": {}
+    "rsi_period": 14
 }
