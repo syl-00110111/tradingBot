@@ -22,10 +22,10 @@ class TradingEngine:
     """
     def __init__(self, config):
         self.config = config
-        self.risk_multiplier = float(config.get('global_risk_multiplier', 1.1))
-        self.min_profit_margin = float(config.get('min_profit_margin', 0.01))
+        self.risk_multiplier = float(config.get('global_risk_multiplier'))
+        self.min_profit_margin = float(config.get('min_profit_margin'))
 
-    def get_dynamic_settings(self, adx, volatility, aggr='dynamic'):
+    def get_dynamic_settings(self, adx, volatility, aggr='normal'):
         """
         Ajuste les paramètres des indicateurs techniques en fonction des régimes de marché
         actuels et de l'agressivité.
@@ -47,9 +47,12 @@ class TradingEngine:
         # Paramètres de base (Normal)
         settings = {
             "ema_fast": 20, "ema_slow": 50,
-            "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
-            "rsi_period": 14, "rsi_buy": 30, "rsi_sell": 70,
-            "confirmation_window": 1,
+            "macd_fast": self.config.get('macd_fast'),
+            "macd_slow": self.config.get('macd_slow'),
+            "macd_signal": self.config.get('macd_signal'),
+            "rsi_period": self.config.get('rsi_period'),
+            "rsi_buy": 30, "rsi_sell": 70,
+            "confirmation_window": self.config.get('confirmation_window'),
             "effective_aggr": aggr
         }
 
@@ -154,9 +157,9 @@ class TradingEngine:
                 base_balance = balance.get(base_currency, 0)
 
         # 1. Déterminer le plafond strict pour cet actif de base
-        cfg_val = self.config.get('max_trade_percentage', 12.0)
+        cfg_val = self.config.get('max_trade_percentage')
         if isinstance(cfg_val, dict):
-             max_pct = float(cfg_val.get(base_currency, cfg_val.get('default', 12.0)))
+             max_pct = float(cfg_val.get(base_currency, cfg_val.get('default')))
         else:
              max_pct = float(cfg_val)
 
@@ -174,13 +177,13 @@ class TradingEngine:
         trade_amount_base *= self.risk_multiplier
 
         # Multiplicateur pour les paires dynamiques (1s) - Toujours actif car 1s est le seul TF désormais
-        dynamic_multiplier = float(self.config.get('dynamic_pair_multiplier', 2.0))
+        dynamic_multiplier = float(self.config.get('dynamic_pair_multiplier'))
         trade_amount_base *= dynamic_multiplier
 
         # 4. Appliquer le bonus de série de victoires
         ws_config = self.config.get('win_streak_bonus', {})
-        if ws_config.get('enabled') and win_streak >= ws_config.get('threshold', 2):
-             multiplier = ws_config.get('multiplier', 1.2)
+        if ws_config.get('enabled') and win_streak >= ws_config.get('threshold'):
+             multiplier = ws_config.get('multiplier')
              trade_amount_base *= multiplier
              # logging.info(f"Série de victoires détectée ({win_streak}), application d'un multiplicateur {multiplier}x.")
 

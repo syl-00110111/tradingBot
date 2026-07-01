@@ -389,7 +389,7 @@ def get_signals(df, mode_config, is_scan=False):
     # For multi-technique scanning, we check if the requested EMA/RSI settings
     # match what's already in the dataframe. If not, we MUST recalculate.
     current_ema_fast = df.attrs.get('ema_fast')
-    requested_ema_fast = mode_config.get('ema_fast', 8)
+    requested_ema_fast = mode_config.get('ema_fast')
 
     needs_recalc = ('ema_f' not in df.columns) or (current_ema_fast != requested_ema_fast)
 
@@ -409,27 +409,27 @@ def get_signals(df, mode_config, is_scan=False):
             close_t = torch.tensor(df['close'].astype(float).values, device=device, dtype=torch.float64)
             high_t = torch.tensor(df['high'].astype(float).values, device=device, dtype=torch.float64)
             low_t = torch.tensor(df['low'].astype(float).values, device=device, dtype=torch.float64)
-            df['ema_f'] = torch_ema(close_t, mode_config.get('ema_fast', 8)).to('cpu').numpy()
-            df['ema_s'] = torch_ema(close_t, mode_config.get('ema_slow', 18)).to('cpu').numpy()
-            m_val, m_sig, m_hist = torch_macd(close_t, fast=mode_config.get('macd_fast', 12), slow=mode_config.get('macd_slow', 26), signal=mode_config.get('macd_signal', 9))
+            df['ema_f'] = torch_ema(close_t, mode_config.get('ema_fast')).to('cpu').numpy()
+            df['ema_s'] = torch_ema(close_t, mode_config.get('ema_slow')).to('cpu').numpy()
+            m_val, m_sig, m_hist = torch_macd(close_t, fast=mode_config.get('macd_fast'), slow=mode_config.get('macd_slow'), signal=mode_config.get('macd_signal'))
             df['macd_val'] = m_val.to('cpu').numpy()
             df['macd_sig'] = m_sig.to('cpu').numpy()
             df['macd_hist'] = m_hist.to('cpu').numpy()
-            df['rsi'] = torch_rsi(close_t, mode_config.get('rsi_period', 14)).to('cpu').numpy()
+            df['rsi'] = torch_rsi(close_t, mode_config.get('rsi_period')).to('cpu').numpy()
             df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
             df['tema_20'] = torch_tema(close_t, 20).to('cpu').numpy()
             df.attrs['ema_fast'] = requested_ema_fast
         else:
-            ema_f = ta.ema(df['close'], length=mode_config.get('ema_fast', 8))
+            ema_f = ta.ema(df['close'], length=mode_config.get('ema_fast'))
             df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
-            ema_s = ta.ema(df['close'], length=mode_config.get('ema_slow', 18))
+            ema_s = ta.ema(df['close'], length=mode_config.get('ema_slow'))
             df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
-            macd = ta.macd(df['close'], fast=mode_config.get('macd_fast', 12), slow=mode_config.get('macd_slow', 26), signal=mode_config.get('macd_signal', 9))
+            macd = ta.macd(df['close'], fast=mode_config.get('macd_fast'), slow=mode_config.get('macd_slow'), signal=mode_config.get('macd_signal'))
             if macd is not None:
                 df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
             else:
                 df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
-            rsi = ta.rsi(df['close'], length=mode_config.get('rsi_period', 14))
+            rsi = ta.rsi(df['close'], length=mode_config.get('rsi_period'))
             df['rsi'] = rsi.fillna(50) if rsi is not None else 50
             adx_df = ta.adx(df['high'], df['low'], df['close'])
             df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
@@ -751,7 +751,7 @@ def handle_mc_strategies(df, strategy, config, is_scan):
             df.at[df.index[i], 'score'] = 1 if df.at[df.index[i], 'buy_candidate'] else (-1 if df.at[df.index[i], 'sell_candidate'] else 0)
             df.at[df.index[i], 'tendency'] = "Bullish" if call_p > put_p else "Bearish"
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 # --- 1. TREND FOLLOWING ---
 
@@ -790,7 +790,7 @@ def strategy_ichimoku(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['span_a'], "Bullish", np.where(df['close'] < df['span_b'], "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_psar(df, config):
     """
@@ -826,7 +826,7 @@ def strategy_psar(df, config):
     df['score'] = np.where(df['psar_long'].notna(), 1, np.where(df['psar_short'].notna(), -1, 0))
     df['tendency'] = np.where(df['psar_long'].notna(), "Bullish", np.where(df['psar_short'].notna(), "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 # --- 2. RANGE ---
 
@@ -866,7 +866,7 @@ def strategy_bollinger(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['bb_mid'], "Bullish", np.where(df['close'] < df['bb_mid'], "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 # --- 3. BREAKOUT ---
 
@@ -903,7 +903,7 @@ def strategy_donchian(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > (df['dc_upper'] + df['dc_lower'])/2, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_stoch_rsi(df, config):
     """
@@ -936,7 +936,7 @@ def strategy_stoch_rsi(df, config):
     df['score'] = np.where(df['stoch_k'] < 20, 1, np.where(df['stoch_k'] > 80, -1, 0))
     df['tendency'] = np.where(df['stoch_k'] > 50, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_williams_r(df, config):
     """
@@ -965,7 +965,7 @@ def strategy_williams_r(df, config):
     df['score'] = np.where(df['willr'] < -80, 1, np.where(df['willr'] > -20, -1, 0))
     df['tendency'] = np.where(df['willr'] > -50, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_vwap_momentum(df, config):
     """
@@ -994,7 +994,7 @@ def strategy_vwap_momentum(df, config):
     df['score'] = np.where(df['close'] > df['vwap'], 1, -1)
     df['tendency'] = np.where(df['close'] > df['vwap'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 # --- 5. SCALPING (Proxies) ---
 
@@ -1025,7 +1025,7 @@ def strategy_renko_proxy(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['open'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_ema_rsi_volume(df, config):
     """
@@ -1056,7 +1056,7 @@ def strategy_ema_rsi_volume(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['ema_9'] > df['ema_21'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_whale_detection(df, config):
     """
@@ -1095,7 +1095,7 @@ def strategy_whale_detection(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['close'] > df['close'].shift(1), "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_pump_dump(df, config):
     """
@@ -1181,7 +1181,7 @@ def strategy_scientific_ensemble(df, config):
     # Keep the ensemble score but clip it for UI if needed or use it as is
     df['tendency'] = np.where(df['score'] > 0, "Bullish", np.where(df['score'] < 0, "Bearish", "Neutral"))
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_sentiment_momentum(df, config):
     """
@@ -1219,7 +1219,7 @@ def strategy_sentiment_momentum(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['roc'] > 0, "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_liquidation_cascade(df, config):
     """
@@ -1298,7 +1298,7 @@ def strategy_adx_trend(df, config):
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['dmp'] > df['dmn'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 2))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_pairs_trading(df, config):
     """
@@ -1367,7 +1367,7 @@ def strategy_halving_cycle(df, config):
     df['score'] = np.where(df['close'] > df['ema_50'], 1, -1)
     df['tendency'] = np.where(df['close'] > df['ema_200'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_listing_surge(df, config):
     """
@@ -1426,7 +1426,7 @@ def strategy_tema_crossover(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    length = config.get('tema_length', 20)
+    length = config.get('tema_length')
     device = config.get('device', torch.device('cpu'))
 
     # Check if tema_20 (default) was already calculated, otherwise calculate custom length
@@ -1447,7 +1447,7 @@ def strategy_tema_crossover(df, config):
     df['score'] = np.where(df['close'] > df[col_name], 1, -1)
     df['tendency'] = np.where(df['close'] > df[col_name], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_sinewave(df, config):
     """
@@ -1479,7 +1479,7 @@ def strategy_sinewave(df, config):
     df['score'] = np.where(df['sine'] > df['leadsine'], 1, -1)
     df['tendency'] = np.where(df['sine'] > df['leadsine'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))
 
 def strategy_candle_patterns(df, config):
     """
@@ -1576,4 +1576,4 @@ def strategy_heikin_ashi(df, config):
     df['score'] = np.where(df['ha_close'] > df['ha_open'], 1, -1)
     df['tendency'] = np.where(df['ha_close'] > df['ha_open'], "Bullish", "Bearish")
 
-    return apply_confirmation(df, config.get('confirmation_window', 3))
+    return apply_confirmation(df, config.get('confirmation_window'))

@@ -42,7 +42,7 @@ The bot offers over 30 distinct strategies, including:
 ## ⚙️ Configuration
 
 ### 🛠 `config.json`
-Main parameters of the bot.
+Main parameters of the bot. To personalize only certain parameters, you must copy the `config.default.json` file to `config.json` and then modify your settings in the latter.
 
 *   **`max_lots_per_symbol`**: (int) Maximum number of buy lots allowed per symbol (default: `1`).
 *   **`max_open_positions`**: (int) Maximum number of distinct trading pairs open simultaneously (default: `10`).
