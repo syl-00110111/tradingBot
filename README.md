@@ -7,7 +7,6 @@ A universal cryptocurrency trading bot implemented in Python, leveraging multi-c
 ## 🔬 Scientific Foundations
 This bot implements strategies and logic recommended by leading empirical studies on cryptocurrency markets:
 
-- **Multi-Technique Scoring**: Aggregates signals from multiple strategies and aggressiveness profiles. The signal score is weighted by the number of techniques and the optimal timeframe score for the symbol.
 - **Market Regime Detection**: Uses a dynamic switch between **Mean Reversion** and **Trend Following** based on volatility and ADX (Average Directional Index).
 - **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for each signal, penalizing high-risk configurations.
 
@@ -61,26 +60,16 @@ Main parameters of the bot.
 *   **`global_risk_multiplier`**: (float) Multiplier for position sizing and technical confirmations (default: `1.1`).
 *   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `2.0`).
 *   **`max_analysis_workers`**: (int) Number of parallel workers for technical analysis (default: `4`).
-*   **`no_signal_threshold`**: (int) Number of candles without signals before triggering background optimization (default: `48`).
-*   **`timeframe_thresholds`**: (Object) Configuration for the dynamic timeframe selection engine. The bot evaluates four market metrics to choose the most appropriate timeframe (from `1s` to `15m`):
-    *   **`volume_48h`**: (low/high) 48-hour quote volume. High volume favors faster timeframes.
-    *   **`spread_pct`**: (low/high) Bid/Ask spread percentage. Tight spreads favor faster timeframes.
-    *   **`volatility_pct`**: (low/high) Percentage difference between high and low over the last 60 hours. Low volatility (stability) favors faster timeframes.
-    *   **`trades_per_minute`**: (low/high) Frequency of trades. High activity favors faster timeframes.
-    *   *Scoring Logic*: The bot assigns points based on these thresholds. A score of ≥ 3 triggers `1s`, while lower scores progressively select `1m`, `3m`, `5m`, or `15m`.
+*   **`no_signal_threshold`**: (int) Number of candles without signals.
 
 #### Advanced Overrides (Optional)
-*   **`force_strategy_to_all_pairs`**: (string) Force the bot to use a specific strategy for every pair.
-*   **`force_agressivity_to_all_pairs`**: (string) Force a specific aggressiveness level (e.g., `dynamic`, `normal`, `aggressive`).
-*   **`pairs`**: (Object) Allows per-pair configuration with multiple techniques.
+*   **`pairs`**: (Object) Allows per-pair configuration.
     Example:
     ```json
     "pairs": {
         "BTC/USDC": {
-            "techniques": [
-                {"strategy": "ichimoku_cloud", "aggr": ["normal", "aggressive"]},
-                {"strategy": "bollinger_bands", "aggr": ["normal"]}
-            ]
+            "strategy": "ichimoku_cloud",
+            "aggr": "aggressive"
         }
     }
     ```

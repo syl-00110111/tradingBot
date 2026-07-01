@@ -11,23 +11,5 @@
         "multiplier": 1.2
     },
     "no_signal_threshold": 240,
-    "timeframe_thresholds": {
-        "volume_48h": {
-            "low": 1000,
-            "high": 120000
-        },
-        "spread_pct": {
-            "low": 0.001,
-            "high": 0.04
-        },
-        "volatility_pct": {
-            "low": 0.01,
-            "high": 0.1
-        },
-        "trades_per_minute": {
-            "low": 1,
-            "high": 40
-        }
-    },
     "max_analysis_workers": 32
 }
