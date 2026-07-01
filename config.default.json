@@ -20,5 +20,9 @@
     "macd_signal": 5,
     "rsi_period": 7,
     "rsi_buy": 30,
-    "rsi_sell": 70
+    "rsi_sell": 70,
+    "quote_asset": "USDT",
+    "number_of_pairs": 20,
+    "include_inventory_pairs": true,
+    "include_all_quote_pairs": false
 }

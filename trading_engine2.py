@@ -79,6 +79,7 @@ class TradingEngine:
             else:
                 settings["effective_aggr"] = "normal"
 
+
         return settings
 
     def get_min_exit_price(self, entry_price, fee_rate=0.001, min_profit=0):
