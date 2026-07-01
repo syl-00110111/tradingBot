@@ -89,6 +89,24 @@ def handle_stop_signal(sig=None, frame=None):
         os._exit(1)
     shutdown_event.set()
 
+def global_exception_handler(loop, context):
+    msg = context.get("message")
+    exception = context.get("exception")
+
+    # Suppress known harmless aiohttp/WebSocket connection reset errors that occur in background tasks
+    suppress = False
+    if msg and "Cannot write to closing transport" in msg:
+        suppress = True
+    elif exception and "ClientConnectionResetError" in str(type(exception)):
+        suppress = True
+
+    if suppress:
+        logging.debug(f"Suppressed background task exception: {msg}")
+        return
+
+    # Call the default handler for everything else
+    loop.default_exception_handler(context)
+
 # Sound Queue and Worker for non-blocking audio
 sound_queue = queue.Queue()
 
@@ -612,13 +630,15 @@ def worker_process_init():
 async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor):
     try:
         await analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor)
+    except Exception as e:
+        logging.error(f"Error in analysis for {symbol}: {e}", exc_info=True)
+    finally:
         async with bot_lock:
             if symbol in bot_state:
                 bot_state[symbol]['last_analysis_ts'] = time.time()
-    finally:
-        async with analysis_lock:
-            if symbol in analysis_in_progress:
-                analysis_in_progress.remove(symbol)
+    async with analysis_lock:
+        if symbol in analysis_in_progress:
+            analysis_in_progress.remove(symbol)
 
 async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor=None):
     try:
@@ -1399,6 +1419,9 @@ async def heartbeat_task():
         await asyncio.sleep(30)
 
 async def main():
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(global_exception_handler)
+
     parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot v2 (Asynchronous)')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--fast-start', action='store_true', help='Skip fetching initial candles')
@@ -1607,25 +1630,26 @@ async def main():
         shutdown_event.set()
         logging.info("Shutting down... cancelling tasks.")
 
-        # Cancel all background tasks
+        # Consolidate all tasks for cleanup
         all_tasks = background_tasks.copy()
-
-        # Cancel UI task first to restore terminal sooner
         if ui_task:
-            ui_task.cancel()
-
+            all_tasks.append(ui_task)
         if global_watcher_task:
             all_tasks.append(global_watcher_task)
 
+        # Cancel all pending tasks
         for t in all_tasks:
             if not t.done():
                 t.cancel()
 
-        # Wait for tasks to finish (with timeout)
+        # Wait for all tasks to acknowledge cancellation with a timeout
         if all_tasks:
             try:
-                await asyncio.wait(all_tasks, timeout=3)
-            except: pass
+                await asyncio.wait_for(asyncio.gather(*all_tasks, return_exceptions=True), timeout=5)
+            except asyncio.TimeoutError:
+                logging.warning("Shutdown cleanup timed out.")
+            except Exception as e:
+                logging.error(f"Error during shutdown cleanup: {e}")
 
         if executor: executor.shutdown(wait=False)
         global bench_executor
