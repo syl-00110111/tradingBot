@@ -789,6 +789,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
                     if symbol in bot_state:
                         bot_state[symbol].update({
                             'last_signal': 'Waiting',
+                            'score': 0,
                             'consecutive_buys': 0,
                             'consecutive_sells': 0,
                             'strategy': random.choice(STRATEGIES)
@@ -804,8 +805,9 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 
     # Check for pending orders to avoid duplicates
     async with pending_orders_lock:
-        for po in pending_orders.values():
+        for oid, po in pending_orders.items():
             if po['symbol'] == symbol and po['side'] == 'buy':
+                logging.debug(f"[{symbol}] Skipping BUY: order {oid} is already pending.")
                 return
 
     async with bot_lock:
@@ -870,8 +872,9 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 async def execute_sell(exchange, symbol, data, data_manager, engine, config, force=False):
     # Check for pending orders to avoid duplicates
     async with pending_orders_lock:
-        for po in pending_orders.values():
+        for oid, po in pending_orders.items():
             if po['symbol'] == symbol and po['side'] == 'sell':
+                logging.debug(f"[{symbol}] Skipping SELL: order {oid} is already pending.")
                 return
 
     async with bot_lock:
@@ -1011,6 +1014,24 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     timestamp = meta['timestamp'] if meta else time.time()
 
     if side == 'buy':
+        # Verify amount on exchange to account for fees deducted from the acquired asset
+        verified_order = await exchange.fetch_order(order_id, symbol)
+        if verified_order and verified_order.get('status') == 'closed':
+            filled_amount = verified_order.get('filled', filled_amount)
+            actual_price = verified_order.get('price') or verified_order.get('average', actual_price)
+            cost = verified_order.get('cost') or (filled_amount * actual_price)
+            fee_data = verified_order.get('fee')
+            if fee_data:
+                fee_cost = fee_data.get('cost', 0.0)
+                fee_currency = fee_data.get('currency')
+
+                # If fee was deducted from the acquired asset (base currency), update filled_amount
+                base_asset = symbol.split('/')[0]
+                if fee_currency == base_asset:
+                    filled_amount -= fee_cost
+
+                total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+
         total_val = cost + total_fee
         data_manager.add_position(symbol, actual_price, filled_amount, total_fee, trigger_data, timestamp, total_base=total_val)
 
@@ -1331,12 +1352,14 @@ def make_dashboard(config):
                 str(display_strat)
             ]
         else:
+            tendency = data.get('tendency', 'Neutral')
+            t_style = "green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "white"
             row_vals = [
                 symbol,
                 format_price(data.get('price')),
                 amt_str, entry_str, fee_str,
                 f"{data.get('expected_profit', 0):.4f}",
-                data.get('tendency', 'Neutral'),
+                f"[{t_style}]{tendency}[/]",
                 f"[{sig_style}]{current_signal}[/]",
                 data.get('aggr', 'N/A'),
                 f"[bold cyan]{display_strat}[/]"
@@ -1426,6 +1449,14 @@ async def run_dashboard(config):
 
 async def heartbeat_task():
     while not shutdown_event.is_set():
+        # Cleanup stuck pending orders (older than 5 minutes)
+        async with pending_orders_lock:
+            now = time.time()
+            to_delete = [oid for oid, meta in pending_orders.items() if now - meta.get('timestamp', 0) > 300]
+            for oid in to_delete:
+                meta = pending_orders.pop(oid)
+                logging.warning(f"[{meta.get('symbol')}] Removing stuck pending {meta.get('side')} order {oid} after timeout.")
+
         await asyncio.sleep(30)
 
 async def main():
