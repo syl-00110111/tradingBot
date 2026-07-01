@@ -2,6 +2,10 @@
     "max_open_positions": 10,
     "max_lots_per_symbol": 1,
     "max_trade_percentage": 2.0,
+    "quote_asset": "USDC",
+    "number_of_pairs": 40,
+    "include_inventory_pairs": true,
+    "include_all_quote_pairs": false,
     "min_profit_margin": 0.01,
     "dynamic_pair_multiplier": 1.4,
     "global_risk_multiplier": 1.1,
@@ -11,7 +15,6 @@
         "multiplier": 1.2
     },
     "no_signal_threshold": 240,
-
     "tema_length": 9,
     "ema_fast": 5,
     "ema_slow": 20,
@@ -21,8 +24,4 @@
     "rsi_period": 7,
     "rsi_buy": 30,
     "rsi_sell": 70,
-    "quote_asset": "USDT",
-    "number_of_pairs": 20,
-    "include_inventory_pairs": true,
-    "include_all_quote_pairs": false
 }
