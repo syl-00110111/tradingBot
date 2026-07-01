@@ -648,7 +648,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
 
         # Populate common indicators
         common_settings = {
-            'device': torch.device('cpu') if executor else device,
+            'device': device,
             'ema_fast': config.get('ema_fast'),
             'ema_slow': config.get('ema_slow'),
             'macd_fast': config.get('macd_fast'),
@@ -686,16 +686,15 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         async def evaluate_technique(t):
             strat = t.get('strategy')
             aggr = t.get('aggr')
-            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 25), latest_base.get('volatility', 0.0), aggr=aggr)
+            mode_settings = engine.get_dynamic_settings(latest_base.get('adx'), latest_base.get('volatility'), aggr=aggr)
             mode_settings['strategy'] = strat
-            mode_settings['device'] = torch.device('cpu')
 
             res_df = await loop.run_in_executor(executor, get_signals, df, mode_settings)
             if not res_df.empty:
                 latest = res_df.iloc[-1]
-                # Simple backtest profit metric (last 100 candles)
+                # Simple backtest profit metric (last 400 candles)
                 profit = 0
-                test_df = res_df.tail(100)
+                test_df = res_df.tail(400)
                 pos = None
                 for _, row in test_df.iterrows():
                     if row['buy_signal'] and pos is None:
