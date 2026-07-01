@@ -16,6 +16,7 @@ class ExchangeInterface2:
     async def watch_balance(self): raise NotImplementedError
     async def watch_orders(self, symbol=None): raise NotImplementedError
     async def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
+    async def fetch_order(self, order_id, symbol=None): raise NotImplementedError
     async def fetch_ticker(self, symbol): raise NotImplementedError
     async def fetch_balance(self): raise NotImplementedError
     async def load_markets(self): raise NotImplementedError
@@ -169,6 +170,13 @@ class CCXTExchange2(ExchangeInterface2):
             logging.error(f"Error creating order for {symbol}: {e}")
             raise e
 
+    async def fetch_order(self, order_id, symbol=None):
+        try:
+            return await self.exchange.fetch_order(order_id, symbol)
+        except Exception as e:
+            logging.error(f"Error fetching order {order_id}: {e}")
+            return None
+
     async def fetch_ticker(self, symbol):
         try:
             return await self.exchange.fetch_ticker(symbol)
@@ -318,6 +326,9 @@ class MockExchange2(ExchangeInterface2):
         while True:
             await asyncio.sleep(60)
             yield []
+
+    async def fetch_order(self, order_id, symbol=None):
+        return None
 
     async def create_order(self, symbol, side, amount, price=None):
         await self._init_balance()
