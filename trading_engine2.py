@@ -58,30 +58,34 @@ class TradingEngine:
             "effective_aggr": aggr
         }
 
+        trading_cfg = self.config.get('trading', {})
         if aggr == 'aggressive':
-            settings.update({
+            settings.update(trading_cfg.get('aggressive_settings', {
                 "ema_fast": 10, "ema_slow": 30,
                 "rsi_buy": 40, "rsi_sell": 60
-            })
+            }))
         elif aggr == 'dynamic':
-            if adx > 25:
-                settings.update({
+            regime_cfg = trading_cfg.get('dynamic_regime', {})
+            if adx > regime_cfg.get('adx_threshold', 25):
+                settings.update(regime_cfg.get('trending', {
                     "ema_fast": 10, "ema_slow": 30,
-                    "rsi_buy": 40, "rsi_sell": 60,
-                    "effective_aggr": "aggressive"
-                })
-            elif volatility > 0.015:
-                settings.update({
+                    "rsi_buy": 40, "rsi_sell": 60
+                }))
+                settings['effective_aggr'] = "aggressive"
+            elif volatility > regime_cfg.get('volatility_threshold', 0.015):
+                settings.update(regime_cfg.get('volatile', {
                     "ema_fast": 30, "ema_slow": 100,
-                    "rsi_buy": 20, "rsi_sell": 80,
-                    "effective_aggr": "conservative"
-                })
+                    "rsi_buy": 20, "rsi_sell": 80
+                }))
+                settings['effective_aggr'] = "conservative"
             else:
                 settings["effective_aggr"] = "normal"
 
         return settings
 
-    def get_min_exit_price(self, entry_price, fee_rate=0.001, min_profit=0):
+    def get_min_exit_price(self, entry_price, fee_rate=None, min_profit=0):
+        if fee_rate is None:
+            fee_rate = self.config.get('exchange', {}).get('default_fee', 0.001)
         """
         Calcule le prix de sortie minimum requis pour atteindre un profit cible, frais inclus.
 
@@ -107,7 +111,9 @@ class TradingEngine:
         # Price_exit = Price_entry * (1 + f) * (1 + profit) / (1 - f)
         return entry_price * (1 + fee_rate) * (1 + min_profit) / (1 - fee_rate)
 
-    def is_profitable(self, current_price, entry_price, fee_rate=0.001, entry_total_base=0, amount=0):
+    def is_profitable(self, current_price, entry_price, fee_rate=None, entry_total_base=0, amount=0):
+        if fee_rate is None:
+            fee_rate = self.config.get('exchange', {}).get('default_fee', 0.001)
         """
         Vérifie si la clôture d'une position au prix actuel dépasse la marge de profit cible.
 
@@ -135,7 +141,7 @@ class TradingEngine:
             return (current_price * amount * (1 - fee_rate)) >= (entry_total_base * (1 + self.min_profit_margin))
         return current_price >= self.get_min_exit_price(entry_price, fee_rate, self.min_profit_margin)
 
-    def check_profitability(self, current_price, entry_price, symbol, fee_rate=0.001):
+    def check_profitability(self, current_price, entry_price, symbol, fee_rate=None):
         """
         Alias pour is_profitable.
         """
@@ -167,8 +173,9 @@ class TradingEngine:
         max_allowed_base = (base_balance * ceiling_pct) / max_lots
 
         # 2. Calculer le montant de base initial en partant d'en bas
-        # Nous commençons avec une base de 75% du plafond autorisé par lot
-        base_target_pct = (ceiling_pct * 0.75) / max_lots
+        # Nous commençons avec une base configurable (défaut 75%) du plafond autorisé par lot
+        base_target_multiplier = self.config.get('trading', {}).get('base_target_pct', 0.75)
+        base_target_pct = (ceiling_pct * base_target_multiplier) / max_lots
         trade_amount_base = base_balance * base_target_pct
 
         # 3. Appliquer le multiplicateur de risque

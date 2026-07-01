@@ -20,13 +20,17 @@ class MonteCarloEngine:
     Paramètres
     ----------
     num_simulations : int, optional
-        Nombre de trajectoires à simuler (par défaut 5000).
+        Nombre de trajectoires à simuler (par défaut 1000).
     timeframe_candles : int, optional
         Nombre d'étapes (bougies) à simuler dans le futur (par défaut 100).
+    config : dict, optional
+        La configuration du bot.
     """
-    def __init__(self, num_simulations=1000, timeframe_candles=100):
-        self.num_simulations = num_simulations
-        self.timeframe_candles = timeframe_candles
+    def __init__(self, num_simulations=1000, timeframe_candles=100, config=None):
+        self.config = config or {}
+        mc_cfg = self.config.get('monte_carlo', {})
+        self.num_simulations = mc_cfg.get('num_simulations', num_simulations)
+        self.timeframe_candles = mc_cfg.get('timeframe_candles', timeframe_candles)
         # Le device sera mis à jour par le bot au moment de l'exécution, par défaut sur CPU
         self.device = torch.device("cpu")
 
@@ -117,7 +121,7 @@ class MonteCarloEngine:
         Valide le potentiel d'une stratégie en simulant les trajectoires futures.
 
         Calcule la volatilité historique et la dérive à partir des données fournies,
-        puis détermine la probabilité que le prix dépasse un seuil de profit de 0,15%.
+        puis détermine la probabilité que le prix dépasse un seuil de profit.
 
         Paramètres
         ----------
@@ -127,9 +131,11 @@ class MonteCarloEngine:
         Retourne
         -------
         float
-            Un score de facteur d'échelle entre 0,5 et 1,5 basé sur la probabilité de profit.
+            Un score de facteur d'échelle basé sur la probabilité de profit.
         """
-        if len(df) < 4000: return 1.0
+        mc_cfg = self.config.get('monte_carlo', {})
+        min_candles = mc_cfg.get('validation_min_candles', 4000)
+        if len(df) < min_candles: return 1.0
 
         close = df["close"].values
         valid_indices = ~np.isnan(close)
@@ -150,12 +156,14 @@ class MonteCarloEngine:
 
         paths = self.simulate_paths(current_price, volatility, drift)
 
-        # Validation : vérifie combien de trajectoires se terminent avec un profit > frais attendus (0,15%)
+        # Validation : vérifie combien de trajectoires se terminent avec un profit > seuil configurable (défaut 0,15%)
+        profit_threshold = mc_cfg.get('profit_threshold', 0.0015)
         final_prices = paths[:, -1]
-        profit_prob = torch.mean((final_prices > current_price * 1.0015).double()).item()
+        profit_prob = torch.mean((final_prices > current_price * (1 + profit_threshold)).double()).item()
 
-        # Transformation de la probabilité en un facteur d'échelle [0,5, 1,5]
-        score = 0.5 + profit_prob
+        # Transformation de la probabilité en un facteur d'échelle
+        score_base = mc_cfg.get('score_base', 0.5)
+        score = score_base + profit_prob
         return score
 
     def price_option(self, current_price, strike_price, volatility, drift=0, option_type="call"):

@@ -29,20 +29,21 @@ class ExchangeInterface2:
     async def close(self): raise NotImplementedError
 
 class CCXTExchange2(ExchangeInterface2):
-    def __init__(self, exchange_id, api_key, api_secret, options=None):
+    def __init__(self, exchange_id, api_key, api_secret, config, options=None):
         super().__init__()
-        config = {
+        self.config = config
+        exchange_config = {
             'apiKey': api_key,
             'secret': api_secret,
             'enableRateLimit': True,
             'options': options or {}
         }
         if 'binance' in exchange_id:
-            if 'options' not in config: config['options'] = {}
-            config['options']['recvWindow'] = 60000
-            config['options']['adjustForTimeDifference'] = True
+            if 'options' not in exchange_config: exchange_config['options'] = {}
+            exchange_config['options']['recvWindow'] = 60000
+            exchange_config['options']['adjustForTimeDifference'] = True
 
-        self.exchange = getattr(ccxtpro, exchange_id)(config)
+        self.exchange = getattr(ccxtpro, exchange_id)(exchange_config)
         self.exchange_id = exchange_id
 
     async def load_markets(self):
@@ -53,13 +54,15 @@ class CCXTExchange2(ExchangeInterface2):
         try:
             return await asyncio.wait_for(
                 self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit),
-                timeout=30
+                timeout=self.config.get('timeouts', {}).get('ohlcv_fetch', 30)
             )
         except Exception as e:
             logging.error(f"Error fetching OHLCV for {symbol}: {e}")
             return []
 
-    async def fetch_ohlcv_10k(self, symbol, timeframe, limit=10000):
+    async def fetch_ohlcv_10k(self, symbol, timeframe, limit=None):
+        if limit is None:
+            limit = self.config.get('exchange', {}).get('fetch_ohlcv_limit', 10000)
         all_ohlcv = []
         try:
             tf_seconds = self.exchange.parse_timeframe(timeframe)
@@ -70,14 +73,14 @@ class CCXTExchange2(ExchangeInterface2):
         since = self.exchange.milliseconds() - duration_ms
 
         retries = 0
-        max_retries = 3
+        max_retries = self.config.get('exchange', {}).get('max_retries', 3)
 
         while len(all_ohlcv) < limit and retries < max_retries:
-            fetch_limit = min(1000, limit - len(all_ohlcv))
+            fetch_limit = min(self.config.get('exchange', {}).get('fetch_chunk_size', 1000), limit - len(all_ohlcv))
             try:
                 chunk = await asyncio.wait_for(
                     self.exchange.fetch_ohlcv(symbol, timeframe, since, limit=fetch_limit),
-                    timeout=20
+                    timeout=self.config.get('timeouts', {}).get('ohlcv_chunk', 20)
                 )
                 if not chunk:
                     if len(all_ohlcv) > 0: break
@@ -199,12 +202,13 @@ class CCXTExchange2(ExchangeInterface2):
             return None
 
     async def fetch_trading_fee(self, symbol):
+        default_fee = self.config.get('exchange', {}).get('default_fee', 0.001)
         try:
             fees = await self.exchange.fetch_trading_fee(symbol)
-            return fees.get('taker', 0.001)
+            return fees.get('taker', default_fee)
         except Exception as e:
-            logging.warning(f"Error fetching trading fee for {symbol}: {e}. Defaulting to 0.1%")
-            return 0.001
+            logging.warning(f"Error fetching trading fee for {symbol}: {e}. Defaulting to {default_fee*100}%")
+            return default_fee
 
     async def fetch_my_trades(self, symbol, limit=10):
         try:
@@ -258,11 +262,12 @@ class CCXTExchange2(ExchangeInterface2):
         await self.exchange.close()
 
 class MockExchange2(ExchangeInterface2):
-    def __init__(self, api_key=None, api_secret=None, exchange_id='binance', options=None):
+    def __init__(self, api_key=None, api_secret=None, exchange_id='binance', config=None, options=None):
         super().__init__()
+        self.config = config or {}
         self.balance = {'USDT': 10000.0, 'USDC': 10000.0, 'EUR': 10000.0}
         self.exchange_id = exchange_id
-        self.real_exchange = CCXTExchange2(exchange_id, api_key, api_secret, options) if api_key and api_key != "YOUR_API_KEY" else None
+        self.real_exchange = CCXTExchange2(exchange_id, api_key, api_secret, self.config, options) if api_key and api_key != "YOUR_API_KEY" else None
         self._balance_initialized = False
 
     async def _init_balance(self):
@@ -338,7 +343,8 @@ class MockExchange2(ExchangeInterface2):
 
         base, quote = symbol.split('/')
         cost = amount * price
-        fee = cost * 0.001
+        default_fee = self.config.get('exchange', {}).get('default_fee', 0.001)
+        fee = cost * default_fee
 
         if side == 'buy':
             if self.balance.get(quote, 0) >= (cost + fee):
@@ -367,7 +373,7 @@ class MockExchange2(ExchangeInterface2):
         return {'free': self.balance, 'total': self.balance}
 
     async def fetch_trading_fee(self, symbol):
-        return 0.001
+        return self.config.get('exchange', {}).get('default_fee', 0.001)
 
     async def fetch_my_trades(self, symbol, limit=10):
         if self.real_exchange:
