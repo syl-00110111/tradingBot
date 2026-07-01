@@ -551,7 +551,7 @@ async def sync_live_positions(exchange, data_manager, config):
                 m = exchange.markets[symbol]
                 min_amt = m['limits']['amount']['min']
                 min_cost = m['limits']['cost']['min'] or 10
-                if ticker and (amount < min_amt or (amount * ticker['last']) < min_cost):
+                if ticker and ticker.get('last') is not None and (amount < min_amt or (amount * ticker['last']) < min_cost):
                     is_dust = True
             elif amount <= 0.000001: is_dust = True
         except: pass
@@ -589,7 +589,7 @@ async def sync_live_positions(exchange, data_manager, config):
                 avg_price = total_cost / accumulated_amount
                 if accumulated_amount < amount * 0.99:
                     ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
-                    curr_p = ticker['last'] if ticker else 0
+                    curr_p = (ticker.get('last') or 0) if ticker else 0
                     if curr_p > 0:
                         rest_amount = amount - accumulated_amount
                         rest_cost = rest_amount * curr_p
@@ -605,7 +605,7 @@ async def sync_live_positions(exchange, data_manager, config):
 
         if avg_price <= 0:
             ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
-            avg_price = ticker['last'] if ticker else 0
+            avg_price = (ticker.get('last') or 0) if ticker else 0
 
         if avg_price > 0:
             data_manager.add_position(
@@ -871,7 +871,7 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     # Use ticker price if possible for more accurate profitability check
     try:
         ticker = await exchange.fetch_ticker(symbol)
-        price = ticker['last'] if ticker else data['close']
+        price = (ticker.get('last') or data['close']) if ticker else data['close']
     except:
         price = data['close']
 
@@ -1463,13 +1463,19 @@ async def main():
     exchange_id = api_creds.get('exchange_id')
     if not exchange_id:
         logging.error("No exchange found. Check your api.json file.")
+        return
     
     exchange = CCXTExchange2(exchange_id,
                              api_creds.get('api_key') or config.get('api_key'),
                              api_creds.get('api_secret') or config.get('api_secret'))
         
     logging.info(f"Connecting to {exchange_id}...")
-    await exchange.load_markets()
+    try:
+        await exchange.load_markets()
+    except Exception as e:
+        logging.error(f"Failed to load markets: {e}")
+        await exchange.close()
+        return
 
     data_manager = DataManager()
     pattern_manager = PatternManager()
@@ -1493,7 +1499,7 @@ async def main():
             if not symbol.endswith(f"/{quote_asset}"):
                 continue
 
-            volume = ticker.get('quoteVolume') or ticker.get('baseVolume', 0) * ticker.get('last', 0)
+            volume = ticker.get('quoteVolume') or (ticker.get('baseVolume') or 0) * (ticker.get('last') or 0)
             if volume > 0:
                 candidates.append({
                     'symbol': symbol,
@@ -1547,6 +1553,7 @@ async def main():
 
     if not pairs:
         logging.error("No pairs could be initialized.")
+        await exchange.close()
         return
 
     # Start UI task
