@@ -647,11 +647,20 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         loop = asyncio.get_event_loop()
 
         # Populate common indicators
+        common_settings = {
+            'device': torch.device('cpu') if executor else device,
+            'ema_fast': config.get('ema_fast'),
+            'ema_slow': config.get('ema_slow'),
+            'macd_fast': config.get('macd_fast'),
+            'macd_slow': config.get('macd_slow'),
+            'macd_signal': config.get('macd_signal'),
+            'rsi_period': config.get('rsi_period'),
+            'tema_length': config.get('tema_length', 20)
+        }
         if executor:
-            # We force CPU for subprocesses to avoid CUDA fork issues
-            df = await loop.run_in_executor(executor, get_signals, df, {'device': torch.device('cpu')})
+            df = await loop.run_in_executor(executor, get_signals, df, common_settings)
         else:
-            df = get_signals(df, {'device': device})
+            df = get_signals(df, common_settings)
 
         latest_base = df.iloc[-1]
 

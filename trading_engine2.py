@@ -46,7 +46,9 @@ class TradingEngine:
         """
         # Paramètres de base (Normal)
         settings = {
-            "ema_fast": 20, "ema_slow": 50,
+            "ema_fast": self.config.get('ema_fast'),
+            "ema_slow": self.config.get('ema_slow'),
+            "tema_length": self.config.get('tema_length'),
             "macd_fast": self.config.get('macd_fast'),
             "macd_slow": self.config.get('macd_slow'),
             "macd_signal": self.config.get('macd_signal'),
