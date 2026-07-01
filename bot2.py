@@ -655,7 +655,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             'macd_slow': config.get('macd_slow'),
             'macd_signal': config.get('macd_signal'),
             'rsi_period': config.get('rsi_period'),
-            'tema_length': config.get('tema_length', 20)
+            'tema_length': config.get('tema_length')
         }
         if executor:
             df = await loop.run_in_executor(executor, get_signals, df, common_settings)
