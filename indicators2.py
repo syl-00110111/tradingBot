@@ -380,7 +380,7 @@ def get_signals(df, mode_config, is_scan=False):
         The input dataframe updated with signals and indicators.
     """
     strategy = mode_config.get('strategy')
-    device = mode_config.get('device', torch.device('cpu'))
+    device = mode_config.get('device')
     _mc_engine.set_device(device)
 
     # Common indicators for tendency and background analysis (Expert Mode)
