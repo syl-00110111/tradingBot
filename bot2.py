@@ -38,6 +38,9 @@ from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
 
+# Global Monte Carlo Engine
+mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
+
 # Global analysis tracking to avoid overlapping
 analysis_in_progress = set()
 analysis_lock = asyncio.Lock()
@@ -628,6 +631,16 @@ def worker_process_init():
         pass
 
 async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor):
+    # 10-minute cooldown per pair
+    async with bot_lock:
+        last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
+
+    if time.time() - last_analysis < 600:
+        async with analysis_lock:
+            if symbol in analysis_in_progress:
+                analysis_in_progress.remove(symbol)
+        return
+
     try:
         await analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor)
     except Exception as e:
@@ -636,9 +649,9 @@ async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, patt
         async with bot_lock:
             if symbol in bot_state:
                 bot_state[symbol]['last_analysis_ts'] = time.time()
-    async with analysis_lock:
-        if symbol in analysis_in_progress:
-            analysis_in_progress.remove(symbol)
+        async with analysis_lock:
+            if symbol in analysis_in_progress:
+                analysis_in_progress.remove(symbol)
 
 async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor=None):
     try:
@@ -687,81 +700,48 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
 
         latest_base = df.iloc[-1]
 
-        # Single Strategy Evaluation + Random Scan
+        # Single Strategy Evaluation
         pair_config = config['pairs'].get(symbol, {})
-        current_strat = pair_config.get('strategy') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('strategy') or bot_state.get(symbol, {}).get('strategy')
-        current_aggr = pair_config.get('aggr') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('aggr') or bot_state.get(symbol, {}).get('aggr')
+        strat = pair_config.get('strategy') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('strategy') or bot_state.get(symbol, {}).get('strategy')
+        aggr = pair_config.get('aggr') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('aggr') or bot_state.get(symbol, {}).get('aggr')
 
-        if not current_strat:
-            current_strat = random.choice(STRATEGIES)
-        if not current_aggr:
-            current_aggr = random.choice(['normal', 'aggressive', 'dynamic'])
+        if not strat:
+            strat = random.choice(STRATEGIES)
+        if not aggr:
+            aggr = random.choice(['normal', 'aggressive', 'dynamic'])
 
-        # Randomly select a new technique to explore
-        random_strat = random.choice(STRATEGIES)
-        random_aggr = random.choice(['normal', 'aggressive', 'dynamic'])
+        mode_settings = engine.get_dynamic_settings(latest_base.get('adx'), latest_base.get('volatility'), aggr=aggr)
+        mode_settings['strategy'] = strat
 
-        techniques = [
-            {'strategy': current_strat, 'aggr': current_aggr},
-            {'strategy': random_strat, 'aggr': random_aggr}
-        ]
+        if executor:
+            df = await loop.run_in_executor(executor, get_signals, df, mode_settings)
+        else:
+            df = get_signals(df, mode_settings)
 
-        async def evaluate_technique(t):
-            strat = t.get('strategy')
-            aggr = t.get('aggr')
-            mode_settings = engine.get_dynamic_settings(latest_base.get('adx'), latest_base.get('volatility'), aggr=aggr)
-            mode_settings['strategy'] = strat
+        if df.empty: return
 
-            res_df = await loop.run_in_executor(executor, get_signals, df, mode_settings)
-            if not res_df.empty:
-                latest = res_df.iloc[-1]
-                # Simple backtest profit metric (last 400 candles)
-                profit = 0
-                test_df = res_df.tail(400)
-                pos = None
-                for _, row in test_df.iterrows():
-                    if row['buy_signal'] and pos is None:
-                        pos = row['close']
-                    elif row['sell_signal'] and pos is not None:
-                        profit += (row['close'] - pos)
-                        pos = None
-                return {
-                    'latest': latest,
-                    'profit': profit,
-                    'strategy': strat,
-                    'aggr': mode_settings.get('effective_aggr', aggr)
-                }
-            return None
-
-        eval_results = await asyncio.gather(*[evaluate_technique(t) for t in techniques])
-        valid_results = [r for r in eval_results if r is not None]
-
-        if not valid_results: return
-
-        # Result for current strategy (index 0)
-        current_res = valid_results[0]
-        best_res = current_res
-
-        # If random technique (index 1) performed better, switch to it
-        if len(valid_results) > 1:
-            random_res = valid_results[1]
-            if random_res['profit'] > current_res['profit']:
-                best_res = random_res
-                # Update config with the better technique
-                config['pairs'][symbol]['strategy'] = best_res['strategy']
-                config['pairs'][symbol]['aggr'] = best_res['aggr']
-
-        latest = best_res['latest']
+        latest = df.iloc[-1]
         buy_candidate = latest.get('buy_signal', False)
         sell_candidate = latest.get('sell_signal', False)
         total_score = 1 if buy_candidate else (-1 if sell_candidate else 0)
 
+        # Simple backtest profit metric (last 400 candles) for display
+        profit = 0
+        test_df = df.tail(400)
+        pos = None
+        for _, row in test_df.iterrows():
+            if row['buy_signal'] and pos is None:
+                pos = row['close']
+            elif row['sell_signal'] and pos is not None:
+                profit += (row['close'] - pos)
+                pos = None
+
         async with bot_lock:
             if symbol not in bot_state: bot_state[symbol] = {}
             bot_state[symbol].update({
-                'strategy': best_res['strategy'],
-                'aggr': best_res['aggr'],
-                'expected_profit': best_res['profit']
+                'strategy': strat,
+                'aggr': mode_settings.get('effective_aggr', aggr),
+                'expected_profit': profit
             })
 
         # Update State
@@ -782,7 +762,13 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             })
 
         if buy_candidate and not is_suspended:
-            await execute_buy(exchange, symbol, latest, data_manager, engine, config)
+            # Monte Carlo validation for buy signals
+            mc_score = await loop.run_in_executor(None, mc_engine.validate_strategy, df)
+            if mc_score >= 1.0:
+                logging.info(f"[{symbol}] Buy signal validated by Monte Carlo (Score: {mc_score:.2f}). Proceeding.")
+                await execute_buy(exchange, symbol, latest, data_manager, engine, config)
+            else:
+                logging.info(f"[{symbol}] Buy signal REJECTED by Monte Carlo (Score: {mc_score:.2f}).")
         elif sell_candidate:
             await execute_sell(exchange, symbol, latest, data_manager, engine, config)
 
@@ -1454,6 +1440,7 @@ async def main():
                 device = torch.device('cpu')
 
     config = load_config()
+    mc_engine.set_device(device)
 
     api_creds = {}
     if os.path.exists('api.json'):
