@@ -79,8 +79,6 @@ class TradingEngine:
             else:
                 settings["effective_aggr"] = "normal"
 
-        # La haute volatilité ajoute un signal de confirmation supplémentaire globalement
-        if volatility > 0.1:
 
         return settings
 

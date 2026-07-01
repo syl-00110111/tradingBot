@@ -261,14 +261,12 @@ def format_price(price, precision=None):
     if abs(price) < 0.00001:
         return f"{price:.4e}"
 
-    if precision is None:
+    # Default to 6 decimal places as requested, but keep precision if provided
+    p_int = precision_to_int(precision) if precision is not None else 6
+    formatted = f"{price:.{p_int}f}".rstrip('0').rstrip('.')
+    if (formatted == "" or formatted == "0") and price != 0:
         return f"{price:.10f}".rstrip('0').rstrip('.')
-    else:
-        p_int = precision_to_int(precision)
-        formatted = f"{price:.{p_int}f}".rstrip('0').rstrip('.')
-        if (formatted == "" or formatted == "0") and price != 0:
-            return f"{price:.10f}".rstrip('0').rstrip('.')
-        return formatted if formatted != "" else "0"
+    return formatted if formatted != "" else "0"
 
 def format_amt(amt, precision=None):
     if amt is None: return "-"
@@ -278,14 +276,11 @@ def format_amt(amt, precision=None):
     if abs(amt) < 0.00001:
         return f"{amt:.4e}"
 
-    if precision is None:
+    p_int = precision_to_int(precision) if precision is not None else 6
+    formatted = f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
+    if (formatted == "" or formatted == "0") and amt != 0:
         return f"{amt:.10f}".rstrip('0').rstrip('.')
-    else:
-        p_int = precision_to_int(precision)
-        formatted = f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
-        if (formatted == "" or formatted == "0") and amt != 0:
-            return f"{amt:.10f}".rstrip('0').rstrip('.')
-        return formatted if formatted != "" else "0"
+    return formatted if formatted != "" else "0"
 
 def render_ascii_chart(symbol, config):
     global chart_cache
@@ -1483,18 +1478,75 @@ async def main():
     if 'pairs' not in config:
         config['pairs'] = {}
 
-    pairs_from_file = []
-    if os.path.exists('pairs.txt'):
-        with open('pairs.txt', 'r') as f:
-            pairs_from_file = [line.strip() for line in f if line.strip()]
+    # Discover and select pairs based on volume, configuration, and balances
+    logging.info("Retrieving best pairs based on 24h volume and balance analysis...")
+    try:
+        # 1. Fetch 24h tickers to find high volume pairs
+        all_tickers = await exchange.fetch_tickers()
 
-    for p in pairs_from_file:
-        if p not in config['pairs']:
-            config['pairs'][p] = {}
+        quote_asset = config.get('quote_asset', 'USDT')
+        num_pairs = config.get('number_of_pairs', 20)
 
-    pairs = list(config['pairs'].keys())
+        # Candidate symbols: Must end with quote_asset and have volume/price data
+        candidates = []
+        for symbol, ticker in all_tickers.items():
+            if not symbol.endswith(f"/{quote_asset}"):
+                continue
+
+            volume = ticker.get('quoteVolume') or ticker.get('baseVolume', 0) * ticker.get('last', 0)
+            if volume > 0:
+                candidates.append({
+                    'symbol': symbol,
+                    'volume': volume,
+                    'base': symbol.split('/')[0]
+                })
+
+        # Sort by volume descending
+        candidates.sort(key=lambda x: x['volume'], reverse=True)
+        top_volume_pairs = [c['symbol'] for c in candidates[:num_pairs]]
+
+        # 2. Add pairs from inventory if enabled
+        inventory_pairs = []
+        if config.get('include_inventory_pairs') or config.get('include_all_quote_pairs'):
+            balance = await exchange.fetch_balance()
+            free_balances = balance.get('free', {}) if isinstance(balance, dict) and 'free' in balance else {}
+
+            for asset, amount in free_balances.items():
+                if amount <= 0: continue
+
+                # Check for Base Asset matches
+                if config.get('include_inventory_pairs'):
+                    symbol = f"{asset}/{quote_asset}"
+                    if symbol in all_tickers and symbol not in top_volume_pairs:
+                        inventory_pairs.append(symbol)
+
+                # Check for any pair where user has the Quote Asset
+                if config.get('include_all_quote_pairs'):
+                    # This logic adds all symbols for which the user has the quote currency in balance.
+                    # We limit this to top volume pairs with that quote to avoid adding thousands.
+                    for s in all_tickers.keys():
+                        if s.endswith(f"/{asset}") and s not in top_volume_pairs and s not in inventory_pairs:
+                            # Only add top 5 volume for this specific quote if it's not the main one
+                            inventory_pairs.append(s)
+
+        final_pairs = list(set(top_volume_pairs + inventory_pairs + list(config['pairs'].keys())))
+
+        # Filter pairs that exist in markets
+        final_pairs = [p for p in final_pairs if p in exchange.markets]
+
+        for p in final_pairs:
+            if p not in config['pairs']:
+                config['pairs'][p] = {}
+
+        pairs = list(config['pairs'].keys())
+        logging.info(f"Initialized with {len(pairs)} pairs (Top Volume: {len(top_volume_pairs)}, Inventory: {len(inventory_pairs)}).")
+
+    except Exception as e:
+        logging.error(f"Failed to dynamically retrieve pairs: {e}")
+        pairs = list(config['pairs'].keys())
+
     if not pairs:
-        logging.error("No pairs found in config or pairs.txt")
+        logging.error("No pairs could be initialized.")
         return
 
     # Start UI task
