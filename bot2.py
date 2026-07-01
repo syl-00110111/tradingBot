@@ -1341,42 +1341,29 @@ async def main():
     args = parser.parse_args()
 
     # Hardware Acceleration Detection
-    global device, gpu_enabled, use_mkldnn
-    use_mkldnn = False
+    global device
     if args.no_gpu:
         device = torch.device('cpu')
-        gpu_enabled = False
     else:
         if torch.cuda.is_available():
             device = torch.device('cuda')
-            gpu_enabled = True
         elif torch.backends.mkldnn.is_available():
             device = torch.device('cpu')
-            use_mkldnn = True
             torch.backends.mkldnn.enabled = True
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['MKL_NUM_THREADS'] = '1'
-            torch.set_num_threads(1)
-            gpu_enabled = True
         elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
             device = torch.device('vulkan')
-            gpu_enabled = True
         elif torch.cuda.is_available() and hasattr(torch.version, 'hip') and torch.version.hip:
             device = torch.device('cuda')
-            gpu_enabled = True
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device('mps')
-            gpu_enabled = True
         else:
             try:
                 import intel_extension_for_pytorch as ipex
                 if torch.xpu.is_available():
                     device = torch.device('xpu')
-                    gpu_enabled = True
                 else: raise Exception()
             except:
                 device = torch.device('cpu')
-                gpu_enabled = False
 
     config = load_config()
 
