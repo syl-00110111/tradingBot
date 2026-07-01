@@ -1484,8 +1484,8 @@ async def main():
         # 1. Fetch 24h tickers to find high volume pairs
         all_tickers = await exchange.fetch_tickers()
 
-        quote_asset = config.get('quote_asset', 'USDT')
-        num_pairs = config.get('number_of_pairs', 20)
+        quote_asset = config.get('quote_asset')
+        num_pairs = config.get('number_of_pairs')
 
         # Candidate symbols: Must end with quote_asset and have volume/price data
         candidates = []
