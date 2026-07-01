@@ -37,46 +37,12 @@ from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
 
-# Analysis Queue and Tracking
-analysis_queue = asyncio.PriorityQueue()
+# Global analysis tracking to avoid overlapping
+analysis_in_progress = set()
+analysis_lock = asyncio.Lock()
 
-class WatcherManager:
-    def __init__(self, exchange, config):
-        self.exchange = exchange
-        self.config = config
-        self.global_watcher = None
-        self.pending_reschedules = {}  # symbol -> (old_tf, new_tf)
-        self.aggregation_lock = asyncio.Lock()
-        self.aggregation_task = None
-        self._startup_message_shown = False
-
-    async def schedule_reschedule(self, symbol, old_tf, new_tf):
-        async with self.aggregation_lock:
-            self.pending_reschedules[symbol] = (old_tf, new_tf)
-            if not self.aggregation_task or self.aggregation_task.done():
-                self.aggregation_task = asyncio.create_task(self._process_reschedules())
-
-    async def _process_reschedules(self):
-        await asyncio.sleep(30)  # 30-second aggregation window
-        async with self.aggregation_lock:
-            changes = self.pending_reschedules.copy()
-            self.pending_reschedules.clear()
-
-        if not changes: return
-
-        await self.start_global_watcher()
-
-    async def start_global_watcher(self):
-        if self.global_watcher and not self.global_watcher.done():
-            self.global_watcher.cancel()
-
-        # All symbols managed via a single WebSocket connection at 1s interval
-        watch_pairs = [[s, '1s'] for s in self.config['pairs']]
-
-        self.global_watcher = asyncio.create_task(watch_ohlcv_global_task(self.exchange, watch_pairs, self.config))
-
-# Global Watcher Manager
-watcher_manager = None
+# Global Watcher Task
+global_watcher_task = None
 
 # Track orders placed by the bot to process them via WebSocket confirmation
 pending_orders = {} # order_id -> metadata_dict
@@ -105,7 +71,6 @@ bench_executor = None
 
 # Global UI Constants
 MAX_STRAT_LEN = max(len(s) for s in STRATEGIES) if STRATEGIES else 20
-TIMEFRAME_SECONDS = {'1s': 1, '1m': 60, '3m': 180, '5m': 300, '15m': 900}
 
 # Marquee Timing Control
 last_marquee_update = 0
@@ -281,18 +246,12 @@ def format_amt(amt, precision=None):
 def render_ascii_chart(symbol, config):
     global chart_cache
 
-    # We always use the 1s cache now
-    df_1s = None
-    cache_key_1s = f"{symbol}_1s"
-    if cache_key_1s in ohlcv_cache:
-        df_1s = ohlcv_cache[cache_key_1s]
+    df = None
+    if symbol in ohlcv_cache:
+        df = ohlcv_cache[symbol]
 
-    if df_1s is None or df_1s.empty:
+    if df is None or df.empty:
         return Text(f"No data available for {symbol}", style="bold red")
-
-    # Always use 1s for candles view
-    timeframe = '1s'
-    df = df_1s
 
     df = df.tail(100)
     last_ts = int(df.index[-1].timestamp())
@@ -308,7 +267,7 @@ def render_ascii_chart(symbol, config):
     plt_ascii.subplot(1, 1)
     plt_ascii.clf()
     plt_ascii.theme('dark')
-    plt_ascii.title(f"K-Lines: {symbol} ({timeframe})")
+    plt_ascii.title(f"K-Lines: {symbol} (1s)")
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
@@ -457,110 +416,12 @@ async def input_task(exchange, config, data_manager, engine):
             logging.error(f"Input error: {e}")
         await asyncio.sleep(0.1)
 
-async def get_optimal_timeframe(exchange, symbol, config):
+async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor):
     """
-    Dynamically determines the optimal timeframe for a pair.
-
-    The decision is based on 48h volume, spread, volatility, and trades per minute,
-    comparing them against thresholds defined in the configuration.
-
-    Parameters
-    ----------
-    exchange : ExchangeInterface
-        The exchange instance to fetch market data from.
-    symbol : str
-        The trading pair symbol.
-    config : dict
-        The bot configuration containing timeframe thresholds.
-
-    Returns
-    -------
-    tf : str
-        The suggested timeframe (e.g., '1m', '5m', '30m').
-    score : int
-        The calculated score based on market conditions.
-    reasons : list of str
-        List of reasons contributing to the chosen timeframe.
+    Single watcher task for all symbols.
+    'watch_pairs' is a list of [symbol, timeframe] where timeframe is always 1s.
     """
-    thresholds = config.get('timeframe_thresholds', {})
-
-    try:
-        ticker = await exchange.fetch_ticker(symbol)
-        if not ticker:
-            raise ValueError("Ticker returned None")
-
-        ohlcv = await exchange.fetch_ohlcv(symbol, '1h', limit=60)
-        trades = await exchange.fetch_trades(symbol, limit=1000)
-
-        # 1. Volume 48h
-        volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
-        vol_low = thresholds.get('volume_48h', {}).get('low', 1000)
-        vol_high = thresholds.get('volume_48h', {}).get('high', 120000)
-
-        # 2. Spread
-        spread_pct = 0.5
-        if ticker.get('ask') and ticker.get('bid') and ticker['bid'] > 0:
-            spread = ticker['ask'] - ticker['bid']
-            spread_pct = (spread / ticker['bid']) * 100
-        spr_low = thresholds.get('spread_pct', {}).get('low', 0.001)
-        spr_high = thresholds.get('spread_pct', {}).get('high', 0.04)
-
-        # 3. Volatility
-        volatility = 0.05
-        if ohlcv is not None and len(ohlcv) > 0:
-            closes = [candle[4] for candle in ohlcv]
-            volatility = (max(closes) - min(closes)) / min(closes)
-        vlt_low = thresholds.get('volatility_pct', {}).get('low', 0.01)
-        vlt_high = thresholds.get('volatility_pct', {}).get('high', 0.1)
-
-        # 4. Trades per minute
-        if trades:
-            times = [t['timestamp'] for t in trades]
-            duration_mins = (max(times) - min(times)) / 60000
-            trades_per_min = len(trades) / duration_mins if duration_mins > 0 else 0
-        else:
-            trades_per_min = 0
-        tpm_low = thresholds.get('trades_per_minute', {}).get('low', 1)
-        tpm_high = thresholds.get('trades_per_minute', {}).get('high', 40)
-
-        # Scoring logic: higher score = faster timeframe
-        score = 0
-        reasons = []
-        if volume_48h > vol_high: score += 1; reasons.append("High Vol")
-        elif volume_48h < vol_low: score -= 1; reasons.append("Low Vol")
-
-        if spread_pct < spr_low: score += 1; reasons.append("Tight Spread")
-        elif spread_pct > spr_high: score -= 1; reasons.append("Wide Spread")
-
-        if volatility < vlt_low: score += 1; reasons.append("Stable")
-        elif volatility > vlt_high: score -= 1; reasons.append("Volatile")
-
-        if trades_per_min > tpm_high: score += 1; reasons.append("Active")
-        elif trades_per_min < tpm_low: score -= 1; reasons.append("Inactive")
-
-        if score >= 2: tf = '1s'
-        elif score == 1: tf = '1m'
-        elif score == 0: tf = '3m'
-        elif score == -1: tf = '5m'
-        else: tf = '15m'
-
-        # logging.info(f"[{symbol}] Optimal timeframe: {tf} (Score: {score}, Reasons: {', '.join(reasons)})")
-        return tf, score
-
-    except Exception as e:
-        err_msg = str(e)
-        logging.warning(f"Error determining timeframe for {symbol}: {err_msg}. Defaulting to 1m.")
-        # Return exactly two values as expected by the caller
-        return '1m', 0
-
-async def watch_ohlcv_global_task(exchange, watch_pairs, config):
-    """
-    Single watcher task for all symbols across potentially different timeframes.
-    'watch_pairs' is a list of [symbol, timeframe].
-    """
-    if not watcher_manager._startup_message_shown:
-        logging.info(f"[bold cyan]Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
-        watcher_manager._startup_message_shown = True
+    logging.info(f"[bold cyan]Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
 
     while not shutdown_event.is_set():
         try:
@@ -572,53 +433,30 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config):
                 else: continue
 
                 async with ohlcv_lock:
-                    cache_key_1s = f"{symbol}_{timeframe}" # timeframe is '1s'
-                    if cache_key_1s not in ohlcv_cache:
-                        ohlcv_cache[cache_key_1s] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    if symbol not in ohlcv_cache:
+                        ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
-                    df_1s = ohlcv_cache[cache_key_1s]
+                    df = ohlcv_cache[symbol]
 
-                    # 1. Update 1s cache efficiently
                     new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
                     new_candles_df.set_index('timestamp', inplace=True)
 
-                    df_1s = pd.concat([df_1s, new_candles_df])
-                    df_1s = df_1s[~df_1s.index.duplicated(keep='last')]
-                    df_1s.sort_index(inplace=True)
-                    ohlcv_cache[cache_key_1s] = df_1s.tail(10000)
-
-                    # 2. Update target timeframe cache
-                    target_tf = get_timeframe(symbol, config)
-                    if target_tf != '1s':
-                        target_key = f"{symbol}_{target_tf}"
-                        if target_key not in ohlcv_cache:
-                            ohlcv_cache[target_key] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-
-                        target_df = ohlcv_cache[target_key]
-
-                        pd_tf = target_tf.replace('m', 'min').replace('s', 's')
-                        first_new_ts = pd.to_datetime(candles[0][0], unit='ms')
-                        bucket_start = first_new_ts.floor(pd_tf)
-
-                        affected_1s = df_1s.loc[bucket_start:]
-                        if not affected_1s.empty:
-                            resampled_new = affected_1s.resample(pd_tf).agg({
-                                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-                            }).dropna()
-
-                            target_df = pd.concat([target_df, resampled_new])
-                            target_df = target_df[~target_df.index.duplicated(keep='last')]
-                            target_df.sort_index(inplace=True)
-                            ohlcv_cache[target_key] = target_df.tail(10000)
+                    df = pd.concat([df, new_candles_df])
+                    df = df[~df.index.duplicated(keep='last')]
+                    df.sort_index(inplace=True)
+                    ohlcv_cache[symbol] = df.tail(10000)
 
                     async with bot_lock:
                         if symbol in bot_state:
                             bot_state[symbol]['price'] = candles[-1][4]
 
-                # No longer pushing analyses from the global watcher.
-                # A single pass is performed at startup, and workers re-enqueue pairs.
-                pass
+                # Trigger analysis
+                async with analysis_lock:
+                    if symbol not in analysis_in_progress:
+                        analysis_in_progress.add(symbol)
+                        asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
+
         except Exception as e:
             if not shutdown_event.is_set():
                 logging.error(f"WebSocket OHLCV reconnection error: {e}")
@@ -751,81 +589,18 @@ def worker_process_init():
     except:
         pass
 
-async def dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device):
-    max_workers = config.get('max_analysis_workers', 4)
-    logging.info(f"Dedicated analysis and trade task started with {max_workers} workers.")
-    executor = concurrent.futures.ProcessPoolExecutor(
-        max_workers=os.cpu_count() or 4,
-        initializer=worker_process_init
-    )
-
-    async def worker():
-        while not shutdown_event.is_set():
-            symbol, timeframe = None, None
-            last_anal = 0
-            try:
-                priority, (symbol, timeframe) = await asyncio.wait_for(analysis_queue.get(), timeout=1.0)
-                await analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor)
-
-                # Update last analysis timestamp
-                last_anal = time.time()
-                async with bot_lock:
-                    if symbol in bot_state:
-                        bot_state[symbol]['last_analysis_ts'] = last_anal
-
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logging.error(f"Error in analysis worker: {e}")
-                last_anal = time.time() # Still re-enqueue on error
-            finally:
-                if symbol:
-                    # Re-enqueue the pair for continuous analysis (single instance per pair)
-                    # Use priority (TF_Priority, last_anal)
-                    priority = (get_tf_priority(timeframe), last_anal)
-                    await analysis_queue.put((priority, (symbol, timeframe)))
-                    analysis_queue.task_done()
-
+async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor):
     try:
-        workers = [asyncio.create_task(worker()) for _ in range(max_workers)]
-        await asyncio.gather(*workers)
+        await analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor)
+        async with bot_lock:
+            if symbol in bot_state:
+                bot_state[symbol]['last_analysis_ts'] = time.time()
     finally:
-        executor.shutdown(wait=False)
+        async with analysis_lock:
+            if symbol in analysis_in_progress:
+                analysis_in_progress.remove(symbol)
 
-def run_optimization_for_symbol_sync(symbol, config, timeframe, aggrs, strategies, df, engine, device):
-    from indicators2 import get_signals
-    import torch
-    import pandas as pd
-
-    best_profit = -999
-    best_strat = None
-
-    for strat in strategies:
-        mode_settings = engine.get_dynamic_settings(20, 0.005)
-        mode_settings['strategy'] = strat
-        mode_settings['device'] = torch.device('cpu')
-
-        try:
-            res_df = get_signals(df.copy(), mode_settings, is_scan=True)
-            profit = 0
-            pos = None
-            for i in range(len(res_df)):
-                row = res_df.iloc[i]
-                if row['buy_signal'] and not pos:
-                    pos = row['close']
-                elif row['sell_signal'] and pos:
-                    profit += (row['close'] - pos)
-                    pos = None
-            if profit > best_profit:
-                best_profit = profit
-                best_strat = strat
-        except: continue
-
-    return symbol, best_strat, best_profit
-
-async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, pattern_manager, engine, device, executor=None):
+async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor=None):
     try:
         # Check suspensions
         now_ts = time.time()
@@ -846,11 +621,9 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
             else:
                 del pair_suspensions[symbol]
 
-        # We now use pre-aggregated candles from the cache for the target timeframe
-        cache_key = f"{symbol}_{timeframe}"
         async with ohlcv_lock:
-            if cache_key not in ohlcv_cache: return
-            df = ohlcv_cache[cache_key].copy()
+            if symbol not in ohlcv_cache: return
+            df = ohlcv_cache[symbol].copy()
 
         if df.empty or len(df) < 250: return
 
@@ -865,110 +638,64 @@ async def analyze_and_trade(exchange, symbol, timeframe, config, data_manager, p
 
         latest_base = df.iloc[-1]
 
-        # 2. Adaptive Timeframe Discovery
-        last_tf_check = config.get('pairs', {}).get(symbol, {}).get('_last_tf_check', 0)
-        if time.time() - last_tf_check > 900:
-            new_tf, score = await get_optimal_timeframe(exchange, symbol, config)
-            config.setdefault('pairs', {}).setdefault(symbol, {})['_last_tf_check'] = time.time()
-            if new_tf != timeframe:
-                config['pairs'][symbol]['timeframe'] = new_tf
-                if watcher_manager:
-                    await watcher_manager.schedule_reschedule(symbol, timeframe, new_tf)
-
-        # 3. Multi-technique Evaluation
+        # Single Strategy Evaluation
         pair_config = config['pairs'].get(symbol, {})
-        techniques = pair_config.get('techniques', [])
-        if not techniques:
-            techniques = [{"strategy": s} for s in STRATEGIES]
+        strat = pair_config.get('strategy') or STRATEGIES[0]
+        aggr = pair_config.get('aggr', 'dynamic')
 
-        buy_count = 0
-        sell_count = 0
-        total_score = 0
+        mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=aggr)
+        mode_settings['strategy'] = strat
+        mode_settings['device'] = torch.device('cpu')
 
-        async def evaluate_technique(t, df_in):
-            strat = t.get('strategy')
-            aggr = t.get('aggr', ['normal'])[0] if isinstance(t.get('aggr'), list) else t.get('aggr', 'normal')
-            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=aggr)
-            mode_settings['strategy'] = strat
-            # Force CPU for subprocesses
-            mode_settings['device'] = torch.device('cpu')
+        res_df = await loop.run_in_executor(executor, get_signals, df, mode_settings)
+        if res_df.empty: return
 
-            res_df = await loop.run_in_executor(executor, get_signals, df_in, mode_settings)
-            if not res_df.empty:
-                latest = res_df.iloc[-1]
+        latest = res_df.iloc[-1]
 
-                # Simple backtest profit metric (last 100 candles)
-                profit = 0
-                test_df = res_df.tail(100)
+        # Simple backtest profit metric (last 100 candles)
+        profit = 0
+        test_df = res_df.tail(100)
+        pos = None
+        for _, row in test_df.iterrows():
+            if row['buy_signal'] and pos is None:
+                pos = row['close']
+            elif row['sell_signal'] and pos is not None:
+                profit += (row['close'] - pos)
                 pos = None
-                for _, row in test_df.iterrows():
-                    if row['buy_signal'] and pos is None:
-                        pos = row['close']
-                    elif row['sell_signal'] and pos is not None:
-                        profit += (row['close'] - pos)
-                        pos = None
 
-                return (latest.get('buy_signal', False), latest.get('sell_signal', False), strat, mode_settings.get('effective_aggr', aggr), profit)
-            return (False, False, strat, aggr, 0)
+        buy_candidate = latest.get('buy_signal', False)
+        sell_candidate = latest.get('sell_signal', False)
+        total_score = 1 if buy_candidate else (-1 if sell_candidate else 0)
 
-        if techniques:
-            # Copy dataframe once before parallel processing
-            df_copy = df.copy()
-            # Parallel evaluation for efficiency
-            results = await asyncio.gather(*[evaluate_technique(t, df_copy) for t in techniques])
-
-            best_profit = -999999
-            best_strat = "N/A"
-            best_aggr = "normal"
-
-            for has_buy, has_sell, strat, eff_aggr, profit in results:
-                if has_buy: buy_count += 1
-                if has_sell: sell_count += 1
-
-                # Logic to pick the "best" strategy to display
-                # Priority: Signal present > Highest profit
-                has_signal = has_buy or has_sell
-                if has_signal or profit > best_profit:
-                    if has_signal or (best_strat == "N/A" or not (results[results.index((has_buy, has_sell, strat, eff_aggr, profit))][0] or results[results.index((has_buy, has_sell, strat, eff_aggr, profit))][1])):
-                        best_profit = profit
-                        best_strat = strat
-                        best_aggr = eff_aggr
-
-            async with bot_lock:
-                if symbol not in bot_state: bot_state[symbol] = {}
-                bot_state[symbol]['strategy'] = best_strat
-                bot_state[symbol]['aggr'] = best_aggr
-                bot_state[symbol]['expected_profit'] = best_profit
-
-        # Signal Subtraction
-        total_score = buy_count - sell_count
-        final_buy_count = max(0, total_score)
-        final_sell_count = max(0, -total_score)
-
-        buy_candidate = final_buy_count > 0
-        sell_candidate = final_sell_count > 0
+        async with bot_lock:
+            if symbol not in bot_state: bot_state[symbol] = {}
+            bot_state[symbol].update({
+                'strategy': strat,
+                'aggr': mode_settings.get('effective_aggr', aggr),
+                'expected_profit': profit
+            })
 
         # Update State
         async with bot_lock:
             bot_state[symbol].update({
-                'price': latest_base['close'],
-                'ema_f': latest_base.get('ema_f', 0),
-                'ema_s': latest_base.get('ema_s', 0),
-                'macd_hist': latest_base.get('macd_hist', 0),
-                'rsi': latest_base.get('rsi', 0),
-                'adx': latest_base.get('adx', 0),
-                'volatility': latest_base.get('volatility', 0),
+                'price': latest['close'],
+                'ema_f': latest.get('ema_f', 0),
+                'ema_s': latest.get('ema_s', 0),
+                'macd_hist': latest.get('macd_hist', 0),
+                'rsi': latest.get('rsi', 0),
+                'adx': latest.get('adx', 0),
+                'volatility': latest.get('volatility', 0),
                 'score': total_score,
-                'consecutive_buys': final_buy_count,
-                'consecutive_sells': final_sell_count,
+                'consecutive_buys': 1 if buy_candidate else 0,
+                'consecutive_sells': 1 if sell_candidate else 0,
                 'tendency': "Bullish" if total_score > 0 else ("Bearish" if total_score < 0 else "Neutral"),
                 'last_signal': 'Buy' if buy_candidate else ('Sell' if sell_candidate else 'Waiting')
             })
 
         if buy_candidate and not is_suspended:
-            await execute_buy(exchange, symbol, latest_base, data_manager, engine, config)
+            await execute_buy(exchange, symbol, latest, data_manager, engine, config)
         elif sell_candidate:
-            await execute_sell(exchange, symbol, latest_base, data_manager, engine, config)
+            await execute_sell(exchange, symbol, latest, data_manager, engine, config)
 
     except Exception as e:
         logging.error(f"Analysis error for {symbol}: {e}")
@@ -997,7 +724,6 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 
     try:
         price = data['close']
-        timeframe = get_timeframe(symbol, config)
 
         # Check Notional Limit
         market = exchange.markets.get(symbol)
@@ -1008,7 +734,7 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
             balance = await exchange.fetch_balance()
             async with bot_lock: current_balances = balance
 
-        amount = engine.calculate_position_size(balance, price, symbol.split('/')[1], timeframe=timeframe)
+        amount = engine.calculate_position_size(balance, price, symbol.split('/')[1])
         cost = amount * price
 
         if amount > 0:
@@ -1260,22 +986,6 @@ async def watch_orders_task(exchange, data_manager, config, engine):
                 # We could sync positions with data_manager here if we wanted to be
                 # fully WebSocket-driven for fills.
 
-def get_timeframe(symbol, config):
-    """Utility to get the current timeframe for a symbol consistently."""
-    pair_cfg = config.get('pairs', {}).get(symbol, {})
-    return pair_cfg.get('timeframe') or config.get('default_timeframe', '1s')
-
-def get_tf_priority(tf):
-    """Higher timeframe = Lower number = Higher priority in PriorityQueue."""
-    priorities = {
-        '15m': 0, '15min': 0,
-        '5m': 1, '5min': 1,
-        '3m': 2, '3min': 2,
-        '1m': 3, '1min': 3,
-        '1s': 4
-    }
-    return priorities.get(tf.lower(), 5)
-
 async def is_pair_dust(symbol, exchange, config):
     """
     Checks if the remaining balance for a symbol is considered 'dust'
@@ -1312,10 +1022,8 @@ async def is_pair_dust(symbol, exchange, config):
     return False
 
 def get_sorted_symbols(config):
-    tf_priority = {'1s': 0, '1m': 1, '3m': 2, '5m': 3, '15m': 4, '30m': 5}
     all_pairs = sorted(
-        [s for s in bot_state.keys() if not s.startswith("_")],
-        key=lambda x: (tf_priority.get(get_timeframe(x, config), 99), x)
+        [s for s in bot_state.keys() if not s.startswith("_")]
     )
     return all_pairs
 
@@ -1371,7 +1079,6 @@ def make_dashboard(config):
     table = Table(expand=True, box=None, padding=(0, 1))
     if expert_mode:
         table.add_column("Pair", style="cyan", no_wrap=True)
-        table.add_column("TF", style="yellow", no_wrap=True)
         table.add_column("EMA F/S", style="green", no_wrap=True)
         table.add_column("MACD", style="blue", no_wrap=True)
         table.add_column("RSI", style="yellow", no_wrap=True)
@@ -1382,7 +1089,6 @@ def make_dashboard(config):
         table.add_column("Strategy", style="bold cyan", no_wrap=True, width=MAX_STRAT_LEN)
     else:
         table.add_column("Pair", style="cyan", no_wrap=True)
-        table.add_column("TF", style="yellow", no_wrap=True)
         table.add_column("Price", style="magenta", no_wrap=True)
         table.add_column("Amt", style="cyan", no_wrap=True)
         table.add_column("Entry", style="magenta", no_wrap=True)
@@ -1426,7 +1132,6 @@ def make_dashboard(config):
         elif sell_count > 0: current_signal = f"{sell_count} Sell"
 
         sig_style = "bold green" if "Buy" in current_signal else "bold red" if "Sell" in current_signal else "white"
-        tf = get_timeframe(symbol, config)
 
         amt_str = "-"
         entry_str = "-"
@@ -1453,7 +1158,7 @@ def make_dashboard(config):
 
         if expert_mode:
             row_vals = [
-                symbol, tf,
+                symbol,
                 f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
                 macd_str,
                 f"{data.get('rsi', 0):.2f}",
@@ -1465,7 +1170,7 @@ def make_dashboard(config):
             ]
         else:
             row_vals = [
-                symbol, tf,
+                symbol,
                 format_price(data.get('price')),
                 amt_str, entry_str, fee_str,
                 f"{data.get('expected_profit', 0):.4f}",
@@ -1653,17 +1358,15 @@ async def main():
     # Initial Batch
     for symbol in pairs:
         pair_cfg = config['pairs'][symbol]
-        techniques_cfg = pair_cfg.get('techniques', [])
-        if not techniques_cfg:
-            techniques_cfg = [{"strategy": s, "aggr": ["normal", "aggressive", "dynamic"]} for s in STRATEGIES]
+        strat = pair_cfg.get('strategy') or STRATEGIES[0]
+        aggr = pair_cfg.get('aggr', 'dynamic')
 
         bot_state[symbol] = {
             'price': 0, 'rsi': 0, 'tendency': 'Neutral',
             'last_signal': 'Init',
             'position': data_manager.get_position(symbol),
-            'aggr': techniques_cfg[0].get('aggr', ['normal'])[0] if isinstance(techniques_cfg[0].get('aggr'), list) else techniques_cfg[0].get('aggr', 'normal'),
-            'strategy': techniques_cfg[0].get('strategy', 'N/A'),
-            'strategies': [t.get('strategy') for t in techniques_cfg],
+            'aggr': aggr,
+            'strategy': strat,
             'consecutive_buys': 0,
             'consecutive_sells': 0,
             'score': 0,
@@ -1678,8 +1381,7 @@ async def main():
     if args.fast_start:
         logging.info("[bold yellow]Fast start enabled: Skipping initial candles fetch.")
         for symbol in pairs:
-            # Always initialize 1s cache regardless of assigned timeframe
-            ohlcv_cache[f"{symbol}_1s"] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+            ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
     else:
         logging.info(f"[bold cyan]Fetching initial candles for {len(pairs)} pairs...")
         semaphore = asyncio.Semaphore(5)
@@ -1687,8 +1389,6 @@ async def main():
         async def init_symbol(symbol):
             async with semaphore:
                 try:
-                    # 1. Always fetch historical 1s candles (Target: 10000)
-                    tf = get_timeframe(symbol, config)
                     logging.info(f"Fetching initial 1s candles for {symbol} (Target: 10000)...")
                     ohlcv_1s = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=10000)
                     df_1s = pd.DataFrame(ohlcv_1s, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -1696,36 +1396,23 @@ async def main():
                     for col in ['open', 'high', 'low', 'close', 'volume']:
                         df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
                     df_1s.set_index('timestamp', inplace=True)
-                    ohlcv_cache[f"{symbol}_1s"] = df_1s
+                    ohlcv_cache[symbol] = df_1s
                     logging.info(f"[{symbol}] Loaded {len(df_1s)} candles (1s).")
-
-                    # 2. If target timeframe is not 1s, aggregate 1s candles
-                    if tf != '1s':
-                        logging.info(f"[{symbol}] Aggregating 1s candles to {tf}...")
-                        pd_tf = tf.replace('m', 'min').replace('s', 's')
-                        target_df = df_1s.resample(pd_tf).agg({
-                            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-                        }).dropna()
-                        ohlcv_cache[f"{symbol}_{tf}"] = target_df
-                        logging.info(f"[{symbol}] Created {len(target_df)} candles ({tf}) via aggregation.")
-                    else:
-                        ohlcv_cache[f"{symbol}_{tf}"] = df_1s
 
                 except Exception as e:
                     logging.error(f"Failed to load candles for {symbol}: {e}")
                     # Fallback empty dataframes to avoid crashes
-                    tf = get_timeframe(symbol, config)
                     empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-                    ohlcv_cache[f"{symbol}_{tf}"] = empty_df
-                    ohlcv_cache[f"{symbol}_1s"] = empty_df
+                    ohlcv_cache[symbol] = empty_df
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
 
-    # Seed analysis queue with initial pairs (priority 0) - exactly one instance per pair
-    for symbol in pairs:
-        tf = get_timeframe(symbol, config)
-        priority = (get_tf_priority(tf), 0)
-        await analysis_queue.put((priority, (symbol, tf)))
+    # Analysis Executor
+    max_workers = config.get('max_analysis_workers') or os.cpu_count() or 4
+    executor = concurrent.futures.ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=worker_process_init
+    )
 
     # Start WebSocket Tasks
     logging.info("[bold green]Starting WebSocket tasks...")
@@ -1736,12 +1423,9 @@ async def main():
         asyncio.create_task(heartbeat_task())
     ]
 
-    # Initialize Watcher Manager
-    global watcher_manager
-    watcher_manager = WatcherManager(exchange, config)
-
     # Start Global OHLCV Watcher
-    await watcher_manager.start_global_watcher()
+    watch_pairs = [[s, '1s'] for s in pairs]
+    global_watcher_task = asyncio.create_task(watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor))
 
     # Ensure all watchers are setup (Wait a bit for connections to stabilize)
     await asyncio.sleep(2)
@@ -1766,8 +1450,12 @@ async def main():
     except Exception as e:
         logging.error(f"Error during balance synchronization: {e}")
 
-    # Dedicated analysis/trade worker
-    background_tasks.append(asyncio.create_task(dedicated_analysis_task(exchange, config, data_manager, pattern_manager, engine, device)))
+    # Initial analysis for all pairs
+    for symbol in pairs:
+        async with analysis_lock:
+            if symbol not in analysis_in_progress:
+                analysis_in_progress.add(symbol)
+                asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
 
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(4)
@@ -1805,13 +1493,9 @@ async def main():
         # Cancel UI task first to restore terminal sooner
         if ui_task:
             ui_task.cancel()
-            # No await here, we want to proceed with other cancellations
-            # and the final console.clear() as fast as possible.
 
-        if watcher_manager and watcher_manager.global_watcher:
-            all_tasks.append(watcher_manager.global_watcher)
-        if watcher_manager and watcher_manager.aggregation_task:
-            all_tasks.append(watcher_manager.aggregation_task)
+        if global_watcher_task:
+            all_tasks.append(global_watcher_task)
 
         for t in all_tasks:
             if not t.done():
@@ -1823,6 +1507,7 @@ async def main():
                 await asyncio.wait(all_tasks, timeout=3)
             except: pass
 
+        if executor: executor.shutdown(wait=False)
         global bench_executor
         if bench_executor: bench_executor.shutdown(wait=False)
 

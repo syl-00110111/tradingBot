@@ -113,16 +113,11 @@ class CCXTExchange2(ExchangeInterface2):
                 logging.error(f"Error in watch_ohlcv for {symbol}: {e}")
                 await asyncio.sleep(1)
 
-    async def watch_ohlcv_for_symbols(self, symbols, timeframe=None):
+    async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         """
-        Watches OHLCV for multiple symbols.
-        'symbols' can be a list of symbols (if 'timeframe' is provided)
-        or a list of [symbol, timeframe] pairs.
+        Watches OHLCV for multiple symbols at 1s interval.
         """
-        if timeframe is not None:
-            pairs = [[s, timeframe] for s in symbols]
-        else:
-            pairs = symbols
+        pairs = [[s, timeframe] for s in symbols] if isinstance(symbols[0], str) else symbols
 
         # Multiplexed individual watchers is often more reliable than watchOHLCVForSymbols
         # for high-frequency 1s updates across various exchanges.
@@ -299,15 +294,12 @@ class MockExchange2(ExchangeInterface2):
                 await asyncio.sleep(1)
                 yield [[time.time()*1000, 100, 105, 95, 102, 1000]]
 
-    async def watch_ohlcv_for_symbols(self, symbols, timeframe=None):
+    async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         if self.real_exchange:
             async for data in self.real_exchange.watch_ohlcv_for_symbols(symbols, timeframe):
                 yield data
         else:
-            if timeframe is not None:
-                pairs = [[s, timeframe] for s in symbols]
-            else:
-                pairs = symbols
+            pairs = [[s, timeframe] for s in symbols] if isinstance(symbols[0], str) else symbols
             while True:
                 for item in pairs:
                     symbol = item[0]
