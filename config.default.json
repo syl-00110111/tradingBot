@@ -23,5 +23,5 @@
     "macd_signal": 5,
     "rsi_period": 7,
     "rsi_buy": 30,
-    "rsi_sell": 70,
+    "rsi_sell": 70
 }
