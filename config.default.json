@@ -10,6 +10,5 @@
         "threshold": 2,
         "multiplier": 1.2
     },
-    "no_signal_threshold": 240,
-    "max_analysis_workers": 32
+    "no_signal_threshold": 240
 }

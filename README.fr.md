@@ -60,27 +60,16 @@ Paramètres principaux du bot.
     ```
 *   **`global_risk_multiplier`** : (float) Multiplicateur pour le dimensionnement des positions et les confirmations techniques (par défaut : `1.1`).
 *   **`dynamic_pair_multiplier`** : (float) Multiplicateur appliqué spécifiquement aux paires en unité de temps 1s (par défaut : `2.0`).
-*   **`max_analysis_workers`** : (int) Nombre de workers en parallèle pour l'analyse technique (par défaut : `4`).
-*   **`no_signal_threshold`** : (int) Nombre de bougies sans signal avant de déclencher l'optimisation en arrière-plan (par défaut : `48`).
-*   **`timeframe_thresholds`** : (Object) Configuration du moteur de sélection dynamique de l'unité de temps (timeframe). Le bot évalue quatre métriques de marché pour choisir l'unité de temps la plus appropriée (de `1s` à `15m`) :
-    *   **`volume_48h`** : (low/high) Volume de cotation sur 48 heures. Un volume élevé favorise les unités de temps rapides.
-    *   **`spread_pct`** : (low/high) Pourcentage d'écart entre l'achat et la vente (spread). Un spread serré favorise les unités de temps rapides.
-    *   **`volatility_pct`** : (low/high) Écart en pourcentage entre le haut et le bas sur les dernières 60 heures. Une faible volatilité (stabilité) favorise les unités de temps rapides.
-    *   **`trades_per_minute`** : (low/high) Fréquence des transactions. Une activité élevée favorise les unités de temps rapides.
-    *   *Logique de Scoring* : Le bot attribue des points en fonction de ces seuils. Un score ≥ 3 déclenche le `1s`, tandis que des scores inférieurs sélectionnent progressivement `1m`, `3m`, `5m` ou `15m`.
+*   **`no_signal_threshold`** : (int) Nombre de bougies sans signal.
 
 #### Surcharges Avancées (Optionnel)
-*   **`force_strategy_to_all_pairs`** : (string) Force le bot à utiliser une stratégie spécifique pour chaque paire.
-*   **`force_agressivity_to_all_pairs`** : (string) Force un niveau d'agressivité spécifique (ex: `dynamic`, `normal`, `aggressive`).
-*   **`pairs`** : (Object) Permet une configuration par paire avec plusieurs techniques.
+*   **`pairs`** : (Object) Permet une configuration par paire.
     Exemple :
     ```json
     "pairs": {
         "BTC/USDC": {
-            "techniques": [
-                {"strategy": "ichimoku_cloud", "aggr": ["normal", "aggressive"]},
-                {"strategy": "bollinger_bands", "aggr": ["normal"]}
-            ]
+            "strategy": "ichimoku_cloud",
+            "aggr": "aggressive"
         }
     }
     ```

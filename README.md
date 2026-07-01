@@ -59,7 +59,6 @@ Main parameters of the bot.
     ```
 *   **`global_risk_multiplier`**: (float) Multiplier for position sizing and technical confirmations (default: `1.1`).
 *   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `2.0`).
-*   **`max_analysis_workers`**: (int) Number of parallel workers for technical analysis (default: `4`).
 *   **`no_signal_threshold`**: (int) Number of candles without signals.
 
 #### Advanced Overrides (Optional)
