@@ -697,7 +697,6 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
                 # Update config with the better technique
                 config['pairs'][symbol]['strategy'] = best_res['strategy']
                 config['pairs'][symbol]['aggr'] = best_res['aggr']
-                logging.info(f"[{symbol}] Optimization: Switched to {best_res['strategy']} ({best_res['aggr']}) | New Exp.Profit: {best_res['profit']:.4f}")
 
         latest = best_res['latest']
         buy_candidate = latest.get('buy_signal', False)
