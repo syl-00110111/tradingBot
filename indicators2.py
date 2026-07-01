@@ -332,26 +332,38 @@ def torch_adx(high, low, close, length=14):
     adx = torch_ema(dx, 2 * length - 1)
     return adx
 STRATEGIES = [
-    'ichimoku_cloud',
-    'bollinger_bands',
-    'williams_r', 'vwap_momentum',
-    'whale_detection_proxy', 'scientific_ensemble',
+    'ichimoku_cloud', 'parabolic_sar', 'adx_trend_strength', 'halving_cycle_proxy',
+    'bollinger_bands', 'pairs_trading_proxy',
+    'donchian_channels', 'stochastic_rsi', 'williams_r', 'vwap_momentum',
+    'renko_proxy', 'ema_rsi_volume',
+    'scientific_ensemble', 'whale_detection_proxy', 'pump_dump_proxy',
     'sentiment_momentum_proxy', 'liquidation_cascade_proxy',
-    'tema_crossover',
-    'heikin_ashi'
+    'mc_mean_reversion', 'mc_momentum', 'mc_dynamic_allocation',
+    'mc_market_making', 'mc_stop_loss_eval',
+    'tema_crossover', 'heikin_ashi', 'sinewave_cycle', 'candle_patterns'
 ]
 
 STRATEGY_GROUPS = {
     'trend_following': [
-        'ichimoku_cloud', 'vwap_momentum',
+        'ichimoku_cloud', 'parabolic_sar', 'adx_trend_strength', 'halving_cycle_proxy',
         'tema_crossover', 'heikin_ashi'
     ],
     'mean_reversion': [
-        'bollinger_bands', 'williams_r'
+        'bollinger_bands', 'pairs_trading_proxy'
     ],
-    'other': [
-        'whale_detection_proxy', 'scientific_ensemble',
+    'momentum_breakout': [
+        'donchian_channels', 'stochastic_rsi', 'williams_r', 'vwap_momentum', 'candle_patterns', 'sinewave_cycle'
+    ],
+    'scalping_proxies': [
+        'renko_proxy', 'ema_rsi_volume'
+    ],
+    'advanced_proxies': [
+        'scientific_ensemble', 'whale_detection_proxy', 'pump_dump_proxy',
         'sentiment_momentum_proxy', 'liquidation_cascade_proxy'
+    ],
+    'monte_carlo': [
+        'mc_mean_reversion', 'mc_momentum', 'mc_dynamic_allocation',
+        'mc_market_making', 'mc_stop_loss_eval'
     ]
 }
 

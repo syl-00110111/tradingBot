@@ -644,11 +644,11 @@ def worker_process_init():
         pass
 
 async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor):
-    # 10-minute cooldown per pair
+    # 3-minute cooldown per pair
     async with bot_lock:
         last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
 
-    if time.time() - last_analysis < 600:
+    if time.time() - last_analysis < 180:
         async with analysis_lock:
             if symbol in analysis_in_progress:
                 analysis_in_progress.remove(symbol)
@@ -662,6 +662,8 @@ async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, patt
         async with bot_lock:
             if symbol in bot_state:
                 bot_state[symbol]['last_analysis_ts'] = time.time()
+                # Schedule strategy change on cooldown expiry
+                bot_state[symbol]['strategy'] = random.choice(STRATEGIES)
         async with analysis_lock:
             if symbol in analysis_in_progress:
                 analysis_in_progress.remove(symbol)
@@ -778,11 +780,19 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         if buy_candidate and not is_suspended:
             # Monte Carlo validation for buy signals
             mc_score = await loop.run_in_executor(None, mc_engine.validate_strategy, df)
-            if mc_score >= 1.0:
+            mc_threshold = config.get('mc_threshold', 0.86)
+            if mc_score >= mc_threshold:
                 logging.info(f"[{symbol}] Buy signal validated by Monte Carlo (Score: {mc_score:.2f}). Proceeding.")
                 await execute_buy(exchange, symbol, latest, data_manager, engine, config)
             else:
-                logging.info(f"[{symbol}] Buy signal REJECTED by Monte Carlo (Score: {mc_score:.2f}).")
+                async with bot_lock:
+                    if symbol in bot_state:
+                        bot_state[symbol].update({
+                            'last_signal': 'Waiting',
+                            'consecutive_buys': 0,
+                            'consecutive_sells': 0,
+                            'strategy': random.choice(STRATEGIES)
+                        })
         elif sell_candidate:
             await execute_sell(exchange, symbol, latest, data_manager, engine, config)
 
@@ -1613,6 +1623,15 @@ async def main():
                     ohlcv_cache[symbol] = empty_df
 
         await asyncio.gather(*[init_symbol(s) for s in pairs])
+
+    # Exclude pairs that have no candles after initial download
+    async with ohlcv_lock:
+        to_remove = [s for s in pairs if s not in ohlcv_cache or ohlcv_cache[s].empty]
+        for s in to_remove:
+            logging.warning(f"[{s}] No initial candle data available. Excluding from active monitoring.")
+            if s in bot_state:
+                del bot_state[s]
+            pairs.remove(s)
 
     # Analysis Executor
     max_workers = max(1, (os.cpu_count() or 4) - 2)
