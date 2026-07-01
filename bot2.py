@@ -181,6 +181,17 @@ root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.addHandler(db_handler)
 
+def deep_merge(base, override):
+    """
+    Recursively merges override into base.
+    """
+    for key, value in override.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
 def load_config_from_path(path):
     if not os.path.exists(path):
         console.print(f"[bold red]Error: Configuration file '{path}' not found.[/]")
@@ -193,15 +204,21 @@ def load_config_from_path(path):
         sys.exit(1)
 
 def load_config():
-    path = None
-    for p in ['config.json', 'config.default.json']:
-        if os.path.exists(p):
-            path = p
-            break
-    if not path:
-        console.print(f"[bold red]Error: Configuration file not found.[/]")
+    config = {}
+    if os.path.exists('config.default.json'):
+        config = load_config_from_path('config.default.json')
+
+    if os.path.exists('config.json'):
+        override = load_config_from_path('config.json')
+        if not config:
+            config = override
+        else:
+            config = deep_merge(config, override)
+
+    if not config:
+        console.print(f"[bold red]Error: No configuration file found (config.json or config.default.json).[/]")
         sys.exit(1)
-    return load_config_from_path(path)
+    return config
 
 def precision_to_int(p):
     if p is None: return 8
@@ -640,8 +657,8 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
 
         # Single Strategy Evaluation + Random Scan
         pair_config = config['pairs'].get(symbol, {})
-        current_strat = pair_config.get('strategy') or STRATEGIES[0]
-        current_aggr = pair_config.get('aggr', 'dynamic')
+        current_strat = pair_config.get('strategy') or config.get('default_strategy')
+        current_aggr = pair_config.get('aggr') or config.get('default_aggr')
 
         # Randomly select a new technique to explore
         random_strat = random.choice(STRATEGIES)
@@ -655,7 +672,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         async def evaluate_technique(t):
             strat = t.get('strategy')
             aggr = t.get('aggr')
-            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 20), latest_base.get('volatility', 0.001), aggr=aggr)
+            mode_settings = engine.get_dynamic_settings(latest_base.get('adx', 25), latest_base.get('volatility', 0.0), aggr=aggr)
             mode_settings['strategy'] = strat
             mode_settings['device'] = torch.device('cpu')
 
@@ -747,13 +764,13 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 
     async with bot_lock:
         pos = data_manager.get_position(symbol)
-        max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol', 1)
+        max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol')
         if pos is not None and len(pos) >= max_lots:
             if manual: logging.warning(f"[{symbol}] Manual BUY ignored: max_lots_per_symbol ({max_lots}) reached.")
             return
 
         open_positions = data_manager.get_open_positions()
-        max_open = config.get('max_open_positions', 10)
+        max_open = config.get('max_open_positions')
         if symbol not in open_positions and len(open_positions) >= max_open:
             if manual: logging.warning(f"[{symbol}] Manual BUY ignored: max_open_positions ({max_open}) reached.")
             return
@@ -1394,8 +1411,8 @@ async def main():
     # Initial Batch
     for symbol in pairs:
         pair_cfg = config['pairs'][symbol]
-        strat = pair_cfg.get('strategy') or STRATEGIES[0]
-        aggr = pair_cfg.get('aggr', 'dynamic')
+        strat = pair_cfg.get('strategy') or config.get('default_strategy')
+        aggr = pair_cfg.get('aggr') or config.get('default_aggr')
 
         bot_state[symbol] = {
             'price': 0, 'rsi': 0, 'tendency': 'Neutral',
