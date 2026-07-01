@@ -79,9 +79,6 @@ class TradingEngine:
             else:
                 settings["effective_aggr"] = "normal"
 
-        # La haute volatilité ajoute un signal de confirmation supplémentaire globalement
-        if volatility > 0.1:
-
         return settings
 
     def get_min_exit_price(self, entry_price, fee_rate=0.001, min_profit=0):
