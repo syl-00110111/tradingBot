@@ -1527,6 +1527,7 @@ async def main():
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(4)
     startup_complete = True
+    play_sound("startup")
     logging.info("[bold green]Bot v2 fully operational.")
 
     # Trigger initial chart and display update
