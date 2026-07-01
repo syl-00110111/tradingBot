@@ -39,7 +39,7 @@ from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
 
 # Global Monte Carlo Engine
-mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
+mc_engine = None # Initialized in main after config load
 
 # Global analysis tracking to avoid overlapping
 analysis_in_progress = set()
@@ -51,7 +51,7 @@ global_watcher_task = None
 # Track orders placed by the bot to process them via WebSocket confirmation
 pending_orders = {} # order_id -> metadata_dict
 pending_orders_lock = asyncio.Lock()
-processed_orders = deque(maxlen=1000) # Keep track of recently processed order IDs
+processed_orders = None # Initialized in main after config load
 processed_orders_lock = asyncio.Lock()
 
 # Global controls for dashboard
@@ -76,7 +76,7 @@ active_scans = {}
 bench_executor = None
 
 # Global UI Constants
-MAX_STRAT_LEN = max(len(s) for s in STRATEGIES) if STRATEGIES else 20
+MAX_STRAT_LEN = 20 # Updated in main
 
 # Marquee Timing Control
 last_marquee_update = 0
@@ -118,22 +118,24 @@ def sound_worker():
         try:
             item = sound_queue.get()
             if item is None: break
-            action, config = item
+            action, bot_config = item
 
             system = platform.system().lower()
+            audio_cfg = bot_config.get('audio', {}) if bot_config else {}
             if system == "windows":
                 import winsound
                 if action == "startup":
-                    for _ in range(5):
-                        winsound.Beep(random.randint(440, 880), 100)
+                    cfg = audio_cfg.get('startup', {})
+                    for _ in range(cfg.get('beeps', 5)):
+                        winsound.Beep(random.randint(cfg.get('min_freq', 440), cfg.get('max_freq', 880)), cfg.get('duration', 100))
                 elif action == "buy":
-                    # Use MessageBeep for better compatibility with sound cards
+                    cfg = audio_cfg.get('buy', {})
                     winsound.MessageBeep(winsound.MB_OK)
-                    # Also try Beep as fallback/extra
-                    winsound.Beep(1000, 250)
+                    winsound.Beep(cfg.get('freq', 1000), cfg.get('duration', 250))
                 elif action == "sell":
+                    cfg = audio_cfg.get('sell', {})
                     winsound.MessageBeep(winsound.MB_ICONHAND)
-                    winsound.Beep(600, 250)
+                    winsound.Beep(cfg.get('freq', 600), cfg.get('duration', 250))
             else:
                 if action == "startup":
                     sys.stdout.write("\a")
@@ -227,6 +229,22 @@ def load_config_from_path(path):
         console.print(f"[bold red]Error parsing configuration file '{path}': {e}[/]")
         sys.exit(1)
 
+def validate_config(config):
+    required_sections = ['timeouts', 'exchange', 'monte_carlo', 'ui', 'trading', 'strategies', 'audio']
+    missing_sections = [s for s in required_sections if s not in config]
+    if missing_sections:
+        logging.warning(f"Configuration is missing sections: {', '.join(missing_sections)}. Using internal fallbacks.")
+
+    # Check for critical parameters
+    critical_keys = [
+        ('exchange', 'default_fee'),
+        ('trading', 'base_target_pct'),
+        ('monte_carlo', 'num_simulations')
+    ]
+    for section, key in critical_keys:
+        if section in config and key not in config[section]:
+            logging.warning(f"Critical configuration parameter missing: {section}.{key}. Using internal fallback.")
+
 def load_config():
     config = {}
     if os.path.exists('config.default.json'):
@@ -242,6 +260,8 @@ def load_config():
     if not config:
         console.print(f"[bold red]Error: No configuration file found (config.json or config.default.json).[/]")
         sys.exit(1)
+
+    validate_config(config)
     return config
 
 def precision_to_int(p):
@@ -252,34 +272,44 @@ def precision_to_int(p):
             return max(0, int(-math.log10(p)))
     return 8
 
-def format_price(price, precision=None):
+def format_price(price, precision=None, config=None):
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
     if price == 0: return "0"
 
-    # Scientific notation for very small numbers (more than 4 zeros after decimal)
-    if abs(price) < 0.00001:
+    ui_cfg = config.get('ui', {}) if config else {}
+    sci_threshold = ui_cfg.get('scientific_threshold', 0.00001)
+
+    # Scientific notation for very small numbers
+    if abs(price) < sci_threshold:
         return f"{price:.4e}"
 
-    # Default to 6 decimal places as requested, but keep precision if provided
-    p_int = precision_to_int(precision) if precision is not None else 6
+    # Default to configured decimal places, but keep precision if provided
+    default_p = ui_cfg.get('display_precision', 6)
+    p_int = precision_to_int(precision) if precision is not None else default_p
     formatted = f"{price:.{p_int}f}".rstrip('0').rstrip('.')
     if (formatted == "" or formatted == "0") and price != 0:
-        return f"{price:.10f}".rstrip('0').rstrip('.')
+        max_p = (ui_cfg.get('default_precision', 8) or 8) + 2
+        return f"{price:.{max_p}f}".rstrip('0').rstrip('.')
     return formatted if formatted != "" else "0"
 
-def format_amt(amt, precision=None):
+def format_amt(amt, precision=None, config=None):
     if amt is None: return "-"
     if not isinstance(amt, (int, float)): return str(amt)
     if amt == 0: return "0"
 
-    if abs(amt) < 0.00001:
+    ui_cfg = config.get('ui', {}) if config else {}
+    sci_threshold = ui_cfg.get('scientific_threshold', 0.00001)
+
+    if abs(amt) < sci_threshold:
         return f"{amt:.4e}"
 
-    p_int = precision_to_int(precision) if precision is not None else 6
+    default_p = ui_cfg.get('display_precision', 6)
+    p_int = precision_to_int(precision) if precision is not None else default_p
     formatted = f"{amt:.{p_int}f}".rstrip('0').rstrip('.')
     if (formatted == "" or formatted == "0") and amt != 0:
-        return f"{amt:.10f}".rstrip('0').rstrip('.')
+        max_p = (ui_cfg.get('default_precision', 8) or 8) + 2
+        return f"{amt:.{max_p}f}".rstrip('0').rstrip('.')
     return formatted if formatted != "" else "0"
 
 def render_ascii_chart(symbol, config):
@@ -292,7 +322,8 @@ def render_ascii_chart(symbol, config):
     if df is None or df.empty:
         return Text(f"No data available for {symbol}", style="bold red")
 
-    df = df.tail(100)
+    ui_cfg = config.get('ui', {})
+    df = df.tail(ui_cfg.get('chart_candles', 100))
     last_ts = int(df.index[-1].timestamp())
 
     if chart_cache["symbol"] == symbol and chart_cache["last_update"] == last_ts:
@@ -321,9 +352,12 @@ def render_ascii_chart(symbol, config):
     plt_ascii.title("Volume")
 
     width = console.width - 4
-    height = console.height - 20
-    if width < 20: width = 20
-    if height < 15: height = 15
+    h_offset = ui_cfg.get('panel_height_offset', 20)
+    height = console.height - h_offset
+    min_w = ui_cfg.get('min_width', 20)
+    min_h = ui_cfg.get('min_height', 15)
+    if width < min_w: width = min_w
+    if height < min_h: height = min_h
 
     h_volume = max(5, height // 3)
     h_klines = height - h_volume
@@ -365,7 +399,9 @@ async def input_task(exchange, config, data_manager, engine):
             if not startup_complete: continue
 
             all_pairs = get_sorted_symbols(config)
-            pairs_height = console.height - 20
+            ui_cfg = config.get('ui', {})
+            h_offset = ui_cfg.get('panel_height_offset', 20)
+            pairs_height = console.height - h_offset
             if pairs_height < 3: pairs_height = 3
 
             if show_chart or show_help:
@@ -391,53 +427,55 @@ async def input_task(exchange, config, data_manager, engine):
                     selected_pair_index = max(0, selected_pair_index - 1)
                     if selected_pair_index < pairs_scroll_offset:
                         pairs_scroll_offset = selected_pair_index
-                    pairs_pause_until = time.time() + 5
+                    pairs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_short', 5)
                 else:
                     logs_scroll_offset += 1
-                    logs_pause_until = time.time() + 30
+                    logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key == readchar.key.DOWN:
                 if focused_panel == "pairs":
                     selected_pair_index = min(len(all_pairs) - 1, selected_pair_index + 1)
                     if selected_pair_index >= pairs_scroll_offset + pairs_height:
                         pairs_scroll_offset = selected_pair_index - pairs_height + 1
-                    pairs_pause_until = time.time() + 5
+                    pairs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_short', 5)
                 else:
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
-                    logs_pause_until = time.time() + 30
+                    logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key == readchar.key.PAGE_UP:
+                scroll_step = ui_cfg.get('scroll_step', 10)
                 if focused_panel == "pairs":
                     selected_pair_index = max(0, selected_pair_index - pairs_height)
                     pairs_scroll_offset = max(0, pairs_scroll_offset - pairs_height)
-                    pairs_pause_until = time.time() + 5
+                    pairs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_short', 5)
                 elif focused_panel == "logs":
-                    logs_scroll_offset += 10
-                    logs_pause_until = time.time() + 30
+                    logs_scroll_offset += scroll_step
+                    logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key == readchar.key.PAGE_DOWN:
+                scroll_step = ui_cfg.get('scroll_step', 10)
                 if focused_panel == "pairs":
                     max_pairs_offset = max(0, len(all_pairs) - pairs_height)
                     selected_pair_index = min(len(all_pairs) - 1, selected_pair_index + pairs_height)
                     pairs_scroll_offset = min(max_pairs_offset, pairs_scroll_offset + pairs_height)
-                    pairs_pause_until = time.time() + 5
+                    pairs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_short', 5)
                 elif focused_panel == "logs":
-                    logs_scroll_offset = max(0, logs_scroll_offset - 10)
-                    logs_pause_until = time.time() + 30
+                    logs_scroll_offset = max(0, logs_scroll_offset - scroll_step)
+                    logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key == readchar.key.HOME:
                 if focused_panel == "pairs":
                     selected_pair_index = 0
                     pairs_scroll_offset = 0
-                    pairs_pause_until = time.time() + 5
+                    pairs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_short', 5)
                 elif focused_panel == "logs":
                     logs_scroll_offset = max(0, len(all_logs) - 8) # 8 is log_height
-                    logs_pause_until = time.time() + 30
+                    logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key == readchar.key.END:
                 if focused_panel == "pairs":
                     max_pairs_offset = max(0, len(all_pairs) - pairs_height)
                     selected_pair_index = len(all_pairs) - 1
                     pairs_scroll_offset = max_pairs_offset
-                    pairs_pause_until = time.time() + 5
+                    pairs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_short', 5)
                 elif focused_panel == "logs":
                     logs_scroll_offset = 0
-                    logs_pause_until = time.time() + 30
+                    logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key.lower() == 'x':
                 expert_mode = not expert_mode
             elif key.lower() == 'm':
@@ -484,7 +522,7 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
                     df = pd.concat([df, new_candles_df])
                     df = df[~df.index.duplicated(keep='last')]
                     df.sort_index(inplace=True)
-                    ohlcv_cache[symbol] = df.tail(10000)
+                    ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
 
                     async with bot_lock:
                         if symbol in bot_state:
@@ -540,7 +578,8 @@ async def sync_live_positions(exchange, data_manager, config):
         existing_pos_list = data_manager.get_position(symbol)
         if existing_pos_list:
             total_existing_amount = sum(p['amount'] for p in existing_pos_list)
-            if abs(total_existing_amount - amount) / amount < 0.001:
+            sync_tolerance = config.get('exchange', {}).get('sync_tolerance', 0.001)
+            if abs(total_existing_amount - amount) / amount < sync_tolerance:
                 sellable_found = True
                 return
 
@@ -550,10 +589,10 @@ async def sync_live_positions(exchange, data_manager, config):
             if symbol in exchange.markets:
                 m = exchange.markets[symbol]
                 min_amt = m['limits']['amount']['min']
-                min_cost = m['limits']['cost']['min'] or 10
+                min_cost = m['limits']['cost']['min'] or config.get('exchange', {}).get('min_notional_fallback', 10.0)
                 if ticker and ticker.get('last') is not None and (amount < min_amt or (amount * ticker['last']) < min_cost):
                     is_dust = True
-            elif amount <= 0.000001: is_dust = True
+            elif amount <= config.get('exchange', {}).get('dust_threshold_amount', 1e-6): is_dust = True
         except: pass
 
         if is_dust: return
@@ -565,7 +604,7 @@ async def sync_live_positions(exchange, data_manager, config):
         accumulated_amount = 0
         try:
             # Add timeout to prevent hanging on slow responses
-            trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=50), timeout=10)
+            trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=50), timeout=config.get('timeouts', {}).get('order_fetch', 10))
             trades.sort(key=lambda t: t['timestamp'], reverse=True)
 
             for t in trades:
@@ -587,7 +626,8 @@ async def sync_live_positions(exchange, data_manager, config):
 
             if accumulated_amount > 0:
                 avg_price = total_cost / accumulated_amount
-                if accumulated_amount < amount * 0.99:
+                sync_threshold = config.get('exchange', {}).get('sync_threshold', 0.99)
+                if accumulated_amount < amount * sync_threshold:
                     ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
                     curr_p = (ticker.get('last') or 0) if ticker else 0
                     if curr_p > 0:
@@ -618,7 +658,7 @@ async def sync_live_positions(exchange, data_manager, config):
             logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
 
     # Parallelize processing of all assets with a semaphore to avoid rate limits
-    sync_semaphore = asyncio.Semaphore(3)
+    sync_semaphore = asyncio.Semaphore(config.get('exchange', {}).get('max_concurrent_syncs', 3))
     async def process_with_semaphore(asset, amount):
         async with sync_semaphore:
             await process_asset(asset, amount)
@@ -644,11 +684,12 @@ def worker_process_init():
         pass
 
 async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor):
-    # 3-minute cooldown per pair
+    # configured cooldown per pair
     async with bot_lock:
         last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
 
-    if time.time() - last_analysis < 180:
+    cooldown = config.get('timeouts', {}).get('analysis_cooldown', 180)
+    if time.time() - last_analysis < cooldown:
         async with analysis_lock:
             if symbol in analysis_in_progress:
                 analysis_in_progress.remove(symbol)
@@ -709,9 +750,9 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             'tema_length': config.get('tema_length')
         }
         if executor:
-            df = await loop.run_in_executor(executor, get_signals, df, common_settings)
+            df = await loop.run_in_executor(executor, get_signals, df, common_settings, False, config)
         else:
-            df = get_signals(df, common_settings)
+            df = get_signals(df, common_settings, global_config=config)
 
         latest_base = df.iloc[-1]
 
@@ -730,9 +771,9 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         mode_settings['device'] = device
 
         if executor:
-            df = await loop.run_in_executor(executor, get_signals, df, mode_settings)
+            df = await loop.run_in_executor(executor, get_signals, df, mode_settings, False, config)
         else:
-            df = get_signals(df, mode_settings)
+            df = get_signals(df, mode_settings, global_config=config)
 
         if df.empty: return
 
@@ -741,9 +782,9 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         sell_candidate = latest.get('sell_signal', False)
         total_score = 1 if buy_candidate else (-1 if sell_candidate else 0)
 
-        # Simple backtest profit metric (last 400 candles) for display
+        # Simple backtest profit metric for display
         profit = 0
-        test_df = df.tail(400)
+        test_df = df.tail(config.get('trading', {}).get('backtest_profit_candles', 400))
         pos = None
         for _, row in test_df.iterrows():
             if row['buy_signal'] and pos is None:
@@ -839,11 +880,14 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
         cost = amount * price
 
         if amount > 0:
+            min_notional = config.get('exchange', {}).get('min_notional_fallback', 10.0)
             if market and 'limits' in market and 'cost' in market['limits'] and market['limits']['cost']['min']:
                 min_notional = float(market['limits']['cost']['min'])
-                if cost < min_notional:
-                    amount = (min_notional / price) * 1.05 # 5% buffer
-                    cost = amount * price
+
+            if cost < min_notional:
+                buffer = config.get('exchange', {}).get('notional_buffer', 1.05)
+                amount = (min_notional / price) * buffer
+                cost = amount * price
 
             base_curr = symbol.split('/')[1]
             free_balance = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
@@ -1036,8 +1080,8 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
         data_manager.add_position(symbol, actual_price, filled_amount, total_fee, trigger_data, timestamp, total_base=total_val)
 
         _, quote = symbol.split('/')
-        logging.info(f"[{symbol}] BUY executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Spent: {format_price(total_val)} {quote})")
-        play_sound("buy")
+        logging.info(f"[{symbol}] BUY executed at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Spent: {format_price(total_val, config=config)} {quote})")
+        play_sound("buy", config)
 
     elif side == 'sell':
         total_net_received = cost - total_fee
@@ -1058,7 +1102,7 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
                 total_entry_cost_of_filled = 0.0
 
                 for idx, i in enumerate(sell_lot_indices):
-                    if remaining_filled <= 1e-10: break
+                    if remaining_filled <= config.get('exchange', {}).get('dust_threshold_cost', 1e-10): break
                     if i >= len(positions): continue
 
                     pos = positions[i]
@@ -1090,8 +1134,8 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
 
                 actual_total_profit = total_net_received - total_entry_cost_of_filled
                 _, quote = symbol.split('/')
-                logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price)} (Filled: {format_amt(filled_amount)}, Profit: {format_price(actual_total_profit)}, Received: {format_price(total_net_received)} {quote})")
-                play_sound("sell")
+                logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Profit: {format_price(actual_total_profit, config=config)}, Received: {format_price(total_net_received, config=config)} {quote})")
+                play_sound("sell", config)
 
         # Fetch fresh balance to ensure dust check and future buys are accurate
         try:
@@ -1193,14 +1237,14 @@ async def is_pair_dust(symbol, exchange, config):
         return amount < 1e-6 # Fallback for unknown markets
 
     limits = market.get('limits', {})
-    min_amt = limits.get('amount', {}).get('min') or 1e-8
-    min_cost = limits.get('cost', {}).get('min') or 0
+    min_amt = limits.get('amount', {}).get('min') or config.get('exchange', {}).get('min_amount_fallback', 1e-8)
+    min_cost = limits.get('cost', {}).get('min') or config.get('exchange', {}).get('min_notional_fallback', 10.0)
 
     if amount < min_amt: return True
     if price > 0 and (amount * price) < min_cost: return True
     
     # Very small absolute amount check
-    if amount < 1e-10: return True
+    if amount < config.get('exchange', {}).get('dust_threshold_cost', 1e-10): return True
 
     return False
 
@@ -1259,6 +1303,7 @@ def make_dashboard(config):
     )
 
     # 2. Pairs Panel
+    ui_cfg = config.get('ui', {})
     table = Table(expand=True, box=None, padding=(0, 1))
     if expert_mode:
         table.add_column("Pair", style="cyan", no_wrap=True)
@@ -1282,7 +1327,8 @@ def make_dashboard(config):
         table.add_column("Aggr", style="white", no_wrap=True)
         table.add_column("Strategy", style="bold cyan", no_wrap=True, width=MAX_STRAT_LEN)
 
-    pairs_height = console.height - 20
+    h_offset = ui_cfg.get('panel_height_offset', 20)
+    pairs_height = console.height - h_offset
     if pairs_height < 3:
         pairs_height = 3
     max_pairs_offset = max(0, len(all_pairs) - pairs_height)
@@ -1326,23 +1372,24 @@ def make_dashboard(config):
                 total_cost = sum(p['entry_price'] * p['amount'] for p in pos)
                 avg_entry_price = total_cost / total_amount if total_amount > 0 else 0
                 total_fee = sum(p.get('entry_fee', 0) for p in pos)
-                amt_str = f"{format_amt(total_amount)} ({len(pos)})"
-                entry_str = format_price(avg_entry_price)
-                fee_str = f"{format_price(total_fee)} {quote}"
+                amt_str = f"{format_amt(total_amount, config=config)} ({len(pos)})"
+                entry_str = format_price(avg_entry_price, config=config)
+                fee_str = f"{format_price(total_fee, config=config)} {quote}"
             else:
-                amt_str = format_amt(pos['amount'])
-                entry_str = format_price(pos['entry_price'])
-                fee_str = f"{format_price(pos.get('entry_fee', 0))} {quote}"
+                amt_str = format_amt(pos['amount'], config=config)
+                entry_str = format_price(pos['entry_price'], config=config)
+                fee_str = f"{format_price(pos.get('entry_fee', 0), config=config)} {quote}"
 
         macd_hist = data.get('macd_hist', 0)
-        macd_str = f"{macd_hist:.4e}" if abs(macd_hist) < 0.001 else f"{macd_hist:.4f}"
+        macd_threshold = ui_cfg.get('macd_display_threshold', 0.001)
+        macd_str = f"{macd_hist:.4e}" if abs(macd_hist) < macd_threshold else f"{macd_hist:.4f}"
 
         display_strat = data.get('strategy') or config.get('pairs', {}).get(symbol, {}).get('strategy', 'N/A')
 
         if expert_mode:
             row_vals = [
                 symbol,
-                f"{format_price(data.get('ema_f', 0))}/{format_price(data.get('ema_s', 0))}",
+                f"{format_price(data.get('ema_f', 0), config=config)}/{format_price(data.get('ema_s', 0), config=config)}",
                 macd_str,
                 f"{data.get('rsi', 0):.2f}",
                 f"{data.get('volatility', 0):.6f}/{data.get('adx', 0):.2f}",
@@ -1356,7 +1403,7 @@ def make_dashboard(config):
             t_style = "green" if tendency == "Bullish" else "bold red" if tendency == "Bearish" else "white"
             row_vals = [
                 symbol,
-                format_price(data.get('price')),
+                format_price(data.get('price'), config=config),
                 amt_str, entry_str, fee_str,
                 f"{data.get('expected_profit', 0):.4f}",
                 f"[{t_style}]{tendency}[/]",
@@ -1425,9 +1472,10 @@ def make_dashboard(config):
 
 async def run_dashboard(config):
     try:
+        refresh_rate = config.get('ui', {}).get('refresh_rate', 4)
         # Start Live immediately but without screen=True to allow startup logs to be visible
         # or use a simplified layout during startup.
-        with Live(make_dashboard(config), refresh_per_second=4, screen=False) as live:
+        with Live(make_dashboard(config), refresh_per_second=refresh_rate, screen=False) as live:
             while not startup_complete and not shutdown_event.is_set():
                 live.update(make_dashboard(config))
                 await asyncio.sleep(0.5)
@@ -1438,26 +1486,27 @@ async def run_dashboard(config):
 
         if shutdown_event.is_set(): return
 
-        with Live(make_dashboard(config), refresh_per_second=4, screen=True) as live:
+        with Live(make_dashboard(config), refresh_per_second=refresh_rate, screen=True) as live:
             while not shutdown_event.is_set():
                 live.update(make_dashboard(config))
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(1.0 / refresh_rate)
     except asyncio.CancelledError:
         pass
     except Exception as e:
         logging.info(f"[red]Dashboard error: {e}")
 
-async def heartbeat_task():
+async def heartbeat_task(config):
     while not shutdown_event.is_set():
-        # Cleanup stuck pending orders (older than 5 minutes)
+        # Cleanup stuck pending orders
+        stuck_timeout = config.get('timeouts', {}).get('stuck_order_cleanup', 300)
         async with pending_orders_lock:
             now = time.time()
-            to_delete = [oid for oid, meta in pending_orders.items() if now - meta.get('timestamp', 0) > 300]
+            to_delete = [oid for oid, meta in pending_orders.items() if now - meta.get('timestamp', 0) > stuck_timeout]
             for oid in to_delete:
                 meta = pending_orders.pop(oid)
                 logging.warning(f"[{meta.get('symbol')}] Removing stuck pending {meta.get('side')} order {oid} after timeout.")
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(config.get('timeouts', {}).get('heartbeat_interval', 30))
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -1495,7 +1544,12 @@ async def main():
                 device = torch.device('cpu')
 
     config = load_config()
+
+    global mc_engine, processed_orders, MAX_STRAT_LEN
+    mc_engine = MonteCarloEngine(config=config)
     mc_engine.set_device(device)
+    processed_orders = deque(maxlen=config.get('ui', {}).get('log_limit', 1000))
+    MAX_STRAT_LEN = max(len(s) for s in STRATEGIES) if STRATEGIES else 20
 
     api_creds = {}
     if os.path.exists('api.json'):
@@ -1508,7 +1562,8 @@ async def main():
     
     exchange = CCXTExchange2(exchange_id,
                              api_creds.get('api_key') or config.get('api_key'),
-                             api_creds.get('api_secret') or config.get('api_secret'))
+                             api_creds.get('api_secret') or config.get('api_secret'),
+                             config=config)
         
     logging.info(f"Connecting to {exchange_id}...")
     try:
@@ -1677,7 +1732,7 @@ async def main():
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager, config, engine)),
         asyncio.create_task(input_task(exchange, config, data_manager, engine)),
-        asyncio.create_task(heartbeat_task())
+        asyncio.create_task(heartbeat_task(config))
     ]
 
     # Start Global OHLCV Watcher
@@ -1715,9 +1770,9 @@ async def main():
                 asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
 
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
-    await asyncio.sleep(4)
+    await asyncio.sleep(config.get('timeouts', {}).get('startup_wait', 4))
     startup_complete = True
-    play_sound("startup")
+    play_sound("startup", config)
     logging.info("[bold green]Bot v2 fully operational.")
 
     # Trigger initial chart and display update

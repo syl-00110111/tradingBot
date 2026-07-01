@@ -370,7 +370,7 @@ STRATEGY_GROUPS = {
 # Global MC engine for reuse
 _mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
 
-def get_signals(df, mode_config, is_scan=False):
+def get_signals(df, mode_config, is_scan=False, global_config=None):
     """
     Répartiteur pour plusieurs stratégies de trading.
 
@@ -394,9 +394,18 @@ def get_signals(df, mode_config, is_scan=False):
     strategy = mode_config.get('strategy')
     device = mode_config.get('device') or torch.device('cpu')
     _mc_engine.set_device(device)
+    if global_config:
+        _mc_engine.config = global_config
+        mc_cfg = global_config.get('monte_carlo', {})
+        _mc_engine.num_simulations = mc_cfg.get('num_simulations', 1000)
+        _mc_engine.timeframe_candles = mc_cfg.get('timeframe_candles', 100)
 
     # Common indicators for tendency and background analysis (Expert Mode)
-    if df.empty or len(df) < 250: return df
+    min_candles = 250
+    if global_config:
+        min_candles = global_config.get('trading', {}).get('min_candles_for_analysis', 250)
+
+    if df.empty or len(df) < min_candles: return df
 
     # For multi-technique scanning, we check if the requested EMA/RSI settings
     # match what's already in the dataframe. If not, we MUST recalculate.
@@ -474,42 +483,44 @@ def get_signals(df, mode_config, is_scan=False):
     # Strategy Selection
     if df.empty:
         return df
+    strat_cfg = global_config.get('strategies', {}) if global_config else {}
+
     if strategy == 'ichimoku_cloud':
-        df = strategy_ichimoku(df, mode_config)
+        df = strategy_ichimoku(df, strat_cfg.get('ichimoku', {}))
     elif strategy == 'parabolic_sar':
-        df = strategy_psar(df, mode_config)
+        df = strategy_psar(df, strat_cfg.get('psar', {}))
     elif strategy == 'bollinger_bands':
-        df = strategy_bollinger(df, mode_config)
+        df = strategy_bollinger(df, strat_cfg.get('bollinger', {}))
     elif strategy == 'donchian_channels':
-        df = strategy_donchian(df, mode_config)
+        df = strategy_donchian(df, strat_cfg.get('donchian', {}))
     elif strategy == 'stochastic_rsi':
-        df = strategy_stoch_rsi(df, mode_config)
+        df = strategy_stoch_rsi(df, strat_cfg.get('stoch_rsi', {}))
     elif strategy == 'williams_r':
-        df = strategy_williams_r(df, mode_config)
+        df = strategy_williams_r(df, strat_cfg.get('williams_r', {}))
     elif strategy == 'vwap_momentum':
         df = strategy_vwap_momentum(df, mode_config)
     elif strategy == 'renko_proxy':
-        df = strategy_renko_proxy(df, mode_config)
+        df = strategy_renko_proxy(df, strat_cfg.get('renko', {}))
     elif strategy == 'ema_rsi_volume':
-        df = strategy_ema_rsi_volume(df, mode_config)
+        df = strategy_ema_rsi_volume(df, strat_cfg.get('ema_rsi_volume', {}))
     elif strategy and strategy.startswith('mc_'):
-        df = handle_mc_strategies(df, strategy, mode_config, is_scan)
+        df = handle_mc_strategies(df, strategy, strat_cfg, is_scan)
     elif strategy == 'whale_detection_proxy':
-        df = strategy_whale_detection(df, mode_config)
+        df = strategy_whale_detection(df, strat_cfg.get('whale_detection', {}))
     elif strategy == 'pump_dump_proxy':
-        df = strategy_pump_dump(df, mode_config)
+        df = strategy_pump_dump(df, strat_cfg.get('pump_dump', {}))
     elif strategy == 'scientific_ensemble':
-        df = strategy_scientific_ensemble(df, mode_config)
+        df = strategy_scientific_ensemble(df, strat_cfg.get('scientific_ensemble', {}))
     elif strategy == 'sentiment_momentum_proxy':
-        df = strategy_sentiment_momentum(df, mode_config)
+        df = strategy_sentiment_momentum(df, strat_cfg.get('sentiment_momentum', {}))
     elif strategy == 'liquidation_cascade_proxy':
-        df = strategy_liquidation_cascade(df, mode_config)
+        df = strategy_liquidation_cascade(df, strat_cfg.get('liquidation_cascade', {}))
     elif strategy == 'adx_trend_strength':
-        df = strategy_adx_trend(df, mode_config)
+        df = strategy_adx_trend(df, strat_cfg.get('adx_trend', {}))
     elif strategy == 'pairs_trading_proxy':
-        df = strategy_pairs_trading(df, mode_config)
+        df = strategy_pairs_trading(df, strat_cfg.get('pairs_trading', {}))
     elif strategy == 'halving_cycle_proxy':
-        df = strategy_halving_cycle(df, mode_config)
+        df = strategy_halving_cycle(df, strat_cfg.get('halving_cycle', {}))
     elif strategy == 'listing_surge_proxy':
         df = strategy_listing_surge(df, mode_config)
     elif strategy == 'tema_crossover':
@@ -647,7 +658,7 @@ def handle_mc_strategies(df, strategy, config, is_scan):
     strategy : str
         The specific MC strategy name (e.g., 'mc_mean_reversion').
     config : dict
-        Strategy configuration.
+        Strategies configuration dictionary.
     is_scan : bool
         Whether the call is for a scan (processes all rows if True,
         only the last row if False).
@@ -665,6 +676,8 @@ def handle_mc_strategies(df, strategy, config, is_scan):
     start_idx = 0 if is_scan else len(df) - 1
 
     if strategy == 'mc_mean_reversion':
+        strat_cfg = config.get('mc_mean_reversion', {})
+        threshold = strat_cfg.get('threshold', 0.7)
         df['sma_20'] = ta.sma(df['close'], length=20)
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
         df['volatility'] = df['returns'].rolling(window=20).std()
@@ -673,12 +686,15 @@ def handle_mc_strategies(df, strategy, config, is_scan):
             row = df.iloc[i]
             if np.isnan(row['volatility']) or row['volatility'] == 0: continue
             prob = _mc_engine.estimate_hit_probability(row['close'], row['sma_20'], row['volatility'], mode='above' if row['close'] < row['sma_20'] else 'below')
-            df.at[df.index[i], 'buy_candidate'] = (row['close'] < row['sma_20']) and (prob > 0.7)
-            df.at[df.index[i], 'sell_candidate'] = (row['close'] > row['sma_20']) and (prob > 0.7)
+            df.at[df.index[i], 'buy_candidate'] = (row['close'] < row['sma_20']) and (prob > threshold)
+            df.at[df.index[i], 'sell_candidate'] = (row['close'] > row['sma_20']) and (prob > threshold)
             df.at[df.index[i], 'score'] = 1 if df.at[df.index[i], 'buy_candidate'] else (-1 if df.at[df.index[i], 'sell_candidate'] else 0)
             df.at[df.index[i], 'tendency'] = "Bullish" if row['close'] > row['sma_20'] else "Bearish"
 
     elif strategy == 'mc_momentum':
+        strat_cfg = config.get('mc_momentum', {})
+        threshold = strat_cfg.get('threshold', 0.6)
+        target_profit = strat_cfg.get('target_profit', 0.02)
         df['sma_20'] = ta.sma(df['close'], length=20)
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
         df['volatility'] = df['returns'].rolling(window=20).std()
@@ -687,10 +703,10 @@ def handle_mc_strategies(df, strategy, config, is_scan):
         for i in range(start_idx, len(df)):
             row = df.iloc[i]
             if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 1.02, row['volatility'], drift=row['drift'], mode='above')
-            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.98, row['volatility'], drift=row['drift'], mode='below')
-            df.at[df.index[i], 'buy_candidate'] = (row['close'] > row['sma_20']) and (prob_up > 0.6)
-            df.at[df.index[i], 'sell_candidate'] = (row['close'] < row['sma_20']) and (prob_down > 0.6)
+            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * (1 + target_profit), row['volatility'], drift=row['drift'], mode='above')
+            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * (1 - target_profit), row['volatility'], drift=row['drift'], mode='below')
+            df.at[df.index[i], 'buy_candidate'] = (row['close'] > row['sma_20']) and (prob_up > threshold)
+            df.at[df.index[i], 'sell_candidate'] = (row['close'] < row['sma_20']) and (prob_down > threshold)
             df.at[df.index[i], 'score'] = 1 if df.at[df.index[i], 'buy_candidate'] else (-1 if df.at[df.index[i], 'sell_candidate'] else 0)
             df.at[df.index[i], 'tendency'] = "Bullish" if row['drift'] > 0 else "Bearish"
 
@@ -704,39 +720,48 @@ def handle_mc_strategies(df, strategy, config, is_scan):
         df['tendency'] = np.where(df['volatility'] < threshold, "Bullish", "Bearish")
 
     elif strategy == 'mc_market_making':
+        strat_cfg = config.get('mc_market_making', {})
+        threshold = strat_cfg.get('threshold', 0.8)
+        target_profit = strat_cfg.get('target_profit', 0.001)
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
         df['volatility'] = df['returns'].rolling(window=10).std()
         for i in range(start_idx, len(df)):
             row = df.iloc[i]
             if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 1.001, row['volatility'], mode='above')
-            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.999, row['volatility'], mode='below')
-            df.at[df.index[i], 'buy_candidate'] = prob_up > 0.8
-            df.at[df.index[i], 'sell_candidate'] = prob_down > 0.8
+            prob_up = _mc_engine.estimate_hit_probability(row['close'], row['close'] * (1 + target_profit), row['volatility'], mode='above')
+            prob_down = _mc_engine.estimate_hit_probability(row['close'], row['close'] * (1 - target_profit), row['volatility'], mode='below')
+            df.at[df.index[i], 'buy_candidate'] = prob_up > threshold
+            df.at[df.index[i], 'sell_candidate'] = prob_down > threshold
             df.at[df.index[i], 'score'] = 1 if df.at[df.index[i], 'buy_candidate'] else (-1 if df.at[df.index[i], 'sell_candidate'] else 0)
             df.at[df.index[i], 'tendency'] = "Neutral"
 
     elif strategy == 'mc_stop_loss_eval':
+        strat_cfg = config.get('mc_stop_loss_eval', {})
+        threshold = strat_cfg.get('threshold', 0.4)
+        sl_pct = strat_cfg.get('sl_pct', 0.05)
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
         df['volatility'] = df['returns'].rolling(window=20).std()
         for i in range(start_idx, len(df)):
             row = df.iloc[i]
             if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            prob_sl = _mc_engine.estimate_hit_probability(row['close'], row['close'] * 0.95, row['volatility'], mode='below')
-            df.at[df.index[i], 'sell_candidate'] = prob_sl > 0.4
+            prob_sl = _mc_engine.estimate_hit_probability(row['close'], row['close'] * (1 - sl_pct), row['volatility'], mode='below')
+            df.at[df.index[i], 'sell_candidate'] = prob_sl > threshold
             df.at[df.index[i], 'score'] = -1 if df.at[df.index[i], 'sell_candidate'] else 0
             df.at[df.index[i], 'tendency'] = "Bearish" if prob_sl > 0.5 else "Neutral"
 
     elif strategy == 'mc_options_pricing':
+        strat_cfg = config.get('mc_options_pricing', {})
+        multiplier = strat_cfg.get('multiplier', 1.5)
+        strike_pct = strat_cfg.get('strike_pct', 0.05)
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
         df['volatility'] = df['returns'].rolling(window=20).std()
         for i in range(start_idx, len(df)):
             row = df.iloc[i]
             if np.isnan(row['volatility']) or row['volatility'] == 0: continue
-            call_p = _mc_engine.price_option(row['close'], row['close'] * 1.05, row['volatility'], option_type='call')
-            put_p = _mc_engine.price_option(row['close'], row['close'] * 0.95, row['volatility'], option_type='put')
-            df.at[df.index[i], 'buy_candidate'] = call_p > put_p * 1.5
-            df.at[df.index[i], 'sell_candidate'] = put_p > call_p * 1.5
+            call_p = _mc_engine.price_option(row['close'], row['close'] * (1 + strike_pct), row['volatility'], option_type='call')
+            put_p = _mc_engine.price_option(row['close'], row['close'] * (1 - strike_pct), row['volatility'], option_type='put')
+            df.at[df.index[i], 'buy_candidate'] = call_p > put_p * multiplier
+            df.at[df.index[i], 'sell_candidate'] = put_p > call_p * multiplier
             df.at[df.index[i], 'score'] = 1 if df.at[df.index[i], 'buy_candidate'] else (-1 if df.at[df.index[i], 'sell_candidate'] else 0)
             df.at[df.index[i], 'tendency'] = "Bullish" if call_p > put_p else "Bearish"
 
@@ -744,7 +769,7 @@ def handle_mc_strategies(df, strategy, config, is_scan):
 
 # --- 1. TREND FOLLOWING ---
 
-def strategy_ichimoku(df, config):
+def strategy_ichimoku(df, strat_config):
     """
     Stratégie Ichimoku Cloud.
 
@@ -755,7 +780,7 @@ def strategy_ichimoku(df, config):
     ----------
     df : pandas.DataFrame
         OHLCV data.
-    config : dict
+    strat_config : dict
         Strategy configuration.
 
     Returns
@@ -763,7 +788,10 @@ def strategy_ichimoku(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    ichi_result = ta.ichimoku(df['high'], df['low'], df['close'])
+    tenkan = strat_config.get('tenkan', 9)
+    kijun = strat_config.get('kijun', 26)
+    senkou = strat_config.get('senkou', 52)
+    ichi_result = ta.ichimoku(df['high'], df['low'], df['close'], tenkan=tenkan, kijun=kijun, senkou=senkou)
     if ichi_result is not None and len(ichi_result) > 0 and ichi_result[0] is not None:
         ichimoku = ichi_result[0]
         df['tenkan'] = ichimoku.iloc[:, 0].fillna(df['close'])
@@ -781,7 +809,7 @@ def strategy_ichimoku(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_psar(df, config):
+def strategy_psar(df, strat_config):
     """
     Stratégie SAR Parabolique.
 
@@ -792,7 +820,7 @@ def strategy_psar(df, config):
     ----------
     df : pandas.DataFrame
         OHLCV data.
-    config : dict
+    strat_config : dict
         Strategy configuration.
 
     Returns
@@ -800,7 +828,9 @@ def strategy_psar(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    psar = ta.psar(df['high'], df['low'], df['close'])
+    af = strat_config.get('af', 0.02)
+    max_af = strat_config.get('max_af', 0.2)
+    psar = ta.psar(df['high'], df['low'], df['close'], af=af, max_af=max_af)
     if psar is not None and not psar.empty:
         l_col = [c for c in psar.columns if 'PSARl' in c]
         s_col = [c for c in psar.columns if 'PSARs' in c]
@@ -819,7 +849,7 @@ def strategy_psar(df, config):
 
 # --- 2. RANGE ---
 
-def strategy_bollinger(df, config):
+def strategy_bollinger(df, strat_config):
     """
     Stratégie Bandes de Bollinger.
 
@@ -838,7 +868,10 @@ def strategy_bollinger(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    bb = ta.bbands(df['close'], length=20, std=2)
+    length = strat_config.get('length', 20)
+    std = strat_config.get('std', 2)
+    rsi_oversold = strat_config.get('rsi_oversold', 35)
+    bb = ta.bbands(df['close'], length=length, std=std)
     if bb is not None and not bb.empty:
         df['bb_low'] = bb.iloc[:, 0].fillna(df['close'])
         df['bb_mid'] = bb.iloc[:, 1].fillna(df['close'])
@@ -846,10 +879,12 @@ def strategy_bollinger(df, config):
     else:
         df['bb_low'] = df['bb_mid'] = df['bb_high'] = df['close']
 
+    # RSI length is currently hardcoded to 14 in this strategy, should probably use common rsi if possible
+    # but for now let's use the provided logic
     df['rsi'] = ta.rsi(df['close'], length=14)
     df['rsi'] = df['rsi'].fillna(50)
 
-    df['buy_candidate'] = (df['close'] <= df['bb_low']) & (df['rsi'] < 35)
+    df['buy_candidate'] = (df['close'] <= df['bb_low']) & (df['rsi'] < rsi_oversold)
     df['sell_candidate'] = (df['close'] >= df['bb_mid'])
 
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
@@ -859,7 +894,7 @@ def strategy_bollinger(df, config):
 
 # --- 3. BREAKOUT ---
 
-def strategy_donchian(df, config):
+def strategy_donchian(df, strat_config):
     """
     Stratégie Canaux de Donchian.
 
@@ -878,7 +913,8 @@ def strategy_donchian(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    dc = ta.donchian(df['high'], df['low'], length=20)
+    length = strat_config.get('length', 20)
+    dc = ta.donchian(df['high'], df['low'], length=length)
     if dc is not None and not dc.empty:
         df['dc_upper'] = dc.iloc[:, 0]
         df['dc_lower'] = dc.iloc[:, 2]
@@ -894,7 +930,7 @@ def strategy_donchian(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_stoch_rsi(df, config):
+def strategy_stoch_rsi(df, strat_config):
     """
     Stratégie RSI Stochastique.
 
@@ -913,21 +949,28 @@ def strategy_stoch_rsi(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
+    length = strat_config.get('length', 14)
+    rsi_length = strat_config.get('rsi_length', 14)
+    k = strat_config.get('k', 3)
+    d = strat_config.get('d', 3)
+    oversold = strat_config.get('oversold', 20)
+    overbought = strat_config.get('overbought', 80)
+
+    stoch = ta.stochrsi(df['close'], length=length, rsi_length=rsi_length, k=k, d=d)
     if stoch is not None and not stoch.empty:
         df['stoch_k'] = stoch.iloc[:, 0]
     else:
         df['stoch_k'] = 50
 
-    df['buy_candidate'] = (df['stoch_k'] < 20) & (df['stoch_k'] > df['stoch_k'].shift(1))
-    df['sell_candidate'] = (df['stoch_k'] > 80) & (df['stoch_k'] < df['stoch_k'].shift(1))
+    df['buy_candidate'] = (df['stoch_k'] < oversold) & (df['stoch_k'] > df['stoch_k'].shift(1))
+    df['sell_candidate'] = (df['stoch_k'] > overbought) & (df['stoch_k'] < df['stoch_k'].shift(1))
 
-    df['score'] = np.where(df['stoch_k'] < 20, 1, np.where(df['stoch_k'] > 80, -1, 0))
+    df['score'] = np.where(df['stoch_k'] < oversold, 1, np.where(df['stoch_k'] > overbought, -1, 0))
     df['tendency'] = np.where(df['stoch_k'] > 50, "Bullish", "Bearish")
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_williams_r(df, config):
+def strategy_williams_r(df, strat_config):
     """
     Stratégie Williams %R.
 
@@ -946,12 +989,15 @@ def strategy_williams_r(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['willr'] = ta.willr(df['high'], df['low'], df['close'], length=14)
+    length = strat_config.get('length', 14)
+    oversold = strat_config.get('oversold', -80)
+    overbought = strat_config.get('overbought', -20)
+    df['willr'] = ta.willr(df['high'], df['low'], df['close'], length=length)
 
-    df['buy_candidate'] = (df['willr'] < -80) & (df['willr'] > df['willr'].shift(1))
-    df['sell_candidate'] = (df['willr'] > -20) & (df['willr'] < df['willr'].shift(1))
+    df['buy_candidate'] = (df['willr'] < oversold) & (df['willr'] > df['willr'].shift(1))
+    df['sell_candidate'] = (df['willr'] > overbought) & (df['willr'] < df['willr'].shift(1))
 
-    df['score'] = np.where(df['willr'] < -80, 1, np.where(df['willr'] > -20, -1, 0))
+    df['score'] = np.where(df['willr'] < oversold, 1, np.where(df['willr'] > overbought, -1, 0))
     df['tendency'] = np.where(df['willr'] > -50, "Bullish", "Bearish")
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
@@ -987,7 +1033,7 @@ def strategy_vwap_momentum(df, config):
 
 # --- 5. SCALPING (Proxies) ---
 
-def strategy_renko_proxy(df, config):
+def strategy_renko_proxy(df, strat_config):
     """
     Stratégie Proxy Renko.
 
@@ -1006,7 +1052,7 @@ def strategy_renko_proxy(df, config):
         Updated dataframe with buy/sell signals.
     """
     df['body'] = (df['close'] - df['open']).abs()
-    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=strat_config.get('atr_length', 14))
 
     df['buy_candidate'] = (df['body'] > df['atr']) & (df['close'] > df['open'])
     df['sell_candidate'] = (df['body'] > df['atr']) & (df['close'] < df['open'])
@@ -1016,7 +1062,7 @@ def strategy_renko_proxy(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_ema_rsi_volume(df, config):
+def strategy_ema_rsi_volume(df, strat_config):
     """
     Stratégie Hybride EMA, RSI et Volume.
 
@@ -1034,10 +1080,15 @@ def strategy_ema_rsi_volume(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    ema_9 = ta.ema(df['close'], length=9); df['ema_9'] = ema_9.fillna(df['close']) if ema_9 is not None else df['close']
-    ema_21 = ta.ema(df['close'], length=21); df['ema_21'] = ema_21.fillna(df['close']) if ema_21 is not None else df['close']
-    rsi_14 = ta.rsi(df['close'], length=14); df['rsi'] = rsi_14.fillna(50) if rsi_14 is not None else 50
-    vol_ma_20 = ta.sma(df['volume'], length=20); df['vol_ma'] = vol_ma_20.fillna(df['volume']) if vol_ma_20 is not None else df['volume']
+    ema_fast = strat_config.get('ema_fast', 9)
+    ema_slow = strat_config.get('ema_slow', 21)
+    rsi_length = strat_config.get('rsi_length', 14)
+    vol_ma_length = strat_config.get('vol_ma', 20)
+
+    ema_9 = ta.ema(df['close'], length=ema_fast); df['ema_9'] = ema_9.fillna(df['close']) if ema_9 is not None else df['close']
+    ema_21 = ta.ema(df['close'], length=ema_slow); df['ema_21'] = ema_21.fillna(df['close']) if ema_21 is not None else df['close']
+    rsi_14 = ta.rsi(df['close'], length=rsi_length); df['rsi'] = rsi_14.fillna(50) if rsi_14 is not None else 50
+    vol_ma_20 = ta.sma(df['volume'], length=vol_ma_length); df['vol_ma'] = vol_ma_20.fillna(df['volume']) if vol_ma_20 is not None else df['volume']
 
     df['buy_candidate'] = (df['ema_9'] > df['ema_21']) & (df['rsi'] > 50) & (df['volume'] > df['vol_ma'])
     df['sell_candidate'] = (df['ema_9'] < df['ema_21'])
@@ -1047,7 +1098,7 @@ def strategy_ema_rsi_volume(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_whale_detection(df, config):
+def strategy_whale_detection(df, strat_config):
     """
     Stratégie de détection de baleines (Proxy On-Chain).
 
@@ -1071,11 +1122,13 @@ def strategy_whale_detection(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    df['vol_ma'] = ta.sma(df['volume'], length=20)
-    df['vol_std'] = df['volume'].rolling(window=20).std()
+    length = strat_config.get('length', 20)
+    std_devs = strat_config.get('std_devs', 3)
+    df['vol_ma'] = ta.sma(df['volume'], length=length)
+    df['vol_std'] = df['volume'].rolling(window=length).std()
 
-    # Significant volume spike: volume > 3 standard deviations above mean
-    df['whale_spike'] = df['volume'] > (df['vol_ma'] + 3 * df['vol_std'])
+    # Significant volume spike: volume > N standard deviations above mean
+    df['whale_spike'] = df['volume'] > (df['vol_ma'] + std_devs * df['vol_std'])
 
     # Buy if volume spike and price moves up
     df['buy_candidate'] = df['whale_spike'] & (df['close'] > df['close'].shift(1))
@@ -1086,7 +1139,7 @@ def strategy_whale_detection(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_pump_dump(df, config):
+def strategy_pump_dump(df, strat_config):
     """
     Stratégie de détection de Pump and Dump.
 
@@ -1110,11 +1163,13 @@ def strategy_pump_dump(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
+    vol_surge = strat_config.get('vol_surge', 5.0)
+    price_surge = strat_config.get('price_surge', 0.05)
     df['vol_change'] = df['volume'].pct_change()
     df['price_change'] = df['close'].pct_change()
 
     # Pump: Price and Volume both surge suddenly
-    df['pump_detected'] = (df['vol_change'] > 5.0) & (df['price_change'] > 0.05)
+    df['pump_detected'] = (df['vol_change'] > vol_surge) & (df['price_change'] > price_surge)
 
     # Dump: After a pump, price stops growing but volume remains high or drops
     df['buy_candidate'] = False # Don't buy pumps
@@ -1125,7 +1180,7 @@ def strategy_pump_dump(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_scientific_ensemble(df, config):
+def strategy_scientific_ensemble(df, strat_config):
     """
     Stratégie d'ensemble scientifique (Proxy modèles ML).
 
@@ -1156,9 +1211,11 @@ def strategy_scientific_ensemble(df, config):
     df['bb_high'] = bb.iloc[:, 2] if bb is not None else df['close']
 
     # Score-based approach
+    rsi_oversold = strat_config.get('rsi_oversold', 35)
+    rsi_overbought = strat_config.get('rsi_overbought', 65)
     df['score'] = 0
-    df.loc[df['rsi'] < 35, 'score'] += 1
-    df.loc[df['rsi'] > 65, 'score'] -= 1
+    df.loc[df['rsi'] < rsi_oversold, 'score'] += 1
+    df.loc[df['rsi'] > rsi_overbought, 'score'] -= 1
     df.loc[df['macd_val'] > df['macd_sig'], 'score'] += 1
     df.loc[df['macd_val'] < df['macd_sig'], 'score'] -= 1
     df.loc[df['close'] < df['bb_low'], 'score'] += 1
@@ -1172,7 +1229,7 @@ def strategy_scientific_ensemble(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_sentiment_momentum(df, config):
+def strategy_sentiment_momentum(df, strat_config):
     """
     Stratégie de momentum de sentiment (Proxy Social Media).
 
@@ -1196,21 +1253,25 @@ def strategy_sentiment_momentum(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
+    roc_length = strat_config.get('roc_length', 10)
+    rsi_limit = strat_config.get('rsi_limit', 60)
+    rsi_floor = strat_config.get('rsi_floor', 40)
+
     rsi_14 = ta.rsi(df['close'], length=14); df['rsi'] = rsi_14.fillna(50) if rsi_14 is not None else 50
-    roc_10 = ta.roc(df['close'], length=10); df['roc'] = roc_10.fillna(0) if roc_10 is not None else 0
+    roc_10 = ta.roc(df['close'], length=roc_length); df['roc'] = roc_10.fillna(0) if roc_10 is not None else 0
     df['acceleration'] = df['roc'].diff().fillna(0)
 
     # Positive sentiment: Price accelerating upwards + RSI not yet overbought
-    df['buy_candidate'] = (df['acceleration'] > 0) & (df['roc'] > 0) & (df['rsi'] < 60)
+    df['buy_candidate'] = (df['acceleration'] > 0) & (df['roc'] > 0) & (df['rsi'] < rsi_limit)
     # Negative sentiment: Price decelerating or dropping fast + RSI oversold (panic)
-    df['sell_candidate'] = (df['acceleration'] < 0) & (df['roc'] < 0) & (df['rsi'] > 40)
+    df['sell_candidate'] = (df['acceleration'] < 0) & (df['roc'] < 0) & (df['rsi'] > rsi_floor)
 
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['roc'] > 0, "Bullish", "Bearish")
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_liquidation_cascade(df, config):
+def strategy_liquidation_cascade(df, strat_config):
     """
     Stratégie de cascade de liquidations.
 
@@ -1233,12 +1294,14 @@ def strategy_liquidation_cascade(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
+    pct_trigger = strat_config.get('pct_trigger', 0.02)
+    vol_multiplier = strat_config.get('vol_multiplier', 2.0)
     df['pct_change'] = df['close'].pct_change().fillna(0)
     df['vol_ma'] = ta.sma(df['volume'], length=20).fillna(df['volume'])
 
-    # Cascade: Price drops > 2% in one candle + Volume > 2x average
-    df['long_liquidation'] = (df['pct_change'] < -0.02) & (df['volume'] > df['vol_ma'] * 2)
-    df['short_liquidation'] = (df['pct_change'] > 0.02) & (df['volume'] > df['vol_ma'] * 2)
+    # Cascade: Price drops > pct_trigger in one candle + Volume > multiplier x average
+    df['long_liquidation'] = (df['pct_change'] < -pct_trigger) & (df['volume'] > df['vol_ma'] * vol_multiplier)
+    df['short_liquidation'] = (df['pct_change'] > pct_trigger) & (df['volume'] > df['vol_ma'] * vol_multiplier)
 
     # Buy the blood (after cascade)
     df['buy_candidate'] = df['long_liquidation'].shift(1) & (df['close'] > df['close'].shift(1))
@@ -1250,7 +1313,7 @@ def strategy_liquidation_cascade(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_adx_trend(df, config):
+def strategy_adx_trend(df, strat_config):
     """
     Stratégie de force de tendance ADX.
 
@@ -1273,6 +1336,7 @@ def strategy_adx_trend(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
+    threshold = strat_config.get('threshold', 25)
     adx = ta.adx(df['high'], df['low'], df['close'])
     if adx is not None and not adx.empty:
         df['adx'] = adx.iloc[:, 0].fillna(0)
@@ -1281,15 +1345,15 @@ def strategy_adx_trend(df, config):
     else:
         df['adx'] = df['dmp'] = df['dmn'] = 0
 
-    df['buy_candidate'] = (df['adx'] > 25) & (df['dmp'] > df['dmn'])
-    df['sell_candidate'] = (df['adx'] > 25) & (df['dmn'] > df['dmp'])
+    df['buy_candidate'] = (df['adx'] > threshold) & (df['dmp'] > df['dmn'])
+    df['sell_candidate'] = (df['adx'] > threshold) & (df['dmn'] > df['dmp'])
 
     df['score'] = np.where(df['buy_candidate'], 1, np.where(df['sell_candidate'], -1, 0))
     df['tendency'] = np.where(df['dmp'] > df['dmn'], "Bullish", "Bearish")
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_pairs_trading(df, config):
+def strategy_pairs_trading(df, strat_config):
     """
     Stratégie Pairs Trading (Proxy Arbitrage Statistique).
 
@@ -1312,18 +1376,20 @@ def strategy_pairs_trading(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    ma_50 = ta.sma(df['close'], length=50); df['ma_50'] = ma_50.fillna(df['close']) if ma_50 is not None else df['close']
-    df['z_score'] = (df['close'] - df['ma_50']) / df['close'].rolling(window=50).std()
+    ma_length = strat_config.get('ma_length', 50)
+    z_threshold = strat_config.get('z_threshold', 2.0)
+    ma_50 = ta.sma(df['close'], length=ma_length); df['ma_50'] = ma_50.fillna(df['close']) if ma_50 is not None else df['close']
+    df['z_score'] = (df['close'] - df['ma_50']) / df['close'].rolling(window=ma_length).std()
 
-    df['buy_candidate'] = df['z_score'] < -2.0
-    df['sell_candidate'] = df['z_score'] > 2.0
+    df['buy_candidate'] = df['z_score'] < -z_threshold
+    df['sell_candidate'] = df['z_score'] > z_threshold
 
     df['score'] = np.where(df['z_score'] < 0, 1, -1)
     df['tendency'] = np.where(df['z_score'] > 0, "Bullish", "Bearish")
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_halving_cycle(df, config):
+def strategy_halving_cycle(df, strat_config):
     """
     Stratégie cycle de halving Bitcoin.
 
@@ -1346,10 +1412,12 @@ def strategy_halving_cycle(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    ema_200 = ta.ema(df['close'], length=200); df['ema_200'] = ema_200.fillna(df['close']) if ema_200 is not None else df['close']
-    ema_50 = ta.ema(df['close'], length=50); df['ema_50'] = ema_50.fillna(df['close']) if ema_50 is not None else df['close']
+    ema_long_len = strat_config.get('ema_long', 200)
+    ema_short_len = strat_config.get('ema_short', 50)
+    ema_200 = ta.ema(df['close'], length=ema_long_len); df['ema_200'] = ema_200.fillna(df['close']) if ema_200 is not None else df['close']
+    ema_50 = ta.ema(df['close'], length=ema_short_len); df['ema_50'] = ema_50.fillna(df['close']) if ema_50 is not None else df['close']
 
-    # Buy only when above 200 EMA (Bull market cycle)
+    # Buy only when above long EMA (Bull market cycle)
     df['buy_candidate'] = (df['close'] > df['ema_200']) & (df['close'] > df['ema_50']) & (df['close'].shift(1) <= df['ema_50'].shift(1))
     df['sell_candidate'] = (df['close'] < df['ema_50'])
 
@@ -1358,7 +1426,7 @@ def strategy_halving_cycle(df, config):
 
     df['buy_signal'] = df['buy_candidate']; df['sell_signal'] = df['sell_candidate']; return df
 
-def strategy_listing_surge(df, config):
+def strategy_listing_surge(df, strat_config):
     """
     Stratégie de pic de cotation (Listing).
 
@@ -1382,11 +1450,14 @@ def strategy_listing_surge(df, config):
     pandas.DataFrame
         Updated dataframe with buy/sell signals.
     """
-    vol_ma_50 = ta.sma(df['volume'], length=50); df['vol_ma'] = vol_ma_50.fillna(df['volume']) if vol_ma_50 is not None else df['volume']
-    df['price_std'] = df['close'].rolling(window=50).std().fillna(0)
+    ma_length = strat_config.get('ma_length', 50)
+    vol_multiplier = strat_config.get('vol_multiplier', 5.0)
+    price_std_devs = strat_config.get('price_std_devs', 2.0)
+    vol_ma_50 = ta.sma(df['volume'], length=ma_length); df['vol_ma'] = vol_ma_50.fillna(df['volume']) if vol_ma_50 is not None else df['volume']
+    df['price_std'] = df['close'].rolling(window=ma_length).std().fillna(0)
 
-    # Surge: Volume > 10x average + Price breakout
-    df['surge'] = (df['volume'] > df['vol_ma'] * 5) & (df['close'] > df['close'].shift(1) + 2 * df['price_std'])
+    # Surge: Volume > multiplier x average + Price breakout
+    df['surge'] = (df['volume'] > df['vol_ma'] * vol_multiplier) & (df['close'] > df['close'].shift(1) + price_std_devs * df['price_std'])
 
     df['buy_candidate'] = df['surge']
     df['sell_candidate'] = df['close'] < df['close'].shift(3) # Exit fast after surge
