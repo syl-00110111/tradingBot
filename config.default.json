@@ -9,6 +9,7 @@
     "min_profit_margin": 0.01,
     "dynamic_pair_multiplier": 1.4,
     "global_risk_multiplier": 1.1,
+    "mc_threshold": 0.86,
     "win_streak_bonus": {
         "enabled": true,
         "threshold": 2,
