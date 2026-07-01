@@ -1,9 +1,9 @@
 {
     "max_open_positions": 10,
     "max_lots_per_symbol": 1,
-    "max_trade_percentage": 12.0,
+    "max_trade_percentage": 2.0,
     "min_profit_margin": 0.01,
-    "dynamic_pair_multiplier": 2.0,
+    "dynamic_pair_multiplier": 1.4,
     "global_risk_multiplier": 1.1,
     "win_streak_bonus": {
         "enabled": true,
@@ -11,12 +11,12 @@
         "multiplier": 1.2
     },
     "no_signal_threshold": 240,
-    "confirmation_window": 3,
-    "tema_length": 20,
-    "ema_fast": 8,
-    "ema_slow": 18,
-    "macd_fast": 12,
-    "macd_slow": 26,
-    "macd_signal": 9,
-    "rsi_period": 14
+    "confirmation_window": 2,
+    "tema_length": 9,
+    "ema_fast": 5,
+    "ema_slow": 20,
+    "macd_fast": 8,
+    "macd_slow": 20,
+    "macd_signal": 5,
+    "rsi_period": 7
 }
