@@ -53,7 +53,8 @@ class TradingEngine:
             "macd_slow": self.config.get('macd_slow'),
             "macd_signal": self.config.get('macd_signal'),
             "rsi_period": self.config.get('rsi_period'),
-            "rsi_buy": 30, "rsi_sell": 70,
+            "rsi_buy": self.config.get('rsi_buy'),
+            "rsi_sell": self.config.get('rsi_sell'),
             "confirmation_window": self.config.get('confirmation_window'),
             "effective_aggr": aggr
         }
