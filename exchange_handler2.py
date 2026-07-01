@@ -137,6 +137,7 @@ class CCXTExchange2(ExchangeInterface2):
         finally:
             for t in tasks:
                 t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def watch_balance(self):
         while True:
