@@ -12,6 +12,7 @@ import sys
 import platform
 import random
 import math
+import numpy as np
 import threading
 import queue
 from collections import deque
@@ -341,10 +342,13 @@ def render_ascii_chart(symbol, config):
 
     # Use system local time for labels
     # df.index is already in UTC from pd.to_datetime(..., unit='ms') in watch_ohlcv_global_task
-    local_times = df.index.tz_localize(timezone.utc).tz_convert(None).to_pydatetime()
-    # If the system local timezone is needed, we should use datetime.now().astimezone().tzinfo
+    if df.index.tz is None:
+        utc_times = df.index.tz_localize(timezone.utc)
+    else:
+        utc_times = df.index.tz_convert(timezone.utc)
+
     local_tz = datetime.now().astimezone().tzinfo
-    labels = [t.replace(tzinfo=timezone.utc).astimezone(local_tz).strftime("%H:%M:%S") for t in local_times]
+    labels = [t.astimezone(local_tz).strftime("%H:%M:%S") for t in utc_times]
 
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
@@ -352,9 +356,9 @@ def render_ascii_chart(symbol, config):
     df_plot.reset_index(drop=True, inplace=True)
 
     plt_ascii.candlestick(indices, df_plot)
-    plt_ascii.xticks(indices, labels)
     # Reducing the number of labels to avoid overlap
-    plt_ascii.ticks(min(10, len(df)))
+    tick_indices = np.linspace(0, len(df) - 1, min(10, len(df)), dtype=int).tolist()
+    plt_ascii.xticks(tick_indices, [labels[i] for i in tick_indices])
 
     plt_ascii.subplot(2, 1)
     plt_ascii.clf()
@@ -362,8 +366,7 @@ def render_ascii_chart(symbol, config):
     volumes = df['volume'].tolist()
     plt_ascii.bar(indices, volumes, color='blue', label='Volume')
     plt_ascii.title("Volume")
-    plt_ascii.xticks(indices, labels)
-    plt_ascii.ticks(min(10, len(df)))
+    plt_ascii.xticks(tick_indices, [labels[i] for i in tick_indices])
 
     width = console.width - 4
     h_offset = ui_cfg.get('panel_height_offset', 20)
@@ -840,7 +843,6 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             mc_score = await loop.run_in_executor(None, mc_engine.validate_strategy, df)
             mc_threshold = config.get('mc_threshold', 0.86)
             if mc_score >= mc_threshold:
-                logging.info(f"[{symbol}] Buy signal validated by Monte Carlo (Score: {mc_score:.2f}). Proceeding.")
                 await execute_buy(exchange, symbol, latest, data_manager, engine, config, strategy=strat, candle_count=len(df))
             else:
                 async with bot_lock:
