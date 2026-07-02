@@ -111,32 +111,35 @@ class CCXTExchange2(ExchangeInterface2):
         if not symbols:
             return
 
+        # Defensive normalization to a list of symbol strings
         if isinstance(symbols, str):
             symbol_list = [symbols]
-        else:
-            # symbol_list should be a list of symbols: ['BTC/USDT', 'ETH/USDT']
-            # symbols might be [['BTC/USDT', '1s'], ...] or ['BTC/USDT', ...]
+        elif hasattr(symbols, '__iter__'):
             symbol_list = []
             for s in symbols:
                 if isinstance(s, (list, tuple)) and len(s) > 0:
-                    symbol_list.append(s[0])
+                    symbol_list.append(str(s[0]))
                 elif isinstance(s, str):
                     symbol_list.append(s)
                 else:
                     symbol_list.append(str(s))
+        else:
+            symbol_list = [str(symbols)]
+
+        # Filter symbols to only those that exist in the exchange markets to avoid character-iteration bugs
+        # and ensure we only call for valid symbols.
+        symbol_list = [s for s in symbol_list if s in self.markets and len(s) > 1]
+
+        if not symbol_list:
+            return
 
         while True:
             try:
-                # CCXT Pro watchOHLCVForSymbols returns the candles for the symbol that was updated.
-                # It typically returns a dictionary { symbol: { timeframe: candles } }
-                # or similar depending on the exchange.
-                # However, many CCXT Pro implementations return the latest updated candles directly
-                # or as a dictionary indexed by symbol.
-                result = await self.exchange.watch_ohlcv_for_symbols(symbol_list, timeframe)
+                # Use the camelCase method watchOHLCVForSymbols as requested.
+                # It typically returns a dictionary { symbol: { timeframe: candles } } or { symbol: candles }.
+                result = await self.exchange.watchOHLCVForSymbols(symbol_list, timeframe)
 
-                # Handling different CCXT Pro return formats for watchOHLCVForSymbols
                 if isinstance(result, dict):
-                    # Format: { symbol: { timeframe: [candles] } } or { symbol: [candles] }
                     for symbol, data in result.items():
                         if isinstance(data, dict):
                             # Format: { symbol: { timeframe: [candles] } }
@@ -145,9 +148,6 @@ class CCXTExchange2(ExchangeInterface2):
                         else:
                             # Format: { symbol: [candles] }
                             yield (symbol, timeframe, data)
-                elif isinstance(result, list) and len(result) > 0:
-                    # Handle unexpected list return formats if necessary
-                    pass
             except Exception as e:
                 logging.error(f"Error in watch_ohlcv_for_symbols: {e}")
                 await asyncio.sleep(1)
