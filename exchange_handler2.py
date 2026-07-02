@@ -135,8 +135,9 @@ class CCXTExchange2(ExchangeInterface2):
         if not ohlcv_input:
             return
 
-        # Track last yielded timestamp per (symbol, timeframe) to avoid redundant updates.
-        last_yielded_ts = {}
+        # Track last yielded state (timestamp, close_price) to avoid redundant updates
+        # while still allowing intra-candle price updates.
+        last_yielded_state = {}
         # Pre-map symbols to timeframes for faster lookup
         symbol_to_tf = {p[0]: p[1] for p in ohlcv_input}
 
@@ -148,22 +149,22 @@ class CCXTExchange2(ExchangeInterface2):
 
                 if isinstance(result, dict):
                     for symbol, data in result.items():
+                        # CCXT Pro may return { symbol: [candles] } or { symbol: { timeframe: [candles] } }
                         if isinstance(data, dict):
-                            # Format: { symbol: { timeframe: [candles] } }
                             for tf, candles in data.items():
                                 if not candles: continue
-                                current_ts = candles[-1][0]
-                                if current_ts > last_yielded_ts.get((symbol, tf), 0):
-                                    last_yielded_ts[(symbol, tf)] = current_ts
+                                last_candle = candles[-1]
+                                current_state = (last_candle[0], last_candle[4]) # (timestamp, close)
+                                if current_state != last_yielded_state.get((symbol, tf)):
+                                    last_yielded_state[(symbol, tf)] = current_state
                                     updates.append((symbol, tf, candles))
-                        else:
-                            # Format: { symbol: [candles] }
+                        elif isinstance(data, list):
                             if not data: continue
-                            current_ts = data[-1][0]
-                            # Recover timeframe from pre-mapped input
+                            last_candle = data[-1]
                             tf_found = symbol_to_tf.get(symbol, timeframe)
-                            if current_ts > last_yielded_ts.get((symbol, tf_found), 0):
-                                last_yielded_ts[(symbol, tf_found)] = current_ts
+                            current_state = (last_candle[0], last_candle[4])
+                            if current_state != last_yielded_state.get((symbol, tf_found)):
+                                last_yielded_state[(symbol, tf_found)] = current_state
                                 updates.append((symbol, tf_found, data))
 
                 if updates:

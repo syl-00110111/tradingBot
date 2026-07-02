@@ -544,17 +544,12 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
 
                 # Update all prices in the batch first for maximum perceived responsiveness in the dashboard
                 async with bot_lock:
-                    for data in updates:
-                        if isinstance(data, tuple) and len(data) == 3:
-                            symbol, _, candles = data
-                            if symbol in bot_state:
-                                bot_state[symbol]['price'] = candles[-1][4]
+                    for update in updates:
+                        symbol, _, candles = update
+                        if symbol in bot_state:
+                            bot_state[symbol]['price'] = candles[-1][4]
 
-                for data in updates:
-                    if isinstance(data, tuple) and len(data) == 3:
-                        symbol, timeframe, candles = data
-                    else: continue
-
+                for symbol, timeframe, candles in updates:
                     async with ohlcv_lock:
                         if symbol not in ohlcv_cache:
                             ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
@@ -568,8 +563,12 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
                         if not df.empty and last_ts == df.index[-1]:
                             # In-place update of the most recent candle
                             df.iloc[-1] = last_candle[1:]
+                        elif not df.empty and last_ts > df.index[-1] and len(candles) == 1:
+                            # Efficiently append a single new candle
+                            new_row = pd.DataFrame([last_candle[1:]], columns=['open', 'high', 'low', 'close', 'volume'], index=[last_ts])
+                            ohlcv_cache[symbol] = pd.concat([df, new_row]).tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
                         else:
-                            # Full update for gaps or new candles
+                            # Full update for gaps or multiple new candles
                             new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                             new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
                             new_candles_df.set_index('timestamp', inplace=True)
@@ -579,11 +578,16 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
                             df.sort_index(inplace=True)
                             ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
 
-                    # Trigger analysis
-                    async with analysis_lock:
-                        if symbol not in analysis_in_progress:
-                            analysis_in_progress.add(symbol)
-                            asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
+                    # Trigger analysis only if cooldown passed to avoid task spam
+                    async with bot_lock:
+                        last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
+
+                    cooldown = config.get('timeouts', {}).get('analysis_cooldown', 12)
+                    if time.time() - last_analysis >= cooldown:
+                        async with analysis_lock:
+                            if symbol not in analysis_in_progress:
+                                analysis_in_progress.add(symbol)
+                                asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
 
         except Exception as e:
             if not shutdown_event.is_set():
@@ -739,7 +743,8 @@ def worker_process_init():
         pass
 
 async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor):
-    # configured cooldown per pair
+    # Cooldown check is now also performed before calling the wrapper for efficiency,
+    # but kept here for safety.
     async with bot_lock:
         last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
 
@@ -751,14 +756,21 @@ async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, patt
         return
 
     try:
-        await analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor)
+        # Added timeout to prevent individual analysis tasks from locking up indefinitely
+        analysis_timeout = config.get('timeouts', {}).get('analysis_timeout', 60)
+        await asyncio.wait_for(
+            analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor),
+            timeout=analysis_timeout
+        )
+    except asyncio.TimeoutError:
+        logging.warning(f"Analysis for {symbol} timed out after {analysis_timeout}s.")
     except Exception as e:
         logging.error(f"Error in analysis for {symbol}: {e}", exc_info=True)
     finally:
         async with bot_lock:
             if symbol in bot_state:
                 bot_state[symbol]['last_analysis_ts'] = time.time()
-                # Schedule strategy change on cooldown expiry
+                # Schedule strategy change
                 bot_state[symbol]['strategy'] = random.choice(STRATEGIES)
         async with analysis_lock:
             if symbol in analysis_in_progress:
@@ -789,13 +801,23 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             if symbol not in ohlcv_cache: return
             df = ohlcv_cache[symbol].copy()
 
-        if df.empty or len(df) < 250: return
+        if df.empty or len(df) < config.get('trading', {}).get('min_candles_for_analysis', 250): return
 
         loop = asyncio.get_event_loop()
 
-        # Populate common indicators
-        common_settings = {
+        # Single Strategy Evaluation - Determined BEFORE executor call to consolidate
+        pair_config = config['pairs'].get(symbol, {})
+        strat = pair_config.get('strategy') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('strategy') or bot_state.get(symbol, {}).get('strategy')
+        aggr = pair_config.get('aggr') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('aggr') or bot_state.get(symbol, {}).get('aggr')
+
+        if not strat: strat = random.choice(STRATEGIES)
+        if not aggr: aggr = random.choice(['normal', 'aggressive', 'dynamic'])
+
+        # Consolidate indicator settings
+        settings = {
             'device': device,
+            'strategy': strat,
+            'aggr': aggr,
             'ema_fast': config.get('ema_fast'),
             'ema_slow': config.get('ema_slow'),
             'macd_fast': config.get('macd_fast'),
@@ -804,31 +826,12 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             'rsi_period': config.get('rsi_period'),
             'tema_length': config.get('tema_length')
         }
+
+        # Run analysis in one go
         if executor:
-            df = await loop.run_in_executor(executor, get_signals, df, common_settings, False, config)
+            df = await loop.run_in_executor(executor, get_signals, df, settings, False, config)
         else:
-            df = get_signals(df, common_settings, global_config=config)
-
-        latest_base = df.iloc[-1]
-
-        # Single Strategy Evaluation
-        pair_config = config['pairs'].get(symbol, {})
-        strat = pair_config.get('strategy') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('strategy') or bot_state.get(symbol, {}).get('strategy')
-        aggr = pair_config.get('aggr') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('aggr') or bot_state.get(symbol, {}).get('aggr')
-
-        if not strat:
-            strat = random.choice(STRATEGIES)
-        if not aggr:
-            aggr = random.choice(['normal', 'aggressive', 'dynamic'])
-
-        mode_settings = engine.get_dynamic_settings(latest_base.get('adx'), latest_base.get('volatility'), aggr=aggr)
-        mode_settings['strategy'] = strat
-        mode_settings['device'] = device
-
-        if executor:
-            df = await loop.run_in_executor(executor, get_signals, df, mode_settings, False, config)
-        else:
-            df = get_signals(df, mode_settings, global_config=config)
+            df = get_signals(df, settings, global_config=config)
 
         if df.empty: return
 
@@ -837,28 +840,29 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         sell_candidate = latest.get('sell_signal', False)
         total_score = 1 if buy_candidate else (-1 if sell_candidate else 0)
 
-        # Simple backtest profit metric for display
-        profit = 0
+        # Simple backtest profit metric for display (Vectorized-ish)
         test_df = df.tail(config.get('trading', {}).get('backtest_profit_candles', 400))
-        pos = None
-        for _, row in test_df.iterrows():
-            if row['buy_signal'] and pos is None:
-                pos = row['close']
-            elif row['sell_signal'] and pos is not None:
-                profit += (row['close'] - pos)
-                pos = None
+        buys = test_df[test_df['buy_signal']]['close']
+        sells = test_df[test_df['sell_signal']]['close']
 
+        profit = 0
+        if not buys.empty and not sells.empty:
+            # Simplified matched-trade profit
+            for b_idx, b_p in buys.items():
+                future_sells = sells[sells.index > b_idx]
+                if not future_sells.empty:
+                    s_idx = future_sells.index[0]
+                    profit += (future_sells.iloc[0] - b_p)
+                    sells = sells[sells.index > s_idx]
+                else: break
+
+        # Consolidated Update State
         async with bot_lock:
             if symbol not in bot_state: bot_state[symbol] = {}
             bot_state[symbol].update({
                 'strategy': strat,
-                'aggr': mode_settings.get('effective_aggr', aggr),
-                'expected_profit': profit
-            })
-
-        # Update State
-        async with bot_lock:
-            bot_state[symbol].update({
+                'aggr': latest.get('effective_aggr', aggr),
+                'expected_profit': profit,
                 'price': latest['close'],
                 'ema_f': latest.get('ema_f', 0),
                 'ema_s': latest.get('ema_s', 0),

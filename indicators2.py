@@ -373,23 +373,7 @@ _mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
 def get_signals(df, mode_config, is_scan=False, global_config=None):
     """
     Répartiteur pour plusieurs stratégies de trading.
-
-    Calculates common indicators (EMA, MACD, RSI, ADX) and then executes
-    the specific strategy defined in `mode_config['strategy']`.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        OHLCV data.
-    mode_config : dict
-        Configuration for the strategy (strategy name, indicators parameters, device).
-    is_scan : bool, optional
-        Whether the call is for a scan (affects some MC strategies).
-
-    Returns
-    -------
-    pandas.DataFrame
-        The input dataframe updated with signals and indicators.
+    Consolidated to calculate indicators and strategy in a single pass.
     """
     strategy = mode_config.get('strategy')
     device = mode_config.get('device') or torch.device('cpu')
@@ -407,82 +391,94 @@ def get_signals(df, mode_config, is_scan=False, global_config=None):
 
     if df.empty or len(df) < min_candles: return df
 
-    # For multi-technique scanning, we check if the requested EMA/RSI settings
-    # match what's already in the dataframe. If not, we MUST recalculate.
-    current_ema_fast = df.attrs.get('ema_fast')
-    requested_ema_fast = mode_config.get('ema_fast')
+    # Optimization: Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
+    use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
 
-    needs_recalc = ('ema_f' not in df.columns) or (current_ema_fast != requested_ema_fast)
+    # Ensure OHLCV columns are numeric
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        if col in df.columns and df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Optimization: Skip if already calculated
-    # We check for 'ema_f' and also if the settings match.
-    # For now, just checking 'ema_f' is enough to avoid full recalculation of common indicators
-    # in the tight multi-technique loop.
-    if needs_recalc:
-        # Ensure OHLCV columns are numeric to avoid conversion errors from object type
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            if col in df.columns and df[col].dtype == 'object':
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+    ema_f_len = mode_config.get('ema_fast', 5)
+    ema_s_len = mode_config.get('ema_slow', 20)
+    rsi_len = mode_config.get('rsi_period', 7)
 
-        # Use Torch-accelerated indicators if GPU is available OR MKLDNN is enabled for CPU
-        use_acceleration = (device.type != 'cpu') or torch.backends.mkldnn.enabled
-        if use_acceleration:
-            close_t = torch.tensor(df['close'].astype(float).values, device=device, dtype=torch.float64)
-            high_t = torch.tensor(df['high'].astype(float).values, device=device, dtype=torch.float64)
-            low_t = torch.tensor(df['low'].astype(float).values, device=device, dtype=torch.float64)
-            df['ema_f'] = torch_ema(close_t, mode_config.get('ema_fast')).to('cpu').numpy()
-            df['ema_s'] = torch_ema(close_t, mode_config.get('ema_slow')).to('cpu').numpy()
-            m_val, m_sig, m_hist = torch_macd(close_t, fast=mode_config.get('macd_fast'), slow=mode_config.get('macd_slow'), signal=mode_config.get('macd_signal'))
-            df['macd_val'] = m_val.to('cpu').numpy()
-            df['macd_sig'] = m_sig.to('cpu').numpy()
-            df['macd_hist'] = m_hist.to('cpu').numpy()
-            df['rsi'] = torch_rsi(close_t, mode_config.get('rsi_period')).to('cpu').numpy()
-            df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
-            df['tema_20'] = torch_tema(close_t, 20).to('cpu').numpy()
-            df.attrs['ema_fast'] = requested_ema_fast
+    if use_acceleration:
+        close_values = df['close'].astype(float).values
+        high_values = df['high'].astype(float).values
+        low_values = df['low'].astype(float).values
+
+        close_t = torch.tensor(close_values, device=device, dtype=torch.float64)
+        high_t = torch.tensor(high_values, device=device, dtype=torch.float64)
+        low_t = torch.tensor(low_values, device=device, dtype=torch.float64)
+
+        df['ema_f'] = torch_ema(close_t, ema_f_len).to('cpu').numpy()
+        df['ema_s'] = torch_ema(close_t, ema_s_len).to('cpu').numpy()
+        m_val, m_sig, m_hist = torch_macd(close_t, fast=mode_config.get('macd_fast', 8), slow=mode_config.get('macd_slow', 20), signal=mode_config.get('macd_signal', 5))
+        df['macd_val'] = m_val.to('cpu').numpy()
+        df['macd_sig'] = m_sig.to('cpu').numpy()
+        df['macd_hist'] = m_hist.to('cpu').numpy()
+        df['rsi'] = torch_rsi(close_t, rsi_len).to('cpu').numpy()
+        df['adx'] = torch_adx(high_t, low_t, close_t, 14).to('cpu').numpy()
+        df['tema_20'] = torch_tema(close_t, 20).to('cpu').numpy()
+    else:
+        df['ema_f'] = ta.ema(df['close'], length=ema_f_len).fillna(df['close'])
+        df['ema_s'] = ta.ema(df['close'], length=ema_s_len).fillna(df['close'])
+        macd = ta.macd(df['close'], fast=mode_config.get('macd_fast', 8), slow=mode_config.get('macd_slow', 20), signal=mode_config.get('macd_signal', 5))
+        if macd is not None:
+            df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
         else:
-            ema_f = ta.ema(df['close'], length=mode_config.get('ema_fast'))
-            df['ema_f'] = ema_f.fillna(df['close']) if ema_f is not None else df['close']
-            ema_s = ta.ema(df['close'], length=mode_config.get('ema_slow'))
-            df['ema_s'] = ema_s.fillna(df['close']) if ema_s is not None else df['close']
-            macd = ta.macd(df['close'], fast=mode_config.get('macd_fast'), slow=mode_config.get('macd_slow'), signal=mode_config.get('macd_signal'))
-            if macd is not None:
-                df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
+            df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
+        df['rsi'] = ta.rsi(df['close'], length=rsi_len).fillna(50)
+        adx_df = ta.adx(df['high'], df['low'], df['close'])
+        df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
+        df['tema_20'] = ta.tema(df['close'], length=20).fillna(df['close'])
+
+    # Core calculations
+    df['returns'] = np.log(df['close'] / df['close'].shift(1))
+    df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
+
+    # Market Regime Detection
+    df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
+    df['is_mean_rev'] = ((df['adx'] < 25) | (df['volatility'] > 1.5 * df['vol_ma_regime'])).astype(int)
+    df['regime'] = np.where(df['is_mean_rev'] == 1, 'mean_reversion', 'trend_following')
+
+    # Dynamic adjustment of settings based on regime if requested
+    aggr = mode_config.get('aggr', 'normal')
+    effective_aggr = aggr
+    if aggr == 'dynamic' and global_config:
+        trading_cfg = global_config.get('trading', {})
+        regime_cfg = trading_cfg.get('dynamic_regime', {})
+        latest_adx = df['adx'].iloc[-1]
+        latest_vol = df['volatility'].iloc[-1]
+
+        if latest_adx > regime_cfg.get('adx_threshold', 25):
+            trend_cfg = regime_cfg.get('trending', {})
+            ema_f_len = trend_cfg.get('ema_fast', 10)
+            ema_s_len = trend_cfg.get('ema_slow', 30)
+            effective_aggr = "aggressive"
+        elif latest_vol > regime_cfg.get('volatility_threshold', 0.015):
+            vol_cfg = regime_cfg.get('volatile', {})
+            ema_f_len = vol_cfg.get('ema_fast', 30)
+            ema_s_len = vol_cfg.get('ema_slow', 100)
+            effective_aggr = "conservative"
+
+        # Recalculate EMAs if they changed
+        if ema_f_len != mode_config.get('ema_fast', 5):
+            if use_acceleration:
+                close_t = torch.tensor(df['close'].astype(float).values, device=device, dtype=torch.float64)
+                df['ema_f'] = torch_ema(close_t, ema_f_len).to('cpu').numpy()
+                df['ema_s'] = torch_ema(close_t, ema_s_len).to('cpu').numpy()
             else:
-                df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
-            rsi = ta.rsi(df['close'], length=mode_config.get('rsi_period'))
-            df['rsi'] = rsi.fillna(50) if rsi is not None else 50
-            adx_df = ta.adx(df['high'], df['low'], df['close'])
-            df['adx'] = adx_df.iloc[:, 0].fillna(0) if adx_df is not None else 0
-            tema_20 = ta.tema(df['close'], length=20)
-            df['tema_20'] = tema_20.fillna(df['close']) if tema_20 is not None else df['close']
-            df.attrs['ema_fast'] = requested_ema_fast
+                df['ema_f'] = ta.ema(df['close'], length=ema_f_len).fillna(df['close'])
+                df['ema_s'] = ta.ema(df['close'], length=ema_s_len).fillna(df['close'])
 
-    if 'returns' not in df.columns:
-        df['returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['volatility'] = df['returns'].rolling(window=20).std().fillna(0)
-
-        # Whale Detection Proxy (Common)
-        df['vol_ma_whale'] = ta.sma(df['volume'], length=20)
-        df['vol_std_whale'] = df['volume'].rolling(window=20).std()
-        df['whale_active'] = (df['volume'] > (df['vol_ma_whale'] + 3 * df['vol_std_whale'])).astype(int)
-
-        # Market Regime Proxy (Common) - Improved Detection
-        # Typically: ADX < 25 = Ranging/Mean Reversion, ADX >= 25 = Trending
-        # We also use volatility relative to its mean.
-        df['vol_ma_regime'] = df['volatility'].rolling(window=50).mean()
-        df['is_mean_rev'] = ((df['adx'] < 25) | (df['volatility'] > 1.5 * df['vol_ma_regime'])).astype(int)
-        df['regime'] = np.where(df['is_mean_rev'] == 1, 'mean_reversion', 'trend_following')
-
-    # Initialize default score and tendency if not present
-    if 'score' not in df.columns:
-        df['score'] = 0
-    if 'tendency' not in df.columns:
-        df['tendency'] = "Neutral"
+    # Initialize default score and tendency
+    df['score'] = 0
+    df['tendency'] = "Neutral"
+    df['effective_aggr'] = effective_aggr
 
     # Strategy Selection
-    if df.empty:
-        return df
     strat_cfg = global_config.get('strategies', {}) if global_config else {}
 
     if strategy == 'ichimoku_cloud':
