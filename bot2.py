@@ -33,7 +33,7 @@ from rich.text import Text
 import readchar
 
 # Import renamed modules
-from exchange_handler2 import CCXTExchange2, MockExchange2
+from exchange_handler2 import CCXTExchange2
 from indicators2 import get_signals, STRATEGIES, STRATEGY_GROUPS
 from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
