@@ -11,7 +11,6 @@ class ExchangeInterface2:
 
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
     async def fetch_ohlcv_10k(self, symbol, timeframe, limit=10000): raise NotImplementedError
-    async def watch_ohlcv(self, symbol, timeframe): raise NotImplementedError
     async def watch_ohlcv_for_symbols(self, symbols, timeframe): raise NotImplementedError
     async def watch_balance(self): raise NotImplementedError
     async def watch_orders(self, symbol=None): raise NotImplementedError
@@ -105,43 +104,41 @@ class CCXTExchange2(ExchangeInterface2):
 
         return all_ohlcv[-limit:]
 
-    async def watch_ohlcv(self, symbol, timeframe):
-        while True:
-            try:
-                candles = await self.exchange.watch_ohlcv(symbol, timeframe)
-                if candles:
-                    # Some exchanges return a list of candles, some just the latest.
-                    # We yield the latest candle or the list for the bot to process.
-                    yield candles
-            except Exception as e:
-                logging.error(f"Error in watch_ohlcv for {symbol}: {e}")
-                await asyncio.sleep(1)
-
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         """
-        Watches OHLCV for multiple symbols at 1s interval.
+        Watches OHLCV for multiple symbols at 1s interval using a single association.
         """
-        pairs = [[s, timeframe] for s in symbols] if isinstance(symbols[0], str) else symbols
+        # CCXT Pro watchOHLCVForSymbols expects a list of symbols if symbols is a list of lists.
+        # But here it's already expected to be correct or handled by the caller.
+        # In bot2.py it is passed as: watch_pairs = [[s, '1s'] for s in pairs]
+        # CCXT watchOHLCVForSymbols(symbols, timeframe) expects symbols to be [symbol1, symbol2, ...]
+        symbol_list = [s[0] if isinstance(s, list) else s for s in symbols]
 
-        # Multiplexed individual watchers is often more reliable than watchOHLCVForSymbols
-        # for high-frequency 1s updates across various exchanges.
-        queue = asyncio.Queue()
-
-        async def _worker(symbol, tf):
+        while True:
             try:
-                async for candles in self.watch_ohlcv(symbol, tf):
-                    await queue.put((symbol, tf, candles))
-            except Exception as e:
-                logging.error(f"Worker error for {symbol} ({tf}): {e}")
+                # CCXT Pro watchOHLCVForSymbols returns the candles for the symbol that was updated.
+                # It typically returns a dictionary { symbol: { timeframe: candles } }
+                # or similar depending on the exchange.
+                # However, many CCXT Pro implementations return the latest updated candles directly
+                # or as a dictionary indexed by symbol.
+                result = await self.exchange.watch_ohlcv_for_symbols(symbol_list, timeframe)
 
-        tasks = [asyncio.create_task(_worker(s, tf)) for s, tf in pairs]
-        try:
-            while True:
-                yield await queue.get()
-        finally:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+                # Handling different CCXT Pro return formats for watchOHLCVForSymbols
+                if isinstance(result, dict):
+                    # Format: { symbol: { timeframe: [candles] } } or { symbol: [candles] }
+                    for symbol, data in result.items():
+                        if isinstance(data, dict):
+                            for tf, candles in data.items():
+                                yield (symbol, tf, candles)
+                        else:
+                            yield (symbol, timeframe, data)
+                elif isinstance(result, list) and len(result) > 0:
+                    # Some exchanges might return a list of [symbol, timeframe, candles] or similar
+                    # but usually it's a single update. CCXT's manual says it returns a nested dict.
+                    pass
+            except Exception as e:
+                logging.error(f"Error in watch_ohlcv_for_symbols: {e}")
+                await asyncio.sleep(1)
 
     async def watch_balance(self):
         while True:
@@ -298,15 +295,6 @@ class MockExchange2(ExchangeInterface2):
         if self.real_exchange:
             return await self.real_exchange.fetch_ohlcv_10k(symbol, timeframe, limit)
         return []
-
-    async def watch_ohlcv(self, symbol, timeframe):
-        if self.real_exchange:
-            async for candles in self.real_exchange.watch_ohlcv(symbol, timeframe):
-                yield candles
-        else:
-            while True:
-                await asyncio.sleep(1)
-                yield [[time.time()*1000, 100, 105, 95, 102, 1000]]
 
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         if self.real_exchange:
