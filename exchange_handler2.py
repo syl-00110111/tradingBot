@@ -137,11 +137,14 @@ class CCXTExchange2(ExchangeInterface2):
 
         # Track last yielded timestamp per (symbol, timeframe) to avoid redundant updates.
         last_yielded_ts = {}
+        # Pre-map symbols to timeframes for faster lookup
+        symbol_to_tf = {p[0]: p[1] for p in ohlcv_input}
 
         while True:
             try:
                 # Call CCXT Pro unified API
                 result = await self.exchange.watchOHLCVForSymbols(ohlcv_input)
+                updates = []
 
                 if isinstance(result, dict):
                     for symbol, data in result.items():
@@ -152,20 +155,20 @@ class CCXTExchange2(ExchangeInterface2):
                                 current_ts = candles[-1][0]
                                 if current_ts > last_yielded_ts.get((symbol, tf), 0):
                                     last_yielded_ts[(symbol, tf)] = current_ts
-                                    yield (symbol, tf, candles)
+                                    updates.append((symbol, tf, candles))
                         else:
                             # Format: { symbol: [candles] }
                             if not data: continue
                             current_ts = data[-1][0]
-                            # Recover timeframe from input mapping if not provided in output
-                            tf_found = timeframe
-                            for p in ohlcv_input:
-                                if p[0] == symbol:
-                                    tf_found = p[1]
-                                    break
+                            # Recover timeframe from pre-mapped input
+                            tf_found = symbol_to_tf.get(symbol, timeframe)
                             if current_ts > last_yielded_ts.get((symbol, tf_found), 0):
                                 last_yielded_ts[(symbol, tf_found)] = current_ts
-                                yield (symbol, tf_found, data)
+                                updates.append((symbol, tf_found, data))
+
+                if updates:
+                    yield updates
+
             except Exception as e:
                 err_str = str(e).lower()
                 if "restricted location" in err_str or "451" in err_str:
@@ -349,7 +352,7 @@ class MockExchange2(ExchangeInterface2):
             while True:
                 # Mock a gradual update stream
                 s = random.choice(symbol_names)
-                yield (s, timeframe, [[time.time()*1000, 100, 105, 95, 102, 1000]])
+                yield [(s, timeframe, [[time.time()*1000, 100, 105, 95, 102, 1000]])]
                 await asyncio.sleep(0.1)
 
     async def watch_balance(self):

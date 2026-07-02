@@ -12,6 +12,7 @@ import sys
 import platform
 import random
 import math
+import numpy as np
 import threading
 import queue
 from collections import deque
@@ -60,6 +61,8 @@ selected_pair_index = 0
 show_chart = False
 chart_symbol = None
 chart_cache = {"symbol": None, "last_update": 0, "content": None}
+local_timezone = datetime.now().astimezone().tzinfo
+plotext_lock = threading.Lock()
 logs_scroll_offset = 0
 focused_panel = "pairs"
 ohlcv_cache = {}
@@ -312,62 +315,94 @@ def format_amt(amt, precision=None, config=None):
         return f"{amt:.{max_p}f}".rstrip('0').rstrip('.')
     return formatted if formatted != "" else "0"
 
+def render_ascii_chart_sync(symbol, df, config, width, height):
+    global local_timezone
+    with plotext_lock:
+        try:
+            plt_ascii.clear_figure()
+            plt_ascii.clf()
+            plt_ascii.theme('dark')
+            plt_ascii.subplots(2, 1)
+
+            plt_ascii.subplot(1, 1)
+            plt_ascii.clf()
+            plt_ascii.theme('dark')
+            plt_ascii.title(f"K-Lines: {symbol} (1s)")
+
+            if df.index.tz is None:
+                utc_times = df.index.tz_localize(timezone.utc)
+            else:
+                utc_times = df.index.tz_convert(timezone.utc)
+
+            labels = [t.astimezone(local_timezone).strftime("%H:%M:%S") for t in utc_times]
+
+            indices = list(range(len(df)))
+            df_plot = df[['open', 'high', 'low', 'close']].copy()
+            df_plot.columns = ['Open', 'High', 'Low', 'Close']
+            df_plot.reset_index(drop=True, inplace=True)
+
+            plt_ascii.candlestick(indices, df_plot)
+            tick_indices = np.linspace(0, len(df) - 1, min(10, len(df)), dtype=int).tolist()
+            plt_ascii.xticks(tick_indices, [labels[i] for i in tick_indices])
+
+            plt_ascii.subplot(2, 1)
+            plt_ascii.clf()
+            plt_ascii.theme('dark')
+            volumes = df['volume'].tolist()
+            plt_ascii.bar(indices, volumes, color='blue', label='Volume')
+            plt_ascii.title("Volume")
+            plt_ascii.xticks(tick_indices, [labels[i] for i in tick_indices])
+
+            h_volume = max(5, height // 3)
+            h_klines = height - h_volume
+
+            plt_ascii.subplot(1, 1).plotsize(width, h_klines)
+            plt_ascii.subplot(2, 1).plotsize(width, h_volume)
+            return Text.from_ansi(plt_ascii.build())
+        except Exception as e:
+            return Text(f"Rendering error: {e}", style="bold red")
+
 def render_ascii_chart(symbol, config):
     global chart_cache
-
-    df = None
-    if symbol in ohlcv_cache:
-        df = ohlcv_cache[symbol]
-
-    if df is None or df.empty:
-        return Text(f"No data available for {symbol}", style="bold red")
-
-    ui_cfg = config.get('ui', {})
-    df = df.tail(ui_cfg.get('chart_candles', 100))
-    last_ts = int(df.index[-1].timestamp())
-
-    if chart_cache["symbol"] == symbol and chart_cache["last_update"] == last_ts:
+    if chart_cache["symbol"] == symbol and chart_cache["content"]:
         return chart_cache["content"]
+    return Text(f"Preparing chart for {symbol}...", style="yellow")
 
-    plt_ascii.clear_figure()
-    plt_ascii.clf()
-    plt_ascii.theme('dark')
-    plt_ascii.subplots(2, 1)
+async def chart_renderer_task(config):
+    global chart_symbol, show_chart, chart_cache
+    last_rendered_ts = 0
 
-    plt_ascii.subplot(1, 1)
-    plt_ascii.clf()
-    plt_ascii.theme('dark')
-    plt_ascii.title(f"K-Lines: {symbol} (1s)")
-    indices = list(range(len(df)))
-    df_plot = df[['open', 'high', 'low', 'close']].copy()
-    df_plot.columns = ['Open', 'High', 'Low', 'Close']
-    df_plot.reset_index(drop=True, inplace=True)
-    plt_ascii.candlestick(indices, df_plot)
+    while not shutdown_event.is_set():
+        try:
+            if show_chart and chart_symbol:
+                symbol = chart_symbol
+                df = ohlcv_cache.get(symbol)
+                if df is not None and not df.empty:
+                    ui_cfg = config.get('ui', {})
+                    df_tail = df.tail(ui_cfg.get('chart_candles', 100))
+                    current_last_ts = int(df_tail.index[-1].timestamp())
 
-    plt_ascii.subplot(2, 1)
-    plt_ascii.clf()
-    plt_ascii.theme('dark')
-    volumes = df['volume'].tolist()
-    plt_ascii.bar(indices, volumes, color='blue', label='Volume')
-    plt_ascii.title("Volume")
+                    if chart_cache["symbol"] != symbol or chart_cache["last_update"] != current_last_ts:
+                        # Throttle rendering to 0.2s for near real-time updates
+                        if time.time() - last_rendered_ts > 0.2:
+                            width = console.width - 4
+                            h_offset = ui_cfg.get('panel_height_offset', 20)
+                            height = console.height - h_offset
+                            min_w, min_h = ui_cfg.get('min_width', 20), ui_cfg.get('min_height', 15)
+                            width, height = max(width, min_w), max(height, min_h)
 
-    width = console.width - 4
-    h_offset = ui_cfg.get('panel_height_offset', 20)
-    height = console.height - h_offset
-    min_w = ui_cfg.get('min_width', 20)
-    min_h = ui_cfg.get('min_height', 15)
-    if width < min_w: width = min_w
-    if height < min_h: height = min_h
+                            loop = asyncio.get_running_loop()
+                            content = await loop.run_in_executor(None, render_ascii_chart_sync, symbol, df_tail.copy(), config, width, height)
 
-    h_volume = max(5, height // 3)
-    h_klines = height - h_volume
-
-    plt_ascii.subplot(1, 1).plotsize(width, h_klines)
-    plt_ascii.subplot(2, 1).plotsize(width, h_volume)
-    content = Text.from_ansi(plt_ascii.build())
-
-    chart_cache = {"symbol": symbol, "last_update": last_ts, "content": content}
-    return content
+                            chart_cache = {
+                                "symbol": symbol,
+                                "last_update": current_last_ts,
+                                "content": content
+                            }
+                            last_rendered_ts = time.time()
+            await asyncio.sleep(0.1)
+        except Exception:
+            await asyncio.sleep(1)
 
 async def input_task(exchange, config, data_manager, engine):
     global focused_panel, selected_pair_index, pairs_scroll_offset, logs_scroll_offset
@@ -504,41 +539,59 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
 
     while not shutdown_event.is_set():
         try:
-            async for data in exchange.watch_ohlcv_for_symbols(watch_pairs):
+            async for updates in exchange.watch_ohlcv_for_symbols(watch_pairs):
                 if shutdown_event.is_set(): break
 
-                if isinstance(data, tuple) and len(data) == 3:
-                    symbol, timeframe, candles = data
-                else: continue
+                # Update all prices in the batch first for maximum perceived responsiveness in the dashboard
+                async with bot_lock:
+                    for data in updates:
+                        if isinstance(data, tuple) and len(data) == 3:
+                            symbol, _, candles = data
+                            if symbol in bot_state:
+                                bot_state[symbol]['price'] = candles[-1][4]
 
-                async with ohlcv_lock:
-                    if symbol not in ohlcv_cache:
-                        ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                for data in updates:
+                    if isinstance(data, tuple) and len(data) == 3:
+                        symbol, timeframe, candles = data
+                    else: continue
 
-                    df = ohlcv_cache[symbol]
+                    async with ohlcv_lock:
+                        if symbol not in ohlcv_cache:
+                            ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
-                    new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
-                    new_candles_df.set_index('timestamp', inplace=True)
+                        df = ohlcv_cache[symbol]
 
-                    df = pd.concat([df, new_candles_df])
-                    df = df[~df.index.duplicated(keep='last')]
-                    df.sort_index(inplace=True)
-                    ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
+                        # Optimization: if only updating the current/last candle, do it in-place
+                        last_candle = candles[-1]
+                        last_ts = pd.to_datetime(last_candle[0], unit='ms')
 
-                    async with bot_lock:
-                        if symbol in bot_state:
-                            bot_state[symbol]['price'] = candles[-1][4]
+                        if not df.empty and last_ts == df.index[-1]:
+                            # In-place update of the most recent candle
+                            df.iloc[-1] = last_candle[1:]
+                        else:
+                            # Full update for gaps or new candles
+                            new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                            new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
+                            new_candles_df.set_index('timestamp', inplace=True)
 
-                # Trigger analysis
-                async with analysis_lock:
-                    if symbol not in analysis_in_progress:
-                        analysis_in_progress.add(symbol)
-                        asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
+                            df = pd.concat([df, new_candles_df])
+                            df = df[~df.index.duplicated(keep='last')]
+                            df.sort_index(inplace=True)
+                            ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
+
+                    # Trigger analysis
+                    async with analysis_lock:
+                        if symbol not in analysis_in_progress:
+                            analysis_in_progress.add(symbol)
+                            asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
 
         except Exception as e:
             if not shutdown_event.is_set():
-                logging.error(f"WebSocket OHLCV reconnection error: {e}")
+                err_msg = str(e).lower()
+                logging.error(f"WebSocket OHLCV error: {e}")
+                if "ping-pong" in err_msg or "timeout" in err_msg:
+                    try: await exchange.close()
+                    except: pass
                 await asyncio.sleep(5)
             else: break
 
@@ -825,7 +878,6 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             mc_score = await loop.run_in_executor(None, mc_engine.validate_strategy, df)
             mc_threshold = config.get('mc_threshold', 0.86)
             if mc_score >= mc_threshold:
-                logging.info(f"[{symbol}] Buy signal validated by Monte Carlo (Score: {mc_score:.2f}). Proceeding.")
                 await execute_buy(exchange, symbol, latest, data_manager, engine, config, strategy=strat, candle_count=len(df))
             else:
                 async with bot_lock:
@@ -868,17 +920,25 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 
     try:
         price = data['close']
+        order = None
 
         # Check Notional Limit
         market = exchange.markets.get(symbol)
 
+        quote_curr = symbol.split('/')[1]
         async with bot_lock:
             balance = current_balances
-        if not balance:
-            balance = await exchange.fetch_balance()
-            async with bot_lock: current_balances = balance
 
-        amount = engine.calculate_position_size(balance, price, symbol.split('/')[1])
+        # Verify feasibility by checking the available balance for the quote asset
+        # Fetch if no data has been received for the quote asset
+        quote_bal_data = balance.get(quote_curr) if balance else None
+        if quote_bal_data is None:
+            logging.info(f"[{symbol}] Balance for {quote_curr} missing. Fetching from exchange...")
+            balance = await exchange.fetch_balance()
+            async with bot_lock:
+                current_balances = balance
+
+        amount = engine.calculate_position_size(balance, price, quote_curr)
         cost = amount * price
 
         if amount > 0:
@@ -891,14 +951,16 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                 amount = (min_notional / price) * buffer
                 cost = amount * price
 
-            base_curr = symbol.split('/')[1]
-            free_balance = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
+            quote_curr = symbol.split('/')[1]
+            free_balance = balance.get(quote_curr, {}).get('free', 0) if isinstance(balance.get(quote_curr), dict) else balance.get(quote_curr, 0)
 
             if free_balance < cost:
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 return
 
+            # Create the order first (outside the lock) to avoid blocking other symbols/tasks
             order = await exchange.create_order(symbol, 'buy', amount)
+
             if order and 'id' in order:
                 async with pending_orders_lock:
                     pending_orders[str(order['id'])] = {
@@ -909,11 +971,14 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                         'strategy': strategy or ("Manual" if manual else "Unknown"),
                         'candle_count': candle_count
                     }
-                # If order is already closed (some exchanges return filled orders immediately), process it.
-                if order.get('status') == 'closed':
-                    await process_order_fill(order, exchange, data_manager, config, engine)
             else:
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
+                return
+
+        # If order is already closed (some exchanges return filled orders immediately), process it.
+        # We call this outside the lock to avoid re-entrancy issues with process_order_fill
+        if order and order.get('status') == 'closed':
+            await process_order_fill(order, exchange, data_manager, config, engine)
     except Exception as e:
         logging.error(f"Buy failed for {symbol}: {e}")
 
@@ -1008,7 +1073,9 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
         return
 
     try:
+        # Create the order first (outside the lock) to avoid blocking other symbols/tasks
         order = await exchange.create_order(symbol, 'sell', total_sell_amount)
+
         if order and 'id' in order:
             async with pending_orders_lock:
                 pending_orders[str(order['id'])] = {
@@ -1020,9 +1087,11 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                     'strategy': strategy or ("Manual" if force else "Unknown"),
                     'candle_count': candle_count
                 }
-            # If order is already closed, process it immediately
-            if order.get('status') == 'closed':
-                await process_order_fill(order, exchange, data_manager, config, engine)
+
+        # If order is already closed, process it immediately
+        # We call this outside the lock to avoid re-entrancy issues with process_order_fill
+        if order and order.get('status') == 'closed':
+            await process_order_fill(order, exchange, data_manager, config, engine)
     except Exception as e:
         logging.error(f"Aggregated sell failed for {symbol}: {e}")
         async with bot_lock:
@@ -1048,9 +1117,14 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
         processed_orders.append(order_id)
 
     meta = None
-    async with pending_orders_lock:
-        if order_id in pending_orders:
-            meta = pending_orders.pop(order_id)
+    # Short retry loop to wait for metadata if it was placed by the bot but not yet registered
+    # This addresses the race condition where WebSocket update arrives before create_order returns its ID
+    for _ in range(5):
+        async with pending_orders_lock:
+            if order_id in pending_orders:
+                meta = pending_orders.pop(order_id)
+                break
+        await asyncio.sleep(0.1)
 
     # Use data from order object, or meta if order is missing info
     symbol = order.get('symbol') or (meta['symbol'] if meta else None)
@@ -1099,10 +1173,19 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
                 total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
 
         total_val = cost + total_fee
+        # Ensure trigger_data includes strategy and candle_count for persistence
+        final_strategy = meta.get('strategy', 'Unknown') if meta else 'Unknown'
+        final_candle_count = meta.get('candle_count', 0) if meta else 0
+
+        if 'strategy' not in trigger_data:
+            trigger_data['strategy'] = final_strategy
+        if 'candle_count' not in trigger_data:
+            trigger_data['candle_count'] = final_candle_count
+
         data_manager.add_position(symbol, actual_price, filled_amount, total_fee, trigger_data, timestamp, total_base=total_val)
 
         _, quote = symbol.split('/')
-        logging.info(f"[{symbol}] BUY executed at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Spent: {format_price(total_val, config=config)} {quote}, Technique: {strategy}, Candles: {candle_count})")
+        logging.info(f"[{symbol}] BUY executed at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Spent: {format_price(total_val, config=config)} {quote}, Technique: {final_strategy}, Candles: {final_candle_count})")
         play_sound("buy", config)
 
     elif side == 'sell':
@@ -1157,7 +1240,9 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
                 actual_total_profit = total_net_received - total_entry_cost_of_filled
                 _, quote = symbol.split('/')
                 lot_prefix = f"Lot {len(sell_lot_indices)} SOLD" if sell_lot_indices else "SELL executed"
-                logging.info(f"[{symbol}] {lot_prefix} at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Profit: {format_price(actual_total_profit, config=config)}, Received: {format_price(total_net_received, config=config)} {quote}, Technique: {strategy}, Candles: {candle_count})")
+                final_strategy = meta.get('strategy', 'Unknown') if meta else 'Unknown'
+                final_candle_count = meta.get('candle_count', 0) if meta else 0
+                logging.info(f"[{symbol}] {lot_prefix} at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Profit: {format_price(actual_total_profit, config=config)}, Received: {format_price(total_net_received, config=config)} {quote}, Technique: {final_strategy}, Candles: {final_candle_count})")
                 play_sound("sell", config)
 
         # Fetch fresh balance to ensure dust check and future buys are accurate
@@ -1217,7 +1302,11 @@ async def watch_balance_task(exchange, data_manager):
                 logging.debug("Balance updated via WebSocket")
         except Exception as e:
             if not shutdown_event.is_set():
-                logging.error(f"WebSocket balance reconnection error: {e}")
+                err_msg = str(e).lower()
+                logging.error(f"WebSocket balance error: {e}")
+                if "ping-pong" in err_msg or "timeout" in err_msg:
+                    try: await exchange.close()
+                    except: pass
                 await asyncio.sleep(5)
             else: break
 
@@ -1230,7 +1319,11 @@ async def watch_orders_task(exchange, data_manager, config, engine):
                     await process_order_fill(order, exchange, data_manager, config, engine)
         except Exception as e:
             if not shutdown_event.is_set():
-                logging.error(f"WebSocket orders reconnection error: {e}")
+                err_msg = str(e).lower()
+                logging.error(f"WebSocket orders error: {e}")
+                if "ping-pong" in err_msg or "timeout" in err_msg:
+                    try: await exchange.close()
+                    except: pass
                 await asyncio.sleep(5)
             else: break
 
@@ -1786,7 +1879,8 @@ async def main():
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager, config, engine)),
         asyncio.create_task(input_task(exchange, config, data_manager, engine)),
-        asyncio.create_task(heartbeat_task(exchange, data_manager, engine, config))
+        asyncio.create_task(heartbeat_task(exchange, data_manager, engine, config)),
+        asyncio.create_task(chart_renderer_task(config))
     ]
 
     # Start Global OHLCV Watcher
