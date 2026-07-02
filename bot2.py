@@ -338,11 +338,23 @@ def render_ascii_chart(symbol, config):
     plt_ascii.clf()
     plt_ascii.theme('dark')
     plt_ascii.title(f"K-Lines: {symbol} (1s)")
+
+    # Use system local time for labels
+    # df.index is already in UTC from pd.to_datetime(..., unit='ms') in watch_ohlcv_global_task
+    local_times = df.index.tz_localize(timezone.utc).tz_convert(None).to_pydatetime()
+    # If the system local timezone is needed, we should use datetime.now().astimezone().tzinfo
+    local_tz = datetime.now().astimezone().tzinfo
+    labels = [t.replace(tzinfo=timezone.utc).astimezone(local_tz).strftime("%H:%M:%S") for t in local_times]
+
     indices = list(range(len(df)))
     df_plot = df[['open', 'high', 'low', 'close']].copy()
     df_plot.columns = ['Open', 'High', 'Low', 'Close']
     df_plot.reset_index(drop=True, inplace=True)
+
     plt_ascii.candlestick(indices, df_plot)
+    plt_ascii.xticks(indices, labels)
+    # Reducing the number of labels to avoid overlap
+    plt_ascii.ticks(min(10, len(df)))
 
     plt_ascii.subplot(2, 1)
     plt_ascii.clf()
@@ -350,6 +362,8 @@ def render_ascii_chart(symbol, config):
     volumes = df['volume'].tolist()
     plt_ascii.bar(indices, volumes, color='blue', label='Volume')
     plt_ascii.title("Volume")
+    plt_ascii.xticks(indices, labels)
+    plt_ascii.ticks(min(10, len(df)))
 
     width = console.width - 4
     h_offset = ui_cfg.get('panel_height_offset', 20)
@@ -504,37 +518,38 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
 
     while not shutdown_event.is_set():
         try:
-            async for data in exchange.watch_ohlcv_for_symbols(watch_pairs):
+            async for updates in exchange.watch_ohlcv_for_symbols(watch_pairs):
                 if shutdown_event.is_set(): break
 
-                if isinstance(data, tuple) and len(data) == 3:
-                    symbol, timeframe, candles = data
-                else: continue
+                for data in updates:
+                    if isinstance(data, tuple) and len(data) == 3:
+                        symbol, timeframe, candles = data
+                    else: continue
 
-                async with ohlcv_lock:
-                    if symbol not in ohlcv_cache:
-                        ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    async with ohlcv_lock:
+                        if symbol not in ohlcv_cache:
+                            ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
-                    df = ohlcv_cache[symbol]
+                        df = ohlcv_cache[symbol]
 
-                    new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
-                    new_candles_df.set_index('timestamp', inplace=True)
+                        new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
+                        new_candles_df.set_index('timestamp', inplace=True)
 
-                    df = pd.concat([df, new_candles_df])
-                    df = df[~df.index.duplicated(keep='last')]
-                    df.sort_index(inplace=True)
-                    ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
+                        df = pd.concat([df, new_candles_df])
+                        df = df[~df.index.duplicated(keep='last')]
+                        df.sort_index(inplace=True)
+                        ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
 
-                    async with bot_lock:
-                        if symbol in bot_state:
-                            bot_state[symbol]['price'] = candles[-1][4]
+                        async with bot_lock:
+                            if symbol in bot_state:
+                                bot_state[symbol]['price'] = candles[-1][4]
 
-                # Trigger analysis
-                async with analysis_lock:
-                    if symbol not in analysis_in_progress:
-                        analysis_in_progress.add(symbol)
-                        asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
+                    # Trigger analysis
+                    async with analysis_lock:
+                        if symbol not in analysis_in_progress:
+                            analysis_in_progress.add(symbol)
+                            asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
 
         except Exception as e:
             if not shutdown_event.is_set():
@@ -872,13 +887,20 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
         # Check Notional Limit
         market = exchange.markets.get(symbol)
 
+        quote_curr = symbol.split('/')[1]
         async with bot_lock:
             balance = current_balances
-        if not balance:
-            balance = await exchange.fetch_balance()
-            async with bot_lock: current_balances = balance
 
-        amount = engine.calculate_position_size(balance, price, symbol.split('/')[1])
+        # Verify feasibility by checking the available balance for the quote asset
+        # Fetch if no data has been received for the quote asset
+        quote_bal_data = balance.get(quote_curr) if balance else None
+        if quote_bal_data is None:
+            logging.info(f"[{symbol}] Balance for {quote_curr} missing. Fetching from exchange...")
+            balance = await exchange.fetch_balance()
+            async with bot_lock:
+                current_balances = balance
+
+        amount = engine.calculate_position_size(balance, price, quote_curr)
         cost = amount * price
 
         if amount > 0:
@@ -891,8 +913,8 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                 amount = (min_notional / price) * buffer
                 cost = amount * price
 
-            base_curr = symbol.split('/')[1]
-            free_balance = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
+            quote_curr = symbol.split('/')[1]
+            free_balance = balance.get(quote_curr, {}).get('free', 0) if isinstance(balance.get(quote_curr), dict) else balance.get(quote_curr, 0)
 
             if free_balance < cost:
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
