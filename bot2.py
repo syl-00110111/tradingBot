@@ -743,7 +743,7 @@ async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, patt
     async with bot_lock:
         last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
 
-    cooldown = config.get('timeouts', {}).get('analysis_cooldown', 180)
+    cooldown = config.get('timeouts', {}).get('analysis_cooldown', 12)
     if time.time() - last_analysis < cooldown:
         async with analysis_lock:
             if symbol in analysis_in_progress:
