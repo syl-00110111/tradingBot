@@ -46,7 +46,7 @@ analysis_in_progress = set()
 analysis_lock = asyncio.Lock()
 
 # Global Watcher Task
-global_watcher_task = None
+ohlcv_task = None
 
 # Track orders placed by the bot to process them via WebSocket confirmation
 pending_orders = {} # order_id -> metadata_dict
@@ -412,12 +412,14 @@ async def input_task(exchange, config, data_manager, engine):
                     price = bot_state.get(chart_symbol, {}).get('price', 0)
                     if price > 0:
                         logging.info(f"[Manual] Triggering BUY for {chart_symbol}")
-                        asyncio.create_task(execute_buy(exchange, chart_symbol, {'close': price}, data_manager, engine, config, manual=True))
+                        candle_count = len(ohlcv_cache.get(chart_symbol, []))
+                        asyncio.create_task(execute_buy(exchange, chart_symbol, {'close': price}, data_manager, engine, config, manual=True, strategy="Manual", candle_count=candle_count))
                 elif show_chart and chart_symbol and key.lower() == 's':
                     price = bot_state.get(chart_symbol, {}).get('price', 0)
                     if price > 0:
                         logging.info(f"[Manual] Triggering SELL for {chart_symbol}")
-                        asyncio.create_task(execute_sell(exchange, chart_symbol, {'close': price}, data_manager, engine, config, force=True))
+                        candle_count = len(ohlcv_cache.get(chart_symbol, []))
+                        asyncio.create_task(execute_sell(exchange, chart_symbol, {'close': price}, data_manager, engine, config, force=True, strategy="Manual", candle_count=candle_count))
                 continue
 
             if key == readchar.key.TAB:
@@ -824,7 +826,7 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             mc_threshold = config.get('mc_threshold', 0.86)
             if mc_score >= mc_threshold:
                 logging.info(f"[{symbol}] Buy signal validated by Monte Carlo (Score: {mc_score:.2f}). Proceeding.")
-                await execute_buy(exchange, symbol, latest, data_manager, engine, config)
+                await execute_buy(exchange, symbol, latest, data_manager, engine, config, strategy=strat, candle_count=len(df))
             else:
                 async with bot_lock:
                     if symbol in bot_state:
@@ -836,12 +838,12 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
                             'strategy': random.choice(STRATEGIES)
                         })
         elif sell_candidate:
-            await execute_sell(exchange, symbol, latest, data_manager, engine, config)
+            await execute_sell(exchange, symbol, latest, data_manager, engine, config, strategy=strat, candle_count=len(df))
 
     except Exception as e:
         logging.error(f"Analysis error for {symbol}: {e}")
 
-async def execute_buy(exchange, symbol, data, data_manager, engine, config, manual=False):
+async def execute_buy(exchange, symbol, data, data_manager, engine, config, manual=False, strategy=None, candle_count=0):
     global current_balances
 
     # Check for pending orders to avoid duplicates
@@ -903,7 +905,9 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                         'symbol': symbol,
                         'side': 'buy',
                         'timestamp': time.time(),
-                        'trigger_data': {}
+                        'trigger_data': {},
+                        'strategy': strategy or ("Manual" if manual else "Unknown"),
+                        'candle_count': candle_count
                     }
                 # If order is already closed (some exchanges return filled orders immediately), process it.
                 if order.get('status') == 'closed':
@@ -913,7 +917,7 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
     except Exception as e:
         logging.error(f"Buy failed for {symbol}: {e}")
 
-async def execute_sell(exchange, symbol, data, data_manager, engine, config, force=False):
+async def execute_sell(exchange, symbol, data, data_manager, engine, config, force=False, strategy=None, candle_count=0):
     # Check for pending orders to avoid duplicates
     async with pending_orders_lock:
         for oid, po in pending_orders.items():
@@ -1012,7 +1016,9 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                     'side': 'sell',
                     'sell_lot_indices': sell_lot_indices,
                     'timestamp': time.time(),
-                    'trigger_data': {}
+                    'trigger_data': {},
+                    'strategy': strategy or ("Manual" if force else "Unknown"),
+                    'candle_count': candle_count
                 }
             # If order is already closed, process it immediately
             if order.get('status') == 'closed':
@@ -1026,12 +1032,18 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     """
     Centralized handler for completed orders to avoid race conditions and lost confirmations.
     """
-    if order.get('status') != 'closed':
+    terminal_statuses = ['closed', 'canceled', 'expired', 'rejected']
+    status = order.get('status')
+    if status not in terminal_statuses:
         return False
 
     order_id = str(order['id'])
     async with processed_orders_lock:
         if order_id in processed_orders:
+            # Ensure it's removed from pending even if already processed
+            async with pending_orders_lock:
+                if order_id in pending_orders:
+                    pending_orders.pop(order_id)
             return False
         processed_orders.append(order_id)
 
@@ -1042,6 +1054,14 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
 
     # Use data from order object, or meta if order is missing info
     symbol = order.get('symbol') or (meta['symbol'] if meta else None)
+
+    if status != 'closed' and order.get('filled', 0) == 0:
+        if meta:
+            logging.info(f"[{symbol}] Order {order_id} was {status} with no fill. Removing from pending.")
+        return False
+
+    if status != 'closed':
+        logging.info(f"[{symbol}] Order {order_id} was {status} but had partial fill ({order.get('filled')}). Processing fill.")
     side = order.get('side') or (meta['side'] if meta else None)
     if not symbol or not side:
         return False
@@ -1056,6 +1076,8 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
 
     trigger_data = meta['trigger_data'] if meta else {}
     timestamp = meta['timestamp'] if meta else time.time()
+    strategy = meta.get('strategy', 'Unknown') if meta else 'Unknown'
+    candle_count = meta.get('candle_count', 0) if meta else 0
 
     if side == 'buy':
         # Verify amount on exchange to account for fees deducted from the acquired asset
@@ -1080,7 +1102,7 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
         data_manager.add_position(symbol, actual_price, filled_amount, total_fee, trigger_data, timestamp, total_base=total_val)
 
         _, quote = symbol.split('/')
-        logging.info(f"[{symbol}] BUY executed at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Spent: {format_price(total_val, config=config)} {quote})")
+        logging.info(f"[{symbol}] BUY executed at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Spent: {format_price(total_val, config=config)} {quote}, Technique: {strategy}, Candles: {candle_count})")
         play_sound("buy", config)
 
     elif side == 'sell':
@@ -1134,7 +1156,8 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
 
                 actual_total_profit = total_net_received - total_entry_cost_of_filled
                 _, quote = symbol.split('/')
-                logging.info(f"[{symbol}] Aggregated SELL executed at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Profit: {format_price(actual_total_profit, config=config)}, Received: {format_price(total_net_received, config=config)} {quote})")
+                lot_prefix = f"Lot {len(sell_lot_indices)} SOLD" if sell_lot_indices else "SELL executed"
+                logging.info(f"[{symbol}] {lot_prefix} at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Profit: {format_price(actual_total_profit, config=config)}, Received: {format_price(total_net_received, config=config)} {quote}, Technique: {strategy}, Candles: {candle_count})")
                 play_sound("sell", config)
 
         # Fetch fresh balance to ensure dust check and future buys are accurate
@@ -1495,16 +1518,40 @@ async def run_dashboard(config):
     except Exception as e:
         logging.info(f"[red]Dashboard error: {e}")
 
-async def heartbeat_task(config):
+async def heartbeat_task(exchange, data_manager, engine, config):
     while not shutdown_event.is_set():
         # Cleanup stuck pending orders
         stuck_timeout = config.get('timeouts', {}).get('stuck_order_cleanup', 300)
+
         async with pending_orders_lock:
             now = time.time()
-            to_delete = [oid for oid, meta in pending_orders.items() if now - meta.get('timestamp', 0) > stuck_timeout]
-            for oid in to_delete:
-                meta = pending_orders.pop(oid)
-                logging.warning(f"[{meta.get('symbol')}] Removing stuck pending {meta.get('side')} order {oid} after timeout.")
+            stuck_candidates = [(oid, meta) for oid, meta in pending_orders.items() if now - meta.get('timestamp', 0) > stuck_timeout]
+
+        for oid, meta in stuck_candidates:
+            symbol = meta.get('symbol')
+            try:
+                # Double check status with the exchange before giving up
+                logging.info(f"[{symbol}] Checking status of potentially stuck order {oid}...")
+                verified_order = await exchange.fetch_order(oid, symbol)
+                if verified_order:
+                    is_processed = await process_order_fill(verified_order, exchange, data_manager, config, engine)
+                    if is_processed:
+                        logging.info(f"[{symbol}] Stuck order {oid} was found to be {verified_order.get('status')} and has been processed.")
+                        continue
+                    elif verified_order.get('status') in ['canceled', 'expired', 'rejected']:
+                        # process_order_fill already removed it if it saw the terminal status
+                        continue
+
+                # If still open or not found, remove it manually to unblock the pair
+                async with pending_orders_lock:
+                    if oid in pending_orders:
+                        pending_orders.pop(oid)
+                logging.warning(f"[{symbol}] Removing stuck pending {meta.get('side')} order {oid} after timeout (Order status on exchange: {verified_order.get('status') if verified_order else 'unknown'}).")
+            except Exception as e:
+                logging.error(f"[{symbol}] Error during stuck order cleanup for {oid}: {e}")
+                async with pending_orders_lock:
+                    if oid in pending_orders:
+                        pending_orders.pop(oid)
 
         await asyncio.sleep(config.get('timeouts', {}).get('heartbeat_interval', 30))
 
@@ -1583,6 +1630,13 @@ async def main():
     # Discover and select pairs based on volume, configuration, and balances
     logging.info("Retrieving best pairs based on 24h volume and balance analysis...")
     try:
+        # Fetch initial balances and tickers early to reuse
+        logging.info("Retrieving initial balances and tickers...")
+        initial_balance = await asyncio.wait_for(exchange.fetch_balance(), timeout=30)
+        async with bot_lock:
+            global current_balances
+            current_balances = initial_balance
+
         # 1. Fetch 24h tickers to find high volume pairs
         all_tickers = await exchange.fetch_tickers()
 
@@ -1610,7 +1664,7 @@ async def main():
         # 2. Add pairs from inventory if enabled
         inventory_pairs = []
         if config.get('include_inventory_pairs') or config.get('include_all_quote_pairs'):
-            balance = await exchange.fetch_balance()
+            balance = initial_balance
             free_balances = balance.get('free', {}) if isinstance(balance, dict) and 'free' in balance else {}
 
             for asset, amount in free_balances.items():
@@ -1732,26 +1786,16 @@ async def main():
         asyncio.create_task(watch_balance_task(exchange, data_manager)),
         asyncio.create_task(watch_orders_task(exchange, data_manager, config, engine)),
         asyncio.create_task(input_task(exchange, config, data_manager, engine)),
-        asyncio.create_task(heartbeat_task(config))
+        asyncio.create_task(heartbeat_task(exchange, data_manager, engine, config))
     ]
 
     # Start Global OHLCV Watcher
     watch_pairs = [[s, '1s'] for s in pairs]
-    global_watcher_task = asyncio.create_task(watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor))
+    ohlcv_task = asyncio.create_task(watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor))
 
     # Ensure all watchers are setup (Wait a bit for connections to stabilize)
     await asyncio.sleep(2)
 
-    # Now that watchers are set up, perform initial sync and balance retrieval
-    try:
-        logging.info("Retrieving initial balances...")
-        # Add timeout to balance retrieval
-        initial_balance = await asyncio.wait_for(exchange.fetch_balance(), timeout=30)
-        async with bot_lock:
-            global current_balances
-            current_balances = initial_balance
-    except Exception as e:
-        logging.info(f"[yellow]Warning: Could not fetch initial balances: {e}")
 
     # Synchronizing positions from the exchange API
     logging.info(f"Synchronizing positions from the {exchange_id.capitalize()} API...")
@@ -1804,8 +1848,8 @@ async def main():
         all_tasks = background_tasks.copy()
         if ui_task:
             all_tasks.append(ui_task)
-        if global_watcher_task:
-            all_tasks.append(global_watcher_task)
+        if ohlcv_task:
+            all_tasks.append(ohlcv_task)
 
         # Cancel all pending tasks
         for t in all_tasks:

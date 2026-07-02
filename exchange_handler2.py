@@ -11,7 +11,6 @@ class ExchangeInterface2:
 
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
     async def fetch_ohlcv_10k(self, symbol, timeframe, limit=10000): raise NotImplementedError
-    async def watch_ohlcv(self, symbol, timeframe): raise NotImplementedError
     async def watch_ohlcv_for_symbols(self, symbols, timeframe): raise NotImplementedError
     async def watch_balance(self): raise NotImplementedError
     async def watch_orders(self, symbol=None): raise NotImplementedError
@@ -105,43 +104,76 @@ class CCXTExchange2(ExchangeInterface2):
 
         return all_ohlcv[-limit:]
 
-    async def watch_ohlcv(self, symbol, timeframe):
-        while True:
-            try:
-                candles = await self.exchange.watch_ohlcv(symbol, timeframe)
-                if candles:
-                    # Some exchanges return a list of candles, some just the latest.
-                    # We yield the latest candle or the list for the bot to process.
-                    yield candles
-            except Exception as e:
-                logging.error(f"Error in watch_ohlcv for {symbol}: {e}")
-                await asyncio.sleep(1)
-
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         """
-        Watches OHLCV for multiple symbols at 1s interval.
+        Watches OHLCV for multiple symbols using watchOHLCVForSymbols.
+        Only yields when new candles are available to prevent redundant updates.
         """
-        pairs = [[s, timeframe] for s in symbols] if isinstance(symbols[0], str) else symbols
+        if not symbols:
+            return
 
-        # Multiplexed individual watchers is often more reliable than watchOHLCVForSymbols
-        # for high-frequency 1s updates across various exchanges.
-        queue = asyncio.Queue()
+        # Normalize to list of [symbol, timeframe] pairs as required by CCXT Pro's unified API.
+        # This prevents character-iteration bugs when passing strings where lists are expected.
+        ohlcv_input = []
+        if isinstance(symbols, str):
+            if symbols in self.markets:
+                ohlcv_input.append([symbols, timeframe])
+        elif hasattr(symbols, '__iter__') and not isinstance(symbols, dict):
+            seen = set()
+            for item in symbols:
+                if isinstance(item, (list, tuple)) and len(item) >= 1:
+                    s = str(item[0])
+                    t = str(item[1]) if len(item) >= 2 else timeframe
+                else:
+                    s = str(item)
+                    t = timeframe
 
-        async def _worker(symbol, tf):
+                if s in self.markets and s not in seen:
+                    ohlcv_input.append([s, t])
+                    seen.add(s)
+
+        if not ohlcv_input:
+            return
+
+        # Track last yielded timestamp per (symbol, timeframe) to avoid redundant updates.
+        last_yielded_ts = {}
+
+        while True:
             try:
-                async for candles in self.watch_ohlcv(symbol, tf):
-                    await queue.put((symbol, tf, candles))
-            except Exception as e:
-                logging.error(f"Worker error for {symbol} ({tf}): {e}")
+                # Call CCXT Pro unified API
+                result = await self.exchange.watchOHLCVForSymbols(ohlcv_input)
 
-        tasks = [asyncio.create_task(_worker(s, tf)) for s, tf in pairs]
-        try:
-            while True:
-                yield await queue.get()
-        finally:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+                if isinstance(result, dict):
+                    for symbol, data in result.items():
+                        if isinstance(data, dict):
+                            # Format: { symbol: { timeframe: [candles] } }
+                            for tf, candles in data.items():
+                                if not candles: continue
+                                current_ts = candles[-1][0]
+                                if current_ts > last_yielded_ts.get((symbol, tf), 0):
+                                    last_yielded_ts[(symbol, tf)] = current_ts
+                                    yield (symbol, tf, candles)
+                        else:
+                            # Format: { symbol: [candles] }
+                            if not data: continue
+                            current_ts = data[-1][0]
+                            # Recover timeframe from input mapping if not provided in output
+                            tf_found = timeframe
+                            for p in ohlcv_input:
+                                if p[0] == symbol:
+                                    tf_found = p[1]
+                                    break
+                            if current_ts > last_yielded_ts.get((symbol, tf_found), 0):
+                                last_yielded_ts[(symbol, tf_found)] = current_ts
+                                yield (symbol, tf_found, data)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "restricted location" in err_str or "451" in err_str:
+                    logging.error(f"WebSocket restricted: {self.exchange_id} is not available in your region.")
+                    await asyncio.sleep(60)
+                else:
+                    logging.error(f"Error in watchOHLCVForSymbols: {e}")
+                    await asyncio.sleep(5)
 
     async def watch_balance(self):
         while True:
@@ -241,7 +273,7 @@ class CCXTExchange2(ExchangeInterface2):
         # Try indirect paths via bridge currencies
         bridges = ['USDT', 'USDC', 'BTC', 'ETH']
         for bridge in bridges:
-            if quote == bridge or fee_currency == bridge: continue
+            if bridge in [quote, fee_currency]: continue
             try:
                 ticker_fee = await self.fetch_ticker(f"{fee_currency}/{bridge}")
                 ticker_quote = await self.fetch_ticker(f"{quote}/{bridge}")
@@ -299,27 +331,26 @@ class MockExchange2(ExchangeInterface2):
             return await self.real_exchange.fetch_ohlcv_10k(symbol, timeframe, limit)
         return []
 
-    async def watch_ohlcv(self, symbol, timeframe):
-        if self.real_exchange:
-            async for candles in self.real_exchange.watch_ohlcv(symbol, timeframe):
-                yield candles
-        else:
-            while True:
-                await asyncio.sleep(1)
-                yield [[time.time()*1000, 100, 105, 95, 102, 1000]]
-
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         if self.real_exchange:
             async for data in self.real_exchange.watch_ohlcv_for_symbols(symbols, timeframe):
                 yield data
         else:
-            pairs = [[s, timeframe] for s in symbols] if isinstance(symbols[0], str) else symbols
+            if not symbols: return
+            symbol_names = []
+            if isinstance(symbols, str):
+                symbol_names = [symbols]
+            elif hasattr(symbols, '__iter__') and not isinstance(symbols, str):
+                symbol_names = [s[0] if isinstance(s, (list, tuple)) else str(s) for s in symbols]
+            else:
+                symbol_names = [str(symbols)]
+
+            import random
             while True:
-                for item in pairs:
-                    symbol = item[0]
-                    tf = item[1]
-                    yield (symbol, tf, [[time.time()*1000, 100, 105, 95, 102, 1000]])
-                await asyncio.sleep(1)
+                # Mock a gradual update stream
+                s = random.choice(symbol_names)
+                yield (s, timeframe, [[time.time()*1000, 100, 105, 95, 102, 1000]])
+                await asyncio.sleep(0.1)
 
     async def watch_balance(self):
         await self._init_balance()
