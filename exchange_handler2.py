@@ -106,63 +106,66 @@ class CCXTExchange2(ExchangeInterface2):
 
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         """
-        Watches OHLCV for multiple symbols using the CCXT Pro unified watchOHLCVForSymbols method.
+        Watches OHLCV for multiple symbols using watchOHLCVForSymbols.
+        Only yields when new candles are available to prevent redundant updates.
         """
         if not symbols:
             return
 
-        # Normalize to list of [symbol, timeframe] pairs.
-        # This format (List[List[str]]) is the most robust for CCXT Pro's watchOHLCVForSymbols.
-        # It prevents CCXT from iterating over characters of a symbol string.
+        # Normalize to list of [symbol, timeframe] pairs as required by CCXT Pro's unified API.
+        # This prevents character-iteration bugs when passing strings where lists are expected.
         ohlcv_input = []
-
-        # Determine if we have a single symbol string or an iterable of symbols
         if isinstance(symbols, str):
-            symbols_to_process = [symbols]
+            if symbols in self.markets:
+                ohlcv_input.append([symbols, timeframe])
         elif hasattr(symbols, '__iter__') and not isinstance(symbols, dict):
-            symbols_to_process = symbols
-        else:
-            symbols_to_process = [str(symbols)]
+            seen = set()
+            for item in symbols:
+                if isinstance(item, (list, tuple)) and len(item) >= 1:
+                    s = str(item[0])
+                    t = str(item[1]) if len(item) >= 2 else timeframe
+                else:
+                    s = str(item)
+                    t = timeframe
 
-        seen_symbols = set()
-        for item in symbols_to_process:
-            if isinstance(item, (list, tuple)) and len(item) >= 1:
-                s = str(item[0])
-                t = str(item[1]) if len(item) >= 2 else timeframe
-            else:
-                s = str(item)
-                t = timeframe
-
-            if s in self.markets and s not in seen_symbols:
-                ohlcv_input.append([s, t])
-                seen_symbols.add(s)
+                if s in self.markets and s not in seen:
+                    ohlcv_input.append([s, t])
+                    seen.add(s)
 
         if not ohlcv_input:
             return
 
+        # Track last yielded timestamp per (symbol, timeframe) to avoid redundant updates.
+        last_yielded_ts = {}
+
         while True:
             try:
-                # Call the unified CCXT Pro method.
-                # Signature: watchOHLCVForSymbols(symbolsAndTimeframes, since=None, limit=None, params={})
-                # By passing ohlcv_input as the first and only positional argument, we ensure compatibility.
+                # Call CCXT Pro unified API
                 result = await self.exchange.watchOHLCVForSymbols(ohlcv_input)
 
-                # Handling standard CCXT Pro return formats.
                 if isinstance(result, dict):
                     for symbol, data in result.items():
                         if isinstance(data, dict):
                             # Format: { symbol: { timeframe: [candles] } }
                             for tf, candles in data.items():
-                                yield (symbol, tf, candles)
+                                if not candles: continue
+                                current_ts = candles[-1][0]
+                                if current_ts > last_yielded_ts.get((symbol, tf), 0):
+                                    last_yielded_ts[(symbol, tf)] = current_ts
+                                    yield (symbol, tf, candles)
                         else:
                             # Format: { symbol: [candles] }
-                            # Find the original timeframe for this symbol from our input mapping.
+                            if not data: continue
+                            current_ts = data[-1][0]
+                            # Recover timeframe from input mapping if not provided in output
                             tf_found = timeframe
-                            for pair in ohlcv_input:
-                                if pair[0] == symbol:
-                                    tf_found = pair[1]
+                            for p in ohlcv_input:
+                                if p[0] == symbol:
+                                    tf_found = p[1]
                                     break
-                            yield (symbol, tf_found, data)
+                            if current_ts > last_yielded_ts.get((symbol, tf_found), 0):
+                                last_yielded_ts[(symbol, tf_found)] = current_ts
+                                yield (symbol, tf_found, data)
             except Exception as e:
                 err_str = str(e).lower()
                 if "restricted location" in err_str or "451" in err_str:
@@ -270,7 +273,7 @@ class CCXTExchange2(ExchangeInterface2):
         # Try indirect paths via bridge currencies
         bridges = ['USDT', 'USDC', 'BTC', 'ETH']
         for bridge in bridges:
-            if quote == bridge or fee_currency == bridge: continue
+            if bridge in [quote, fee_currency]: continue
             try:
                 ticker_fee = await self.fetch_ticker(f"{fee_currency}/{bridge}")
                 ticker_quote = await self.fetch_ticker(f"{quote}/{bridge}")
@@ -334,24 +337,20 @@ class MockExchange2(ExchangeInterface2):
                 yield data
         else:
             if not symbols: return
-            ohlcv_input = []
+            symbol_names = []
             if isinstance(symbols, str):
-                ohlcv_input.append([symbols, timeframe])
+                symbol_names = [symbols]
             elif hasattr(symbols, '__iter__') and not isinstance(symbols, str):
-                for item in symbols:
-                    if isinstance(item, (list, tuple)) and len(item) >= 1:
-                        s = str(item[0])
-                        t = str(item[1]) if len(item) >= 2 else timeframe
-                        ohlcv_input.append([s, t])
-                    else:
-                        ohlcv_input.append([str(item), timeframe])
+                symbol_names = [s[0] if isinstance(s, (list, tuple)) else str(s) for s in symbols]
             else:
-                ohlcv_input.append([str(symbols), timeframe])
+                symbol_names = [str(symbols)]
 
+            import random
             while True:
-                for sym, tf in ohlcv_input:
-                    yield (sym, tf, [[time.time()*1000, 100, 105, 95, 102, 1000]])
-                await asyncio.sleep(1)
+                # Mock a gradual update stream
+                s = random.choice(symbol_names)
+                yield (s, timeframe, [[time.time()*1000, 100, 105, 95, 102, 1000]])
+                await asyncio.sleep(0.1)
 
     async def watch_balance(self):
         await self._init_balance()

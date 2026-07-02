@@ -46,7 +46,7 @@ analysis_in_progress = set()
 analysis_lock = asyncio.Lock()
 
 # Global Watcher Task
-global_watcher_task = None
+ohlcv_task = None
 
 # Track orders placed by the bot to process them via WebSocket confirmation
 pending_orders = {} # order_id -> metadata_dict
@@ -1791,7 +1791,7 @@ async def main():
 
     # Start Global OHLCV Watcher
     watch_pairs = [[s, '1s'] for s in pairs]
-    global_watcher_task = asyncio.create_task(watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor))
+    ohlcv_task = asyncio.create_task(watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor))
 
     # Ensure all watchers are setup (Wait a bit for connections to stabilize)
     await asyncio.sleep(2)
@@ -1848,8 +1848,8 @@ async def main():
         all_tasks = background_tasks.copy()
         if ui_task:
             all_tasks.append(ui_task)
-        if global_watcher_task:
-            all_tasks.append(global_watcher_task)
+        if ohlcv_task:
+            all_tasks.append(ohlcv_task)
 
         # Cancel all pending tasks
         for t in all_tasks:
