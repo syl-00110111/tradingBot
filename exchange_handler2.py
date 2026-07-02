@@ -106,39 +106,48 @@ class CCXTExchange2(ExchangeInterface2):
 
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         """
-        Watches OHLCV for multiple symbols at 1s interval using a single association.
+        Watches OHLCV for multiple symbols using the CCXT Pro unified watchOHLCVForSymbols method.
         """
         if not symbols:
             return
 
-        # Defensive normalization to a list of symbol strings
+        # Normalize to list of [symbol, timeframe] pairs.
+        # This format (List[List[str]]) is the most robust for CCXT Pro's watchOHLCVForSymbols.
+        # It prevents CCXT from iterating over characters of a symbol string.
+        ohlcv_input = []
+
+        # Determine if we have a single symbol string or an iterable of symbols
         if isinstance(symbols, str):
-            symbol_list = [symbols]
-        elif hasattr(symbols, '__iter__'):
-            symbol_list = []
-            for s in symbols:
-                if isinstance(s, (list, tuple)) and len(s) > 0:
-                    symbol_list.append(str(s[0]))
-                elif isinstance(s, str):
-                    symbol_list.append(s)
-                else:
-                    symbol_list.append(str(s))
+            symbols_to_process = [symbols]
+        elif hasattr(symbols, '__iter__') and not isinstance(symbols, dict):
+            symbols_to_process = symbols
         else:
-            symbol_list = [str(symbols)]
+            symbols_to_process = [str(symbols)]
 
-        # Filter symbols to only those that exist in the exchange markets to avoid character-iteration bugs
-        # and ensure we only call for valid symbols.
-        symbol_list = [s for s in symbol_list if s in self.markets and len(s) > 1]
+        seen_symbols = set()
+        for item in symbols_to_process:
+            if isinstance(item, (list, tuple)) and len(item) >= 1:
+                s = str(item[0])
+                t = str(item[1]) if len(item) >= 2 else timeframe
+            else:
+                s = str(item)
+                t = timeframe
 
-        if not symbol_list:
+            if s in self.markets and s not in seen_symbols:
+                ohlcv_input.append([s, t])
+                seen_symbols.add(s)
+
+        if not ohlcv_input:
             return
 
         while True:
             try:
-                # Use the camelCase method watchOHLCVForSymbols as requested.
-                # It typically returns a dictionary { symbol: { timeframe: candles } } or { symbol: candles }.
-                result = await self.exchange.watchOHLCVForSymbols(symbol_list, timeframe)
+                # Call the unified CCXT Pro method.
+                # Signature: watchOHLCVForSymbols(symbolsAndTimeframes, since=None, limit=None, params={})
+                # By passing ohlcv_input as the first and only positional argument, we ensure compatibility.
+                result = await self.exchange.watchOHLCVForSymbols(ohlcv_input)
 
+                # Handling standard CCXT Pro return formats.
                 if isinstance(result, dict):
                     for symbol, data in result.items():
                         if isinstance(data, dict):
@@ -147,10 +156,21 @@ class CCXTExchange2(ExchangeInterface2):
                                 yield (symbol, tf, candles)
                         else:
                             # Format: { symbol: [candles] }
-                            yield (symbol, timeframe, data)
+                            # Find the original timeframe for this symbol from our input mapping.
+                            tf_found = timeframe
+                            for pair in ohlcv_input:
+                                if pair[0] == symbol:
+                                    tf_found = pair[1]
+                                    break
+                            yield (symbol, tf_found, data)
             except Exception as e:
-                logging.error(f"Error in watch_ohlcv_for_symbols: {e}")
-                await asyncio.sleep(1)
+                err_str = str(e).lower()
+                if "restricted location" in err_str or "451" in err_str:
+                    logging.error(f"WebSocket restricted: {self.exchange_id} is not available in your region.")
+                    await asyncio.sleep(60)
+                else:
+                    logging.error(f"Error in watchOHLCVForSymbols: {e}")
+                    await asyncio.sleep(5)
 
     async def watch_balance(self):
         while True:
@@ -314,17 +334,23 @@ class MockExchange2(ExchangeInterface2):
                 yield data
         else:
             if not symbols: return
+            ohlcv_input = []
             if isinstance(symbols, str):
-                symbol_list = [symbols]
+                ohlcv_input.append([symbols, timeframe])
+            elif hasattr(symbols, '__iter__') and not isinstance(symbols, str):
+                for item in symbols:
+                    if isinstance(item, (list, tuple)) and len(item) >= 1:
+                        s = str(item[0])
+                        t = str(item[1]) if len(item) >= 2 else timeframe
+                        ohlcv_input.append([s, t])
+                    else:
+                        ohlcv_input.append([str(item), timeframe])
             else:
-                symbol_list = [s[0] if isinstance(s, (list, tuple)) else s for s in symbols]
+                ohlcv_input.append([str(symbols), timeframe])
 
-            pairs = [[s, timeframe] for s in symbol_list]
             while True:
-                for item in pairs:
-                    symbol = item[0]
-                    tf = item[1]
-                    yield (symbol, tf, [[time.time()*1000, 100, 105, 95, 102, 1000]])
+                for sym, tf in ohlcv_input:
+                    yield (sym, tf, [[time.time()*1000, 100, 105, 95, 102, 1000]])
                 await asyncio.sleep(1)
 
     async def watch_balance(self):
