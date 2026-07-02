@@ -383,8 +383,8 @@ async def chart_renderer_task(config):
                     current_last_ts = int(df_tail.index[-1].timestamp())
 
                     if chart_cache["symbol"] != symbol or chart_cache["last_update"] != current_last_ts:
-                        # Throttle rendering to once per second
-                        if time.time() - last_rendered_ts > 1.0:
+                        # Throttle rendering to 0.2s for near real-time updates
+                        if time.time() - last_rendered_ts > 0.2:
                             width = console.width - 4
                             h_offset = ui_cfg.get('panel_height_offset', 20)
                             height = console.height - h_offset
@@ -400,7 +400,7 @@ async def chart_renderer_task(config):
                                 "content": content
                             }
                             last_rendered_ts = time.time()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
         except Exception:
             await asyncio.sleep(1)
 
@@ -542,6 +542,14 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
             async for updates in exchange.watch_ohlcv_for_symbols(watch_pairs):
                 if shutdown_event.is_set(): break
 
+                # Update all prices in the batch first for maximum perceived responsiveness in the dashboard
+                async with bot_lock:
+                    for data in updates:
+                        if isinstance(data, tuple) and len(data) == 3:
+                            symbol, _, candles = data
+                            if symbol in bot_state:
+                                bot_state[symbol]['price'] = candles[-1][4]
+
                 for data in updates:
                     if isinstance(data, tuple) and len(data) == 3:
                         symbol, timeframe, candles = data
@@ -553,18 +561,23 @@ async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, p
 
                         df = ohlcv_cache[symbol]
 
-                        new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
-                        new_candles_df.set_index('timestamp', inplace=True)
+                        # Optimization: if only updating the current/last candle, do it in-place
+                        last_candle = candles[-1]
+                        last_ts = pd.to_datetime(last_candle[0], unit='ms')
 
-                        df = pd.concat([df, new_candles_df])
-                        df = df[~df.index.duplicated(keep='last')]
-                        df.sort_index(inplace=True)
-                        ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
+                        if not df.empty and last_ts == df.index[-1]:
+                            # In-place update of the most recent candle
+                            df.iloc[-1] = last_candle[1:]
+                        else:
+                            # Full update for gaps or new candles
+                            new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                            new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
+                            new_candles_df.set_index('timestamp', inplace=True)
 
-                        async with bot_lock:
-                            if symbol in bot_state:
-                                bot_state[symbol]['price'] = candles[-1][4]
+                            df = pd.concat([df, new_candles_df])
+                            df = df[~df.index.duplicated(keep='last')]
+                            df.sort_index(inplace=True)
+                            ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
 
                     # Trigger analysis
                     async with analysis_lock:
@@ -907,6 +920,7 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 
     try:
         price = data['close']
+        order = None
 
         # Check Notional Limit
         market = exchange.markets.get(symbol)
