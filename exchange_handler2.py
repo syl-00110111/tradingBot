@@ -108,11 +108,22 @@ class CCXTExchange2(ExchangeInterface2):
         """
         Watches OHLCV for multiple symbols at 1s interval using a single association.
         """
-        # CCXT Pro watchOHLCVForSymbols expects a list of symbols if symbols is a list of lists.
-        # But here it's already expected to be correct or handled by the caller.
-        # In bot2.py it is passed as: watch_pairs = [[s, '1s'] for s in pairs]
-        # CCXT watchOHLCVForSymbols(symbols, timeframe) expects symbols to be [symbol1, symbol2, ...]
-        symbol_list = [s[0] if isinstance(s, list) else s for s in symbols]
+        if not symbols:
+            return
+
+        if isinstance(symbols, str):
+            symbol_list = [symbols]
+        else:
+            # symbol_list should be a list of symbols: ['BTC/USDT', 'ETH/USDT']
+            # symbols might be [['BTC/USDT', '1s'], ...] or ['BTC/USDT', ...]
+            symbol_list = []
+            for s in symbols:
+                if isinstance(s, (list, tuple)) and len(s) > 0:
+                    symbol_list.append(s[0])
+                elif isinstance(s, str):
+                    symbol_list.append(s)
+                else:
+                    symbol_list.append(str(s))
 
         while True:
             try:
@@ -128,13 +139,14 @@ class CCXTExchange2(ExchangeInterface2):
                     # Format: { symbol: { timeframe: [candles] } } or { symbol: [candles] }
                     for symbol, data in result.items():
                         if isinstance(data, dict):
+                            # Format: { symbol: { timeframe: [candles] } }
                             for tf, candles in data.items():
                                 yield (symbol, tf, candles)
                         else:
+                            # Format: { symbol: [candles] }
                             yield (symbol, timeframe, data)
                 elif isinstance(result, list) and len(result) > 0:
-                    # Some exchanges might return a list of [symbol, timeframe, candles] or similar
-                    # but usually it's a single update. CCXT's manual says it returns a nested dict.
+                    # Handle unexpected list return formats if necessary
                     pass
             except Exception as e:
                 logging.error(f"Error in watch_ohlcv_for_symbols: {e}")
@@ -301,7 +313,13 @@ class MockExchange2(ExchangeInterface2):
             async for data in self.real_exchange.watch_ohlcv_for_symbols(symbols, timeframe):
                 yield data
         else:
-            pairs = [[s, timeframe] for s in symbols] if isinstance(symbols[0], str) else symbols
+            if not symbols: return
+            if isinstance(symbols, str):
+                symbol_list = [symbols]
+            else:
+                symbol_list = [s[0] if isinstance(s, (list, tuple)) else s for s in symbols]
+
+            pairs = [[s, timeframe] for s in symbol_list]
             while True:
                 for item in pairs:
                     symbol = item[0]
