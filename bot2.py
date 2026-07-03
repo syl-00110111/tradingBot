@@ -1808,11 +1808,8 @@ async def main():
         all_tickers = await exchange.fetch_tickers()
 
         quote_asset = config.get('quote_asset')
-        # Target number of pairs to monitor, supporting optional max_number_of_pairs config
-        try:
-            num_pairs = int(config.get('max_number_of_pairs') or config.get('number_of_pairs', 40))
-        except:
-            num_pairs = 40
+        # Target max number of pairs to monitor
+        num_pairs = int(config.get('max_number_of_pairs', 40))
 
         # Candidate symbols: Must end with quote_asset
         candidates = []
