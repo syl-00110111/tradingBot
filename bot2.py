@@ -943,7 +943,7 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
 
     try:
         # Improve purchasing behavior: fetch order book and compute 50% spread
-        order_book = await exchange.fetch_order_book(symbol, limit=5)
+        order_book = await exchange.fetch_order_book(symbol, limit=20)
         if order_book and order_book['bids'] and order_book['asks']:
             best_bid = order_book['bids'][0][0]
             best_ask = order_book['asks'][0][0]
