@@ -48,6 +48,12 @@ analysis_lock = asyncio.Lock()
 
 # Global Watcher Task
 ohlcv_task = None
+trades_task = None
+
+# Global Active Pairs Management
+active_pairs = []
+discovery_pool = []
+pair_last_trade_time = {}
 
 # Global Buy Queue for turn-based processing
 buy_queue = []
@@ -534,16 +540,110 @@ async def input_task(exchange, config, data_manager, engine):
             logging.error(f"Input error: {e}")
         await asyncio.sleep(0.1)
 
-async def watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor):
+async def watch_trades_pool_task(exchange, discovery_pool, config, data_manager):
     """
-    Single watcher task for all symbols.
-    'watch_pairs' is a list of [symbol, timeframe] where timeframe is always 1s.
+    Watches trades for all pairs in the discovery pool to track activity.
     """
-    logging.info(f"[bold cyan]Starting global OHLCV watcher for {len(watch_pairs)} symbols.")
+    logging.info(f"[bold cyan]Starting trades pool watcher for {len(discovery_pool)} symbols.")
 
     while not shutdown_event.is_set():
         try:
-            async for updates in exchange.watch_ohlcv_for_symbols(watch_pairs):
+            async for trades in exchange.watch_trades_for_symbols(discovery_pool):
+                if shutdown_event.is_set(): break
+
+                for trade in trades:
+                    symbol = trade['symbol']
+                    now = time.time()
+                    pair_last_trade_time[symbol] = now
+
+                    if symbol not in active_pairs:
+                        # Attempt to swap in
+                        async with bot_lock:
+                            max_pairs = int(config.get('max_number_of_pairs', 40))
+                            if len(active_pairs) < max_pairs:
+                                logging.info(f"[{symbol}] Adding to active pairs (room available).")
+                                await add_active_pair(symbol, exchange, config, data_manager)
+                            else:
+                                # Find least active pair with no open position and no pending orders
+                                candidates = []
+                                for p in active_pairs:
+                                    if not data_manager.get_position(p):
+                                        has_pending = False
+                                        async with pending_orders_lock:
+                                            for po in pending_orders.values():
+                                                if po['symbol'] == p:
+                                                    has_pending = True
+                                                    break
+                                        if not has_pending:
+                                            candidates.append(p)
+
+                                if candidates:
+                                    # Sort by last trade time
+                                    candidates.sort(key=lambda p: pair_last_trade_time.get(p, 0))
+                                    least_active = candidates[0]
+
+                                    # Only swap if the new one is "fresher" or we just want to rotate
+                                    logging.info(f"[{symbol}] Swapping in. Replacing least active pair [{least_active}].")
+                                    await remove_active_pair(least_active)
+                                    await add_active_pair(symbol, exchange, config, data_manager)
+
+        except Exception as e:
+            if not shutdown_event.is_set():
+                logging.error(f"WebSocket trades pool error: {e}")
+                await asyncio.sleep(5)
+            else: break
+
+async def add_active_pair(symbol, exchange, config, data_manager):
+    if symbol in active_pairs: return
+
+    # Initialize bot state
+    pair_cfg = config.get('pairs', {}).get(symbol, {})
+    strat = pair_cfg.get('strategy') or random.choice(STRATEGIES)
+    aggr = pair_cfg.get('aggr') or random.choice(['normal', 'aggressive', 'dynamic'])
+
+    bot_state[symbol] = {
+        'price': 0, 'rsi': 0, 'tendency': 'Neutral',
+        'last_signal': 'Init',
+        'position': data_manager.get_position(symbol),
+        'aggr': aggr,
+        'strategy': strat,
+        'consecutive_buys': 0,
+        'consecutive_sells': 0,
+        'score': 0,
+        'ema_f': 0,
+        'ema_s': 0,
+        'adx': 0,
+        'volatility': 0,
+        'expected_profit': 0,
+        'last_analysis_ts': 0
+    }
+    pair_last_trade_time[symbol] = time.time()
+
+    if symbol not in ohlcv_cache:
+        ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+
+    active_pairs.append(symbol)
+    logging.info(f"[{symbol}] Added to active monitoring set.")
+
+async def remove_active_pair(symbol):
+    if symbol in active_pairs:
+        active_pairs.remove(symbol)
+        # We keep bot_state and ohlcv_cache for a bit or just leave them,
+        # but they won't be updated by the watcher anymore.
+        logging.info(f"[{symbol}] Removed from active monitoring set.")
+
+async def watch_ohlcv_global_task(exchange, watch_pairs_list, config, data_manager, pattern_manager, engine, device, executor):
+    """
+    Single watcher task for all symbols in active_pairs.
+    'watch_pairs_list' is the live list active_pairs.
+    """
+    logging.info(f"[bold cyan]Starting global OHLCV watcher.")
+
+    while not shutdown_event.is_set():
+        try:
+            # We pass a wrapper that yields [symbol, '1s'] for each symbol in active_pairs
+            # But I modified watch_ohlcv_for_symbols to handle dynamic lists if I pass the list itself.
+            async for updates in exchange.watch_ohlcv_for_symbols(watch_pairs_list):
                 if shutdown_event.is_set(): break
 
                 # Update all prices in the batch first for maximum perceived responsiveness in the dashboard
@@ -1796,6 +1896,7 @@ async def main():
 
     # Discover and select pairs based on volume, configuration, and balances
     logging.info("Retrieving best pairs based on 24h volume and balance analysis...")
+    global discovery_pool, active_pairs
     try:
         # Fetch initial balances and tickers early to reuse
         logging.info("Retrieving initial balances and tickers...")
@@ -1810,6 +1911,7 @@ async def main():
         quote_asset = config.get('quote_asset')
         # Target max number of pairs to monitor
         num_pairs = int(config.get('max_number_of_pairs', 40))
+        discovery_pool_size = num_pairs * 2
 
         # Candidate symbols: Must end with quote_asset
         candidates = []
@@ -1825,46 +1927,12 @@ async def main():
                 'base': symbol.split('/')[0]
             })
 
-        # Sort by volume descending for initial pool selection
+        # Sort by volume descending for discovery pool
         candidates.sort(key=lambda x: x['volume'], reverse=True)
+        discovery_pool = [c['symbol'] for c in candidates[:discovery_pool_size]]
 
-        logging.info(f"Scanning top volume pairs for trade activity (Target: {num_pairs})...")
-        verified_pool = []
-        batch_size = 10
-        idx = 0
-
-        # Continue scanning high-volume candidates until we find enough active ones
-        # We aim for slightly more than num_pairs to pick the best among them.
-        pool_target = int(num_pairs * 1.2)
-
-        while len(verified_pool) < pool_target and idx < len(candidates):
-            batch = candidates[idx : idx + batch_size]
-            idx += batch_size
-
-            async def verify_activity(c):
-                try:
-                    # Fetch recent trades to verify actual activity as count field is often missing
-                    trades = await asyncio.wait_for(exchange.fetch_trades(c['symbol'], limit=50), timeout=5)
-                    return {'symbol': c['symbol'], 'count': len(trades), 'volume': c['volume']}
-                except Exception:
-                    return {'symbol': c['symbol'], 'count': 0, 'volume': c['volume']}
-
-            results = await asyncio.gather(*[verify_activity(c) for c in batch])
-            for r in results:
-                if r['count'] > 0:
-                    verified_pool.append(r)
-
-            # Rate limit mitigation during startup
-            if idx < len(candidates) and len(verified_pool) < pool_target:
-                await asyncio.sleep(0.1)
-
-        # Final sort by verified activity (trade count) and then volume
-        verified_pool.sort(key=lambda x: (x['count'], x['volume']), reverse=True)
-        top_activity_pairs = [r['symbol'] for r in verified_pool[:num_pairs]]
-
-        # Fallback to volume-only ranking if no activity could be verified via trades
-        if not top_activity_pairs and candidates:
-            top_activity_pairs = [c['symbol'] for c in candidates[:num_pairs]]
+        # Initial active pairs are the top volume ones
+        top_activity_pairs = discovery_pool[:num_pairs]
 
         # 2. Add pairs from inventory if enabled
         inventory_pairs = []
@@ -1883,36 +1951,37 @@ async def main():
 
                 # Check for any pair where user has the Quote Asset
                 if config.get('include_all_quote_pairs'):
-                    # This logic adds all symbols for which the user has the quote currency in balance.
-                    # We limit this to top activity pairs with that quote to avoid adding thousands.
                     for s in all_tickers.keys():
                         if s.endswith(f"/{asset}") and s not in top_activity_pairs and s not in inventory_pairs:
-                            # Only add top 5 activity for this specific quote if it's not the main one
                             inventory_pairs.append(s)
 
-        final_pairs = list(set(top_activity_pairs + inventory_pairs + list(config['pairs'].keys())))
+        initial_active_set = list(set(top_activity_pairs + inventory_pairs + list(config['pairs'].keys())))
 
-        # Filter pairs that exist in markets
-        final_pairs = [p for p in final_pairs if p in exchange.markets]
+        # Filter pairs that exist in markets and ensure discovery pool contains them too
+        initial_active_set = [p for p in initial_active_set if p in exchange.markets]
+        discovery_pool = [p for p in discovery_pool if p in exchange.markets]
 
-        for p in final_pairs:
-            if p not in config['pairs']:
-                config['pairs'][p] = {}
+        # Ensure initial active set doesn't exceed too much or respect config
+        active_pairs = initial_active_set[:num_pairs]
+        # Make sure inventory pairs are prioritized if they have positions
+        for p in initial_active_set:
+            if p not in active_pairs and (data_manager.get_position(p) or p in config['pairs']):
+                active_pairs.append(p)
 
-        pairs = list(config['pairs'].keys())
-        logging.info(f"Initialized with {len(pairs)} pairs (Top Trades: {len(top_activity_pairs)}, Inventory: {len(inventory_pairs)}).")
+        logging.info(f"Initialized discovery pool with {len(discovery_pool)} pairs.")
+        logging.info(f"Initial active set: {len(active_pairs)} pairs.")
 
     except Exception as e:
         logging.error(f"Failed to dynamically retrieve pairs: {e}")
-        pairs = list(config['pairs'].keys())
+        active_pairs = list(config['pairs'].keys())
 
-    if not pairs:
+    if not active_pairs:
         logging.error("No pairs could be initialized.")
         await exchange.close()
         return
 
     # Start UI task
-    global ui_task, background_tasks, startup_complete
+    global ui_task, background_tasks, startup_complete, ohlcv_task, trades_task
     ui_task = asyncio.create_task(run_dashboard(config))
 
     logging.info("[bold cyan]System initialization started...")
@@ -1939,6 +2008,7 @@ async def main():
             'expected_profit': 0,
             'last_analysis_ts': 0
         }
+        pair_last_trade_time[symbol] = time.time()
 
     if args.fast_start:
         logging.info("[bold yellow]Fast start enabled: Skipping initial candles fetch.")
@@ -1997,8 +2067,10 @@ async def main():
     ]
 
     # Start Global OHLCV Watcher
-    watch_pairs = [[s, '1s'] for s in pairs]
-    ohlcv_task = asyncio.create_task(watch_ohlcv_global_task(exchange, watch_pairs, config, data_manager, pattern_manager, engine, device, executor))
+    ohlcv_task = asyncio.create_task(watch_ohlcv_global_task(exchange, active_pairs, config, data_manager, pattern_manager, engine, device, executor))
+
+    # Start Trades Pool Watcher
+    trades_task = asyncio.create_task(watch_trades_pool_task(exchange, discovery_pool, config, data_manager))
 
     # Ensure all watchers are setup (Wait a bit for connections to stabilize)
     await asyncio.sleep(2)
