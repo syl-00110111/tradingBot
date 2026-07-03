@@ -7,8 +7,6 @@ Un bot de trading universel de crypto-monnaies implémenté en Python, tirant pa
 ## 🔬 Fondements Scientifiques
 Ce bot implémente des stratégies et une logique recommandées par des études empiriques de premier plan sur les marchés de crypto-monnaies :
 
-- **Scoring Multi-Techniques** : Agrège les signaux de plusieurs stratégies et profils d'agressivité. Le score du signal est pondéré par le nombre de techniques et le score de l'unité de temps optimale du symbole.
-- **Détection du Régime de Marché** : Utilise une commutation dynamique entre le **Retour à la Moyenne** (Mean-Reversion) et le **Suivi de Tendance** (Trend-Following) basée sur la volatilité et l'ADX.
 - **Validation Monte Carlo** : Simulations vectorisées pour estimer la probabilité de succès pour chaque signal, pénalisant les configurations à haut risque.
 
 ---
@@ -16,7 +14,6 @@ Ce bot implémente des stratégies et une logique recommandées par des études 
 ## 🛠 Fonctionnalités Principales
 
 ### 🛡 Gestion des Risques
-- **Logique de Confirmation** : Nécessite des signaux persistants pour l'exécution. La fenêtre de confirmation s'élargit automatiquement en cas de haute volatilité (> 0.1).
 - **Suspension Intelligente** : Suspend automatiquement le trading pour les symboles où les ordres échouent ou si le budget est insuffisant. Reprend uniquement lorsque 1.2x le budget requis devient disponible.
 - **Dimensionnement Dynamique** : Les tailles de position sont calculées comme un pourcentage de votre solde disponible, divisé par le nombre maximum de lots autorisés pour maintenir une exposition contrôlée.
 
@@ -45,10 +42,10 @@ Le bot propose plus de 30 stratégies distinctes, incluant :
 ### 🛠 `config.json`
 Paramètres principaux du bot. Pour ne personnaliser que certains paramètres, vous devez copier le fichier `config.default.json` vers `config.json` et modifier vos réglages dans ce dernier.
 
+*   **`quote_asset`**: (string) Un actif de cotation que vous définissez (par défaut : `USDC`). Le bot récupère automatiquement les paires les plus dynamiques associées à cet actif de base.
 *   **`max_lots_per_symbol`** : (int) Nombre maximum de lots d'achat autorisés par symbole (par défaut : `1`).
 *   **`max_open_positions`** : (int) Nombre maximum de paires de trading distinctes ouvertes simultanément (par défaut : `10`).
-*   **`max_trade_percentage`** : (float | object) Pourcentage maximum de votre solde total à exposer par symbole (tous lots confondus) (par défaut : `10`).
-*   * Attention, il s'agit de DIX pourcent par défaut ce qui peut être beaucoup ! Bien vérifier les options avant lancement !
+*   **`max_trade_percentage`** : (float) Pourcentage maximum de votre solde total à exposer par symbole (tous lots confondus) (par défaut : `2`).
 *   **Configuration par devise de base** : Vous pouvez définir différents maximums pour différentes devises de base :
     ```json
     "max_trade_percentage": {
@@ -59,7 +56,7 @@ Paramètres principaux du bot. Pour ne personnaliser que certains paramètres, v
     }
     ```
 *   **`global_risk_multiplier`** : (float) Multiplicateur pour le dimensionnement des positions et les confirmations techniques (par défaut : `1.1`).
-*   **`dynamic_pair_multiplier`** : (float) Multiplicateur appliqué spécifiquement aux paires en unité de temps 1s (par défaut : `2.0`).
+*   **`dynamic_pair_multiplier`** : (float) Multiplicateur appliqué spécifiquement aux paires en unité de temps 1s (par défaut : `1.4`).
 *   **`no_signal_threshold`** : (int) Nombre de bougies sans signal.
 
 #### Surcharges Avancées (Optionnel)
@@ -73,16 +70,6 @@ Paramètres principaux du bot. Pour ne personnaliser que certains paramètres, v
         }
     }
     ```
-
-### 📄 `pairs.txt`
-Définissez les paires de trading que vous souhaitez que le bot surveille (une par ligne).
-Exemple :
-```text
-BTC/USDC
-ETH/USDC
-SOL/USDC
-```
-*Les devises de base (ex: USDC) sont automatiquement détectées.*
 
 ### 🔑 `api.json`
 Stockez vos identifiants API et l'échange préféré.
