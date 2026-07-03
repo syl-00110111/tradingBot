@@ -1804,30 +1804,70 @@ async def main():
             global current_balances
             current_balances = initial_balance
 
-        # 1. Fetch 24h tickers to find high activity pairs (by trade count)
+        # 1. Fetch 24h tickers to find high activity pairs
         all_tickers = await exchange.fetch_tickers()
 
         quote_asset = config.get('quote_asset')
-        num_pairs = config.get('number_of_pairs')
+        # Target number of pairs to monitor, supporting optional max_number_of_pairs config
+        try:
+            num_pairs = int(config.get('max_number_of_pairs') or config.get('number_of_pairs', 40))
+        except:
+            num_pairs = 40
 
-        # Candidate symbols: Must end with quote_asset and have activity data
+        # Candidate symbols: Must end with quote_asset
         candidates = []
         for symbol, ticker in all_tickers.items():
             if not symbol.endswith(f"/{quote_asset}"):
                 continue
 
-            # Record number of trades per 24h (count field)
-            count = ticker.get('count') or 0
-            if count > 0:
-                candidates.append({
-                    'symbol': symbol,
-                    'count': count,
-                    'base': symbol.split('/')[0]
-                })
+            # Initial ranking based on 24h volume (quoteVolume if available, otherwise estimate)
+            vol = ticker.get('quoteVolume') or ((ticker.get('baseVolume') or 0) * (ticker.get('last') or 0))
+            candidates.append({
+                'symbol': symbol,
+                'volume': vol,
+                'base': symbol.split('/')[0]
+            })
 
-        # Sort by trade count descending
-        candidates.sort(key=lambda x: x['count'], reverse=True)
-        top_activity_pairs = [c['symbol'] for c in candidates[:num_pairs]]
+        # Sort by volume descending for initial pool selection
+        candidates.sort(key=lambda x: x['volume'], reverse=True)
+
+        logging.info(f"Scanning top volume pairs for trade activity (Target: {num_pairs})...")
+        verified_pool = []
+        batch_size = 10
+        idx = 0
+
+        # Continue scanning high-volume candidates until we find enough active ones
+        # We aim for slightly more than num_pairs to pick the best among them.
+        pool_target = int(num_pairs * 1.2)
+
+        while len(verified_pool) < pool_target and idx < len(candidates):
+            batch = candidates[idx : idx + batch_size]
+            idx += batch_size
+
+            async def verify_activity(c):
+                try:
+                    # Fetch recent trades to verify actual activity as count field is often missing
+                    trades = await asyncio.wait_for(exchange.fetch_trades(c['symbol'], limit=50), timeout=5)
+                    return {'symbol': c['symbol'], 'count': len(trades), 'volume': c['volume']}
+                except Exception:
+                    return {'symbol': c['symbol'], 'count': 0, 'volume': c['volume']}
+
+            results = await asyncio.gather(*[verify_activity(c) for c in batch])
+            for r in results:
+                if r['count'] > 0:
+                    verified_pool.append(r)
+
+            # Rate limit mitigation during startup
+            if idx < len(candidates) and len(verified_pool) < pool_target:
+                await asyncio.sleep(0.1)
+
+        # Final sort by verified activity (trade count) and then volume
+        verified_pool.sort(key=lambda x: (x['count'], x['volume']), reverse=True)
+        top_activity_pairs = [r['symbol'] for r in verified_pool[:num_pairs]]
+
+        # Fallback to volume-only ranking if no activity could be verified via trades
+        if not top_activity_pairs and candidates:
+            top_activity_pairs = [c['symbol'] for c in candidates[:num_pairs]]
 
         # 2. Add pairs from inventory if enabled
         inventory_pairs = []
