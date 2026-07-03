@@ -64,6 +64,15 @@ class CCXTExchange2(ExchangeInterface2):
     async def fetch_ohlcv_10k(self, symbol, timeframe, limit=None):
         if limit is None:
             limit = self.config.get('exchange', {}).get('fetch_ohlcv_limit', 10000)
+
+        # Robustness: Ensure limit is a valid integer and not None
+        if limit is None:
+            limit = 10000
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 10000
+
         all_ohlcv = []
         try:
             tf_seconds = self.exchange.parse_timeframe(timeframe)
@@ -72,7 +81,7 @@ class CCXTExchange2(ExchangeInterface2):
         except:
             tf_seconds = 1
 
-        duration_ms = limit * tf_seconds * 1000
+        duration_ms = int(limit * tf_seconds * 1000)
         since = self.exchange.milliseconds() - duration_ms
 
         retries = 0
