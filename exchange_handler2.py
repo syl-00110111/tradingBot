@@ -13,6 +13,7 @@ class ExchangeInterface2:
     async def fetch_ohlcv_10k(self, symbol, timeframe, limit=10000): raise NotImplementedError
     async def watch_ohlcv_for_symbols(self, symbols, timeframe): raise NotImplementedError
     async def watch_trades_for_symbols(self, symbols): raise NotImplementedError
+    async def watch_trades(self, symbol): raise NotImplementedError
     async def watch_balance(self): raise NotImplementedError
     async def watch_orders(self, symbol=None): raise NotImplementedError
     async def fetch_order_book(self, symbol, limit=20): raise NotImplementedError
@@ -117,7 +118,7 @@ class CCXTExchange2(ExchangeInterface2):
         except (ValueError, TypeError):
             limit = 10000
 
-        timeframe, tf_seconds = await self._get_supported_timeframe(timeframe)
+        actual_timeframe, tf_seconds = await self._get_supported_timeframe(timeframe)
 
         all_ohlcv = []
         duration_ms = int(limit * tf_seconds * 1000)
@@ -130,7 +131,7 @@ class CCXTExchange2(ExchangeInterface2):
             fetch_limit = min(self.config.get('exchange', {}).get('fetch_chunk_size', 1000), limit - len(all_ohlcv))
             try:
                 chunk = await asyncio.wait_for(
-                    self.exchange.fetch_ohlcv(symbol, timeframe, since, limit=fetch_limit),
+                    self.exchange.fetch_ohlcv(symbol, actual_timeframe, since, limit=fetch_limit),
                     timeout=self.config.get('timeouts', {}).get('ohlcv_chunk', 20)
                 )
                 if not chunk:
@@ -154,44 +155,118 @@ class CCXTExchange2(ExchangeInterface2):
         if len(all_ohlcv) < 100:
             logging.warning(f"[{symbol}] Only {len(all_ohlcv)} candles retrieved. Bot might need more history for accuracy.")
 
-        return all_ohlcv[-limit:]
+        return all_ohlcv[-limit:], actual_timeframe
+
+    async def watch_trades(self, symbol):
+        while True:
+            try:
+                trades = await self.exchange.watch_trades(symbol)
+                yield trades
+            except Exception as e:
+                logging.error(f"Error in watch_trades for {symbol}: {e}")
+                await asyncio.sleep(5)
 
     async def watch_trades_for_symbols(self, symbols):
         """
         Watches trades for multiple symbols.
+        Falls back to individual watchers if watchTradesForSymbols is not supported.
         """
         if not symbols:
             return
 
+        use_fallback = False
+        last_symbols_snapshot = None
+        individual_tasks = {}
+        queue = asyncio.Queue()
+
+        async def individual_watcher(symbol):
+            try:
+                async for trades in self.watch_trades(symbol):
+                    await queue.put(trades)
+            except Exception as e:
+                logging.error(f"Individual trades watcher error for {symbol}: {e}")
+
         while True:
             try:
-                trades = await self.exchange.watchTradesForSymbols(symbols)
-                yield trades
+                if not use_fallback:
+                    try:
+                        trades = await self.exchange.watchTradesForSymbols(symbols)
+                        yield trades
+                    except Exception as e:
+                        if "not supported" in str(e).lower() or "not implemented" in str(e).lower():
+                            logging.warning(f"watchTradesForSymbols not supported by {self.exchange_id}, falling back to individual watchers.")
+                            use_fallback = True
+                        else:
+                            raise e
+
+                if use_fallback:
+                    current_symbols_snapshot = set(symbols)
+                    if last_symbols_snapshot != current_symbols_snapshot:
+                        # Remove tasks for symbols no longer in the list
+                        if last_symbols_snapshot:
+                            for s in last_symbols_snapshot - current_symbols_snapshot:
+                                if s in individual_tasks:
+                                    individual_tasks[s].cancel()
+                                    del individual_tasks[s]
+
+                        # Add tasks for new symbols
+                        for s in current_symbols_snapshot:
+                            if s not in individual_tasks:
+                                individual_tasks[s] = asyncio.create_task(individual_watcher(s))
+
+                        last_symbols_snapshot = current_symbols_snapshot
+
+                    # Wait for data from any individual watcher
+                    try:
+                        trades = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        yield trades
+                    except asyncio.TimeoutError:
+                        continue
+
             except Exception as e:
-                logging.error(f"Error in watchTradesForSymbols: {e}")
+                logging.error(f"Error in trades watcher: {e}")
+                await asyncio.sleep(5)
+
+    async def watch_ohlcv(self, symbol, timeframe):
+        while True:
+            try:
+                candles = await self.exchange.watch_ohlcv(symbol, timeframe)
+                yield symbol, timeframe, candles
+            except Exception as e:
+                logging.error(f"Error in watch_ohlcv for {symbol}: {e}")
                 await asyncio.sleep(5)
 
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         """
         Watches OHLCV for multiple symbols using watchOHLCVForSymbols.
         Only yields when new candles are available to prevent redundant updates.
+        Falls back to individual watchers if not supported.
         """
         if not symbols:
             return
 
+        use_fallback = False
         last_symbols_snapshot = None
         ohlcv_input = []
         symbol_to_tf = {}
+        individual_tasks = {}
+        queue = asyncio.Queue()
+
+        async def individual_watcher(symbol, tf):
+            try:
+                async for update in self.watch_ohlcv(symbol, tf):
+                    await queue.put([update]) # Wrap in list to match updates format
+            except Exception as e:
+                logging.error(f"Individual OHLCV watcher error for {symbol}: {e}")
 
         # Track last yielded state (timestamp, close_price) to avoid redundant updates
-        # while still allowing intra-candle price updates.
         last_yielded_state = {}
 
         while True:
             try:
                 # Dynamic update of ohlcv_input if symbols list changed
-                current_symbols_snapshot = str(symbols)
-                if current_symbols_snapshot != last_symbols_snapshot:
+                current_symbols_snapshot_str = str(symbols)
+                if current_symbols_snapshot_str != last_symbols_snapshot:
                     ohlcv_input = []
                     seen = set()
                     input_list = [symbols] if isinstance(symbols, str) else symbols
@@ -207,39 +282,69 @@ class CCXTExchange2(ExchangeInterface2):
                             ohlcv_input.append([s, t])
                             seen.add(s)
 
-                    last_symbols_snapshot = current_symbols_snapshot
+                    last_symbols_snapshot = current_symbols_snapshot_str
                     symbol_to_tf = {p[0]: p[1] for p in ohlcv_input}
+
+                    if use_fallback:
+                        current_set = set([(p[0], p[1]) for p in ohlcv_input])
+                        # Cancel removed
+                        for key in list(individual_tasks.keys()):
+                            if key not in current_set:
+                                individual_tasks[key].cancel()
+                                del individual_tasks[key]
+                        # Add new
+                        for key in current_set:
+                            if key not in individual_tasks:
+                                individual_tasks[key] = asyncio.create_task(individual_watcher(key[0], key[1]))
 
                 if not ohlcv_input:
                     await asyncio.sleep(1)
                     continue
 
-                # Call CCXT Pro unified API
-                result = await self.exchange.watchOHLCVForSymbols(ohlcv_input)
-                updates = []
+                if not use_fallback:
+                    try:
+                        result = await self.exchange.watchOHLCVForSymbols(ohlcv_input)
+                        updates_to_process = []
+                        if isinstance(result, dict):
+                            for s, data in result.items():
+                                if isinstance(data, dict):
+                                    for tf, candles in data.items():
+                                        updates_to_process.append((s, tf, candles))
+                                elif isinstance(data, list):
+                                    updates_to_process.append((s, symbol_to_tf.get(s, timeframe), data))
+                        elif isinstance(result, list):
+                            # Some exchanges return a list of [symbol, timeframe, candles] or similar
+                            # This depends on CCXT implementation for specific exchange
+                            pass
 
-                if isinstance(result, dict):
-                    for symbol, data in result.items():
-                        # CCXT Pro may return { symbol: [candles] } or { symbol: { timeframe: [candles] } }
-                        if isinstance(data, dict):
-                            for tf, candles in data.items():
-                                if not candles: continue
-                                last_candle = candles[-1]
-                                current_state = (last_candle[0], last_candle[4]) # (timestamp, close)
-                                if current_state != last_yielded_state.get((symbol, tf)):
-                                    last_yielded_state[(symbol, tf)] = current_state
-                                    updates.append((symbol, tf, candles))
-                        elif isinstance(data, list):
-                            if not data: continue
-                            last_candle = data[-1]
-                            tf_found = symbol_to_tf.get(symbol, timeframe)
-                            current_state = (last_candle[0], last_candle[4])
-                            if current_state != last_yielded_state.get((symbol, tf_found)):
-                                last_yielded_state[(symbol, tf_found)] = current_state
-                                updates.append((symbol, tf_found, data))
+                        updates = updates_to_process
+                    except Exception as e:
+                        if "not supported" in str(e).lower() or "not implemented" in str(e).lower():
+                            logging.warning(f"watchOHLCVForSymbols not supported by {self.exchange_id}, falling back to individual watchers.")
+                            use_fallback = True
+                            # Force re-evaluation of individual tasks
+                            last_symbols_snapshot = None
+                            continue
+                        else:
+                            raise e
+                else:
+                    try:
+                        updates = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
 
-                if updates:
-                    yield updates
+                # Process updates
+                batch_updates = []
+                for symbol_upd, tf_upd, candles in updates:
+                    if not candles: continue
+                    last_candle = candles[-1]
+                    current_state = (last_candle[0], last_candle[4])
+                    if current_state != last_yielded_state.get((symbol_upd, tf_upd)):
+                        last_yielded_state[(symbol_upd, tf_upd)] = current_state
+                        batch_updates.append((symbol_upd, tf_upd, candles))
+
+                if batch_updates:
+                    yield batch_updates
 
             except Exception as e:
                 err_str = str(e).lower()

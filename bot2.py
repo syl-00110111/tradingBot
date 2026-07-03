@@ -54,6 +54,7 @@ trades_task = None
 active_pairs = []
 discovery_pool = []
 pair_last_trade_time = {}
+pair_hour_trades = {} # symbol -> deque of timestamps
 
 # Global Buy Queue for turn-based processing
 buy_queue = []
@@ -540,14 +541,47 @@ async def input_task(exchange, config, data_manager, engine):
             logging.error(f"Input error: {e}")
         await asyncio.sleep(0.1)
 
-async def watch_trades_pool_task(exchange, discovery_pool, config, data_manager):
+async def refresh_discovery_pool_task(exchange, config):
+    """
+    Refreshes the discovery pool every hour based on 24h volume.
+    """
+    global discovery_pool
+    while not shutdown_event.is_set():
+        try:
+            await asyncio.sleep(3600)
+            logging.info("Refreshing discovery pool based on 24h volume...")
+            all_tickers = await exchange.fetch_tickers()
+            quote_asset = config.get('quote_asset')
+            num_pairs = int(config.get('max_number_of_pairs', 40))
+            discovery_pool_size = num_pairs * 2
+
+            candidates = []
+            for symbol, ticker in all_tickers.items():
+                if not symbol.endswith(f"/{quote_asset}"): continue
+                vol = ticker.get('quoteVolume') or ((ticker.get('baseVolume') or 0) * (ticker.get('last') or 0))
+                candidates.append({'symbol': symbol, 'volume': vol})
+
+            candidates.sort(key=lambda x: x['volume'], reverse=True)
+            new_pool = [c['symbol'] for c in candidates[:discovery_pool_size]]
+            new_pool = [p for p in new_pool if p in exchange.markets]
+
+            async with bot_lock:
+                discovery_pool = new_pool
+            logging.info(f"Discovery pool refreshed. Now monitoring {len(discovery_pool)} symbols.")
+        except Exception as e:
+            logging.error(f"Error refreshing discovery pool: {e}")
+            await asyncio.sleep(60)
+
+async def watch_trades_pool_task(exchange, current_discovery_pool, config, data_manager):
     """
     Watches trades for all pairs in the discovery pool to track activity.
+    Uses trade counts from the last hour for swapping decisions.
     """
-    logging.info(f"[bold cyan]Starting trades pool watcher for {len(discovery_pool)} symbols.")
+    logging.info(f"[bold cyan]Starting trades pool watcher.")
 
     while not shutdown_event.is_set():
         try:
+            # Pass the discovery_pool list directly to allow dynamic updates if the task supports it
             async for trades in exchange.watch_trades_for_symbols(discovery_pool):
                 if shutdown_event.is_set(): break
 
@@ -556,15 +590,22 @@ async def watch_trades_pool_task(exchange, discovery_pool, config, data_manager)
                     now = time.time()
                     pair_last_trade_time[symbol] = now
 
-                    if symbol not in active_pairs:
+                    if symbol not in pair_hour_trades:
+                        pair_hour_trades[symbol] = deque()
+
+                    pair_hour_trades[symbol].append(now)
+
+                    # Clean up old trades
+                    while pair_hour_trades[symbol] and pair_hour_trades[symbol][0] < now - 3600:
+                        pair_hour_trades[symbol].popleft()
+
+                    if symbol not in active_pairs and symbol in discovery_pool:
                         # Attempt to swap in
                         async with bot_lock:
                             max_pairs = int(config.get('max_number_of_pairs', 40))
                             if len(active_pairs) < max_pairs:
-                                logging.info(f"[{symbol}] Adding to active pairs (room available).")
                                 await add_active_pair(symbol, exchange, config, data_manager)
                             else:
-                                # Find least active pair with no open position and no pending orders
                                 candidates = []
                                 for p in active_pairs:
                                     if not data_manager.get_position(p):
@@ -578,14 +619,17 @@ async def watch_trades_pool_task(exchange, discovery_pool, config, data_manager)
                                             candidates.append(p)
 
                                 if candidates:
-                                    # Sort by last trade time
-                                    candidates.sort(key=lambda p: pair_last_trade_time.get(p, 0))
+                                    # Sort candidates by trade count in the last hour
+                                    candidates.sort(key=lambda p: len(pair_hour_trades.get(p, [])))
                                     least_active = candidates[0]
 
-                                    # Only swap if the new one is "fresher" or we just want to rotate
-                                    logging.info(f"[{symbol}] Swapping in. Replacing least active pair [{least_active}].")
-                                    await remove_active_pair(least_active)
-                                    await add_active_pair(symbol, exchange, config, data_manager)
+                                    new_count = len(pair_hour_trades.get(symbol, []))
+                                    old_count = len(pair_hour_trades.get(least_active, []))
+
+                                    if new_count > old_count:
+                                        logging.info(f"[{symbol}] Swapping in ({new_count} trades/h). Replacing [{least_active}] ({old_count} trades/h).")
+                                        await remove_active_pair(least_active)
+                                        await add_active_pair(symbol, exchange, config, data_manager)
 
         except Exception as e:
             if not shutdown_event.is_set():
@@ -2022,14 +2066,14 @@ async def main():
             async with semaphore:
                 try:
                     logging.info(f"Fetching initial 1s candles for {symbol} (Target: 10000)...")
-                    ohlcv_1s = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=10000)
-                    df_1s = pd.DataFrame(ohlcv_1s, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    ohlcv_res, actual_tf = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=10000)
+                    df_1s = pd.DataFrame(ohlcv_res, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
                     for col in ['open', 'high', 'low', 'close', 'volume']:
                         df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
                     df_1s.set_index('timestamp', inplace=True)
                     ohlcv_cache[symbol] = df_1s
-                    logging.info(f"[{symbol}] Loaded {len(df_1s)} candles (1s).")
+                    logging.info(f"[{symbol}] Loaded {len(df_1s)} candles ({actual_tf}).")
 
                 except Exception as e:
                     logging.error(f"Failed to load candles for {symbol}: {e}")
@@ -2071,6 +2115,9 @@ async def main():
 
     # Start Trades Pool Watcher
     trades_task = asyncio.create_task(watch_trades_pool_task(exchange, discovery_pool, config, data_manager))
+
+    # Start Discovery Pool Refresher
+    background_tasks.append(asyncio.create_task(refresh_discovery_pool_task(exchange, config)))
 
     # Ensure all watchers are setup (Wait a bit for connections to stabilize)
     await asyncio.sleep(2)
