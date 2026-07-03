@@ -54,22 +54,43 @@ class CCXTExchange2(ExchangeInterface2):
 
     async def _get_supported_timeframe(self, timeframe):
         original_timeframe = timeframe
+        tf_seconds = None
+
+        # 1. Try to parse the requested timeframe
         try:
             tf_seconds = self.exchange.parse_timeframe(timeframe)
         except:
+            pass
+
+        # 2. Check if the timeframe is explicitly in the exchange's supported list
+        supported_tfs = getattr(self.exchange, 'timeframes', {})
+        if tf_seconds is not None and timeframe not in supported_tfs:
+            # Even if parseable, it might not be supported by this specific exchange
             tf_seconds = None
 
+        # 3. Fallback if not supported
         if tf_seconds is None:
-            if hasattr(self.exchange, 'timeframes') and self.exchange.timeframes:
-                supported_tfs = list(self.exchange.timeframes.keys())
-                supported_tfs.sort(key=lambda x: self.exchange.parse_timeframe(x) or 99999999)
-                timeframe = supported_tfs[0]
-                tf_seconds = self.exchange.parse_timeframe(timeframe)
-                logging.warning(f"Timeframe '{original_timeframe}' unsupported by {self.exchange_id}. Falling back to '{timeframe}'.")
+            if supported_tfs:
+                # Sort supported timeframes by their duration in seconds
+                tfs_with_seconds = []
+                for tf in supported_tfs:
+                    try:
+                        s = self.exchange.parse_timeframe(tf)
+                        if s is not None:
+                            tfs_with_seconds.append((tf, s))
+                    except:
+                        continue
 
+                if tfs_with_seconds:
+                    tfs_with_seconds.sort(key=lambda x: x[1])
+                    timeframe, tf_seconds = tfs_with_seconds[0]
+                    logging.warning(f"Timeframe '{original_timeframe}' unsupported by {self.exchange_id}. Falling back to '{timeframe}'.")
+
+            # 4. Final safety fallback
             if tf_seconds is None:
-                tf_seconds = 1
-                timeframe = original_timeframe
+                logging.error(f"Could not find any supported timeframe for {self.exchange_id}. Defaulting to 1m (60s).")
+                timeframe = '1m'
+                tf_seconds = 60
 
         return timeframe, tf_seconds
 
