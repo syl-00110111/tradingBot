@@ -1987,8 +1987,8 @@ async def main():
     logging.info("[bold cyan]System initialization started...")
 
     # Initial Batch
-    for symbol in pairs:
-        pair_cfg = config['pairs'][symbol]
+    for symbol in active_pairs:
+        pair_cfg = config.get('pairs', {}).get(symbol, {})
         strat = pair_cfg.get('strategy') or random.choice(STRATEGIES)
         aggr = pair_cfg.get('aggr') or random.choice(['normal', 'aggressive', 'dynamic'])
 
@@ -2012,10 +2012,10 @@ async def main():
 
     if args.fast_start:
         logging.info("[bold yellow]Fast start enabled: Skipping initial candles fetch.")
-        for symbol in pairs:
+        for symbol in active_pairs:
             ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
     else:
-        logging.info(f"[bold cyan]Fetching initial candles for {len(pairs)} pairs...")
+        logging.info(f"[bold cyan]Fetching initial candles for {len(active_pairs)} pairs...")
         semaphore = asyncio.Semaphore(5)
 
         async def init_symbol(symbol):
@@ -2037,16 +2037,16 @@ async def main():
                     empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
                     ohlcv_cache[symbol] = empty_df
 
-        await asyncio.gather(*[init_symbol(s) for s in pairs])
+        await asyncio.gather(*[init_symbol(s) for s in active_pairs])
 
     # Exclude pairs that have no candles after initial download
     async with ohlcv_lock:
-        to_remove = [s for s in pairs if s not in ohlcv_cache or ohlcv_cache[s].empty]
+        to_remove = [s for s in active_pairs if s not in ohlcv_cache or ohlcv_cache[s].empty]
         for s in to_remove:
             logging.warning(f"[{s}] No initial candle data available. Excluding from active monitoring.")
             if s in bot_state:
                 del bot_state[s]
-            pairs.remove(s)
+            active_pairs.remove(s)
 
     # Analysis Executor
     max_workers = max(1, (os.cpu_count() or 4) - 2)
@@ -2086,7 +2086,7 @@ async def main():
         logging.error(f"Error during balance synchronization: {e}")
 
     # Initial analysis for all pairs (Skipped as requested)
-    # for symbol in pairs:
+    # for symbol in active_pairs:
     #     async with analysis_lock:
     #         if symbol not in analysis_in_progress:
     #             analysis_in_progress.add(symbol)
