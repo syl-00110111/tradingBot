@@ -49,6 +49,10 @@ analysis_lock = asyncio.Lock()
 # Global Watcher Task
 ohlcv_task = None
 
+# Global Buy Queue for turn-based processing
+buy_queue = []
+buy_queue_lock = asyncio.Lock()
+
 # Track orders placed by the bot to process them via WebSocket confirmation
 pending_orders = {} # order_id -> metadata_dict
 pending_orders_lock = asyncio.Lock()
@@ -880,9 +884,24 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         if buy_candidate and not is_suspended:
             # Monte Carlo validation for buy signals
             mc_score = await loop.run_in_executor(None, mc_engine.validate_strategy, df)
-            mc_threshold = config.get('mc_threshold', 0.86)
+
+            # Reassign mc_threshold as requested (defaulting to 1.0)
+            mc_threshold = config.get('mc_threshold', 1.0)
+
             if mc_score >= mc_threshold:
-                await execute_buy(exchange, symbol, latest, data_manager, engine, config, strategy=strat, candle_count=len(df))
+                # Add to buy queue instead of immediate execution
+                async with buy_queue_lock:
+                    # Check if already in queue
+                    if not any(item['symbol'] == symbol for item in buy_queue):
+                        buy_queue.append({
+                            'symbol': symbol,
+                            'data': latest,
+                            'expected_profit': profit,
+                            'strategy': strat,
+                            'candle_count': len(df),
+                            'timestamp': time.time()
+                        })
+                        logging.info(f"[{symbol}] Buy signal validated (MC Score: {mc_score:.2f}). Added to queue (Profit: {profit:.4f}).")
             else:
                 async with bot_lock:
                     if symbol in bot_state:
@@ -923,7 +942,17 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
             return
 
     try:
-        price = data['close']
+        # Improve purchasing behavior: fetch order book and compute 50% spread
+        order_book = await exchange.fetch_order_book(symbol, limit=5)
+        if order_book and order_book['bids'] and order_book['asks']:
+            best_bid = order_book['bids'][0][0]
+            best_ask = order_book['asks'][0][0]
+            # 50% of the spread with bids and asks
+            price = (best_bid + best_ask) / 2
+            logging.info(f"[{symbol}] Mid-price calculated: {price} (Bid: {best_bid}, Ask: {best_ask})")
+        else:
+            price = data['close']
+
         order = None
 
         # Check Notional Limit
@@ -934,7 +963,6 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
             balance = current_balances
 
         # Verify feasibility by checking the available balance for the quote asset
-        # Fetch if no data has been received for the quote asset
         quote_bal_data = balance.get(quote_curr) if balance else None
         if quote_bal_data is None:
             logging.info(f"[{symbol}] Balance for {quote_curr} missing. Fetching from exchange...")
@@ -962,8 +990,8 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 return
 
-            # Create the order first (outside the lock) to avoid blocking other symbols/tasks
-            order = await exchange.create_order(symbol, 'buy', amount)
+            # Use create_order with price for limit buy
+            order = await exchange.create_order(symbol, 'buy', amount, price=price)
 
             if order and 'id' in order:
                 async with pending_orders_lock:
@@ -973,14 +1001,13 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                         'timestamp': time.time(),
                         'trigger_data': {},
                         'strategy': strategy or ("Manual" if manual else "Unknown"),
-                        'candle_count': candle_count
+                        'candle_count': candle_count,
+                        'is_limit': True
                     }
             else:
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 return
 
-        # If order is already closed (some exchanges return filled orders immediately), process it.
-        # We call this outside the lock to avoid re-entrancy issues with process_order_fill
         if order and order.get('status') == 'closed':
             await process_order_fill(order, exchange, data_manager, config, engine)
     except Exception as e:
@@ -1615,14 +1642,50 @@ async def run_dashboard(config):
     except Exception as e:
         logging.info(f"[red]Dashboard error: {e}")
 
+async def buy_queue_processor_task(exchange, data_manager, engine, config):
+    """
+    Processes the buy queue every 'turn' (linked to analysis_cooldown).
+    Picks the pair with the highest expected profit.
+    """
+    while not shutdown_event.is_set():
+        cooldown = config.get('timeouts', {}).get('analysis_cooldown', 12)
+        await asyncio.sleep(cooldown)
+
+        async with buy_queue_lock:
+            if not buy_queue:
+                continue
+
+            # Sort by expected profit descending
+            buy_queue.sort(key=lambda x: x['expected_profit'], reverse=True)
+
+            # Pick the best one
+            best_buy = buy_queue[0]
+            logging.info(f"[Queue] Processing turn. Highest profit: {best_buy['symbol']} ({best_buy['expected_profit']:.4f}).")
+
+            # Execute buy for the best one
+            asyncio.create_task(execute_buy(
+                exchange, best_buy['symbol'], best_buy['data'],
+                data_manager, engine, config,
+                strategy=best_buy['strategy'],
+                candle_count=best_buy['candle_count']
+            ))
+
+            # Clear queue for the next turn
+            buy_queue.clear()
+
 async def heartbeat_task(exchange, data_manager, engine, config):
     while not shutdown_event.is_set():
         # Cleanup stuck pending orders
         stuck_timeout = config.get('timeouts', {}).get('stuck_order_cleanup', 300)
+        limit_order_timeout = 300 # 5 minutes as requested
 
         async with pending_orders_lock:
             now = time.time()
-            stuck_candidates = [(oid, meta) for oid, meta in pending_orders.items() if now - meta.get('timestamp', 0) > stuck_timeout]
+            stuck_candidates = []
+            for oid, meta in pending_orders.items():
+                timeout = limit_order_timeout if meta.get('is_limit') else stuck_timeout
+                if now - meta.get('timestamp', 0) > timeout:
+                    stuck_candidates.append((oid, meta))
 
         for oid, meta in stuck_candidates:
             symbol = meta.get('symbol')
@@ -1631,6 +1694,13 @@ async def heartbeat_task(exchange, data_manager, engine, config):
                 logging.info(f"[{symbol}] Checking status of potentially stuck order {oid}...")
                 verified_order = await exchange.fetch_order(oid, symbol)
                 if verified_order:
+                    if verified_order.get('status') == 'open' and meta.get('is_limit'):
+                        logging.info(f"[{symbol}] Cancelling unfilled limit order {oid} after timeout.")
+                        await exchange.cancel_order(oid, symbol)
+                        async with pending_orders_lock:
+                            if oid in pending_orders: pending_orders.pop(oid)
+                        continue
+
                     is_processed = await process_order_fill(verified_order, exchange, data_manager, config, engine)
                     if is_processed:
                         logging.info(f"[{symbol}] Stuck order {oid} was found to be {verified_order.get('status')} and has been processed.")
@@ -1734,29 +1804,30 @@ async def main():
             global current_balances
             current_balances = initial_balance
 
-        # 1. Fetch 24h tickers to find high volume pairs
+        # 1. Fetch 24h tickers to find high activity pairs (by trade count)
         all_tickers = await exchange.fetch_tickers()
 
         quote_asset = config.get('quote_asset')
         num_pairs = config.get('number_of_pairs')
 
-        # Candidate symbols: Must end with quote_asset and have volume/price data
+        # Candidate symbols: Must end with quote_asset and have activity data
         candidates = []
         for symbol, ticker in all_tickers.items():
             if not symbol.endswith(f"/{quote_asset}"):
                 continue
 
-            volume = ticker.get('quoteVolume') or (ticker.get('baseVolume') or 0) * (ticker.get('last') or 0)
-            if volume > 0:
+            # Record number of trades per 24h (count field)
+            count = ticker.get('count') or 0
+            if count > 0:
                 candidates.append({
                     'symbol': symbol,
-                    'volume': volume,
+                    'count': count,
                     'base': symbol.split('/')[0]
                 })
 
-        # Sort by volume descending
-        candidates.sort(key=lambda x: x['volume'], reverse=True)
-        top_volume_pairs = [c['symbol'] for c in candidates[:num_pairs]]
+        # Sort by trade count descending
+        candidates.sort(key=lambda x: x['count'], reverse=True)
+        top_activity_pairs = [c['symbol'] for c in candidates[:num_pairs]]
 
         # 2. Add pairs from inventory if enabled
         inventory_pairs = []
@@ -1770,19 +1841,19 @@ async def main():
                 # Check for Base Asset matches
                 if config.get('include_inventory_pairs'):
                     symbol = f"{asset}/{quote_asset}"
-                    if symbol in all_tickers and symbol not in top_volume_pairs:
+                    if symbol in all_tickers and symbol not in top_activity_pairs:
                         inventory_pairs.append(symbol)
 
                 # Check for any pair where user has the Quote Asset
                 if config.get('include_all_quote_pairs'):
                     # This logic adds all symbols for which the user has the quote currency in balance.
-                    # We limit this to top volume pairs with that quote to avoid adding thousands.
+                    # We limit this to top activity pairs with that quote to avoid adding thousands.
                     for s in all_tickers.keys():
-                        if s.endswith(f"/{asset}") and s not in top_volume_pairs and s not in inventory_pairs:
-                            # Only add top 5 volume for this specific quote if it's not the main one
+                        if s.endswith(f"/{asset}") and s not in top_activity_pairs and s not in inventory_pairs:
+                            # Only add top 5 activity for this specific quote if it's not the main one
                             inventory_pairs.append(s)
 
-        final_pairs = list(set(top_volume_pairs + inventory_pairs + list(config['pairs'].keys())))
+        final_pairs = list(set(top_activity_pairs + inventory_pairs + list(config['pairs'].keys())))
 
         # Filter pairs that exist in markets
         final_pairs = [p for p in final_pairs if p in exchange.markets]
@@ -1792,7 +1863,7 @@ async def main():
                 config['pairs'][p] = {}
 
         pairs = list(config['pairs'].keys())
-        logging.info(f"Initialized with {len(pairs)} pairs (Top Volume: {len(top_volume_pairs)}, Inventory: {len(inventory_pairs)}).")
+        logging.info(f"Initialized with {len(pairs)} pairs (Top Trades: {len(top_activity_pairs)}, Inventory: {len(inventory_pairs)}).")
 
     except Exception as e:
         logging.error(f"Failed to dynamically retrieve pairs: {e}")
@@ -1884,6 +1955,7 @@ async def main():
         asyncio.create_task(watch_orders_task(exchange, data_manager, config, engine)),
         asyncio.create_task(input_task(exchange, config, data_manager, engine)),
         asyncio.create_task(heartbeat_task(exchange, data_manager, engine, config)),
+        asyncio.create_task(buy_queue_processor_task(exchange, data_manager, engine, config)),
         asyncio.create_task(chart_renderer_task(config))
     ]
 
@@ -1904,12 +1976,12 @@ async def main():
     except Exception as e:
         logging.error(f"Error during balance synchronization: {e}")
 
-    # Initial analysis for all pairs
-    for symbol in pairs:
-        async with analysis_lock:
-            if symbol not in analysis_in_progress:
-                analysis_in_progress.add(symbol)
-                asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
+    # Initial analysis for all pairs (Skipped as requested)
+    # for symbol in pairs:
+    #     async with analysis_lock:
+    #         if symbol not in analysis_in_progress:
+    #             analysis_in_progress.add(symbol)
+    #             asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
 
     # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(config.get('timeouts', {}).get('startup_wait', 4))
