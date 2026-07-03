@@ -7,7 +7,6 @@ A universal cryptocurrency trading bot implemented in Python, leveraging multi-c
 ## 🔬 Scientific Foundations
 This bot implements strategies and logic recommended by leading empirical studies on cryptocurrency markets:
 
-- **Market Regime Detection**: Uses a dynamic switch between **Mean Reversion** and **Trend Following** based on volatility and ADX (Average Directional Index).
 - **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for each signal, penalizing high-risk configurations.
 
 ---
@@ -15,7 +14,6 @@ This bot implements strategies and logic recommended by leading empirical studie
 ## 🛠 Main Features
 
 ### 🛡 Risk Management
-- **Confirmation Logic**: Requires persistent signals for execution. The confirmation window automatically expands during high volatility (> 0.1).
 - **Intelligent Suspension**: Automatically suspends trading for symbols where orders fail or if the budget is insufficient. Resumes only when 1.2x the required budget becomes available.
 - **Dynamic Sizing**: Position sizes are calculated as a percentage of your available balance, divided by the maximum number of lots allowed to maintain controlled exposure.
 
@@ -44,10 +42,10 @@ The bot offers over 30 distinct strategies, including:
 ### 🛠 `config.json`
 Main parameters of the bot. To personalize only certain parameters, you must copy the `config.default.json` file to `config.json` and then modify your settings in the latter.
 
+*   **`quote_asset`**: (string) A quote asset you define (default: `USDC`). The bot automatically fetch the most dynamic symbols with a base asset associated with it.
 *   **`max_lots_per_symbol`**: (int) Maximum number of buy lots allowed per symbol (default: `1`).
 *   **`max_open_positions`**: (int) Maximum number of distinct trading pairs open simultaneously (default: `10`).
-*   **`max_trade_percentage`**: (float | object) Maximum percentage of your total balance to expose per symbol (total of all lots) (default: `10`).
-*   * Warning: The default is TEN percent, which can be significant! Check your options before launching!
+*   **`max_trade_percentage`**: (float) Maximum percentage of your total balance to expose per symbol (total of all lots) (default: `2`).
 *   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
     ```json
     "max_trade_percentage": {
@@ -58,7 +56,7 @@ Main parameters of the bot. To personalize only certain parameters, you must cop
     }
     ```
 *   **`global_risk_multiplier`**: (float) Multiplier for position sizing and technical confirmations (default: `1.1`).
-*   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `2.0`).
+*   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `1.4`).
 *   **`no_signal_threshold`**: (int) Number of candles without signals.
 
 #### Advanced Overrides (Optional)
@@ -74,16 +72,6 @@ Main parameters of the bot. To personalize only certain parameters, you must cop
     ```
 
 ---
-
-### 📄 `pairs.txt`
-Define the trading pairs you want the bot to monitor (one per line).
-Example:
-```text
-BTC/USDC
-ETH/USDC
-SOL/USDC
-```
-*Base currencies (e.g., USDC) are automatically detected.*
 
 ### 🔑 `api.json`
 Store your API credentials and preferred exchange.
