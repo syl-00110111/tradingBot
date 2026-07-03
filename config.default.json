@@ -2,7 +2,7 @@
     "max_open_positions": 10,
     "max_lots_per_symbol": 1,
     "max_trade_percentage": 2.0,
-    "quote_asset": "USDC",
+    "quote_asset": "USD",
     "number_of_pairs": 40,
     "include_inventory_pairs": true,
     "include_all_quote_pairs": false,
