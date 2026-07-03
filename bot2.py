@@ -618,7 +618,7 @@ async def sync_live_positions(exchange, data_manager, config):
 
     pairs_dict = config.get('pairs', {})
     base_currencies = sorted(list(set([p.split('/')[1] for p in pairs_dict.keys() if '/' in p])))
-    if not base_currencies: base_currencies = ['USDT', 'USDC', 'EUR']
+    if not base_currencies: base_currencies = ['USDT', 'USDC', 'EUR', 'USD', 'BTC', 'ETH']
 
     sellable_found = False
     all_tickers = {}
