@@ -14,7 +14,9 @@ class ExchangeInterface2:
     async def watch_ohlcv_for_symbols(self, symbols, timeframe): raise NotImplementedError
     async def watch_balance(self): raise NotImplementedError
     async def watch_orders(self, symbol=None): raise NotImplementedError
+    async def fetch_order_book(self, symbol, limit=20): raise NotImplementedError
     async def create_order(self, symbol, side, amount, price=None): raise NotImplementedError
+    async def cancel_order(self, order_id, symbol=None): raise NotImplementedError
     async def fetch_order(self, order_id, symbol=None): raise NotImplementedError
     async def fetch_ticker(self, symbol): raise NotImplementedError
     async def fetch_balance(self): raise NotImplementedError
@@ -65,6 +67,8 @@ class CCXTExchange2(ExchangeInterface2):
         all_ohlcv = []
         try:
             tf_seconds = self.exchange.parse_timeframe(timeframe)
+            if tf_seconds is None:
+                tf_seconds = 1
         except:
             tf_seconds = 1
 
@@ -197,17 +201,39 @@ class CCXTExchange2(ExchangeInterface2):
                 logging.error(f"Error in watch_orders: {e}")
                 await asyncio.sleep(1)
 
+    async def fetch_order_book(self, symbol, limit=20):
+        try:
+            return await self.exchange.fetch_order_book(symbol, limit)
+        except Exception as e:
+            logging.error(f"Error fetching order book for {symbol}: {e}")
+            return None
+
     async def create_order(self, symbol, side, amount, price=None):
         try:
             amount_str = self.exchange.amount_to_precision(symbol, amount)
             amount = float(amount_str)
-            if side == 'buy':
-                return await self.exchange.create_market_buy_order(symbol, amount)
+            if price is not None:
+                price_str = self.exchange.price_to_precision(symbol, price)
+                price = float(price_str)
+                if side == 'buy':
+                    return await self.exchange.create_limit_buy_order(symbol, amount, price)
+                else:
+                    return await self.exchange.create_limit_sell_order(symbol, amount, price)
             else:
-                return await self.exchange.create_market_sell_order(symbol, amount)
+                if side == 'buy':
+                    return await self.exchange.create_market_buy_order(symbol, amount)
+                else:
+                    return await self.exchange.create_market_sell_order(symbol, amount)
         except Exception as e:
             logging.error(f"Error creating order for {symbol}: {e}")
             raise e
+
+    async def cancel_order(self, order_id, symbol=None):
+        try:
+            return await self.exchange.cancel_order(order_id, symbol)
+        except Exception as e:
+            logging.error(f"Error cancelling order {order_id}: {e}")
+            return None
 
     async def fetch_order(self, order_id, symbol=None):
         try:
