@@ -1,6 +1,6 @@
 # 🛸 CCXT Pro Trading Bot
 
-A universal cryptocurrency trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports **any exchange** provided by the CCXT library (Binance, Kraken, OKX, Coinbase, etc.).
+A universal cryptocurrency trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports theoretically **any exchange** provided by the CCXT library (Binance, Kraken, OKX, Coinbase, etc.) but it's been tested only on Kraken and Binance.
 
 ---
 
@@ -42,7 +42,7 @@ The bot offers over 30 distinct strategies, including:
 ### 🛠 `config.json`
 Main parameters of the bot. To personalize only certain parameters, you must copy the `config.default.json` file to `config.json` and then modify your settings in the latter.
 
-*   **`quote_asset`**: (string) A quote asset you define (default: `USDC`). The bot automatically fetch the most dynamic symbols with a base asset associated with it.
+*   **`quote_asset`**: (string) A quote asset you define (default: `USD`). The bot automatically fetch the most dynamic symbols with a base asset associated with it.
 *   **`max_lots_per_symbol`**: (int) Maximum number of buy lots allowed per symbol (default: `1`).
 *   **`max_open_positions`**: (int) Maximum number of distinct trading pairs open simultaneously (default: `10`).
 *   **`max_trade_percentage`**: (float) Maximum percentage of your total balance to expose per symbol (total of all lots) (default: `2`).
