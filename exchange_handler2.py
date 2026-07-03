@@ -12,6 +12,7 @@ class ExchangeInterface2:
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100): raise NotImplementedError
     async def fetch_ohlcv_10k(self, symbol, timeframe, limit=10000): raise NotImplementedError
     async def watch_ohlcv_for_symbols(self, symbols, timeframe): raise NotImplementedError
+    async def watch_trades_for_symbols(self, symbols): raise NotImplementedError
     async def watch_balance(self): raise NotImplementedError
     async def watch_orders(self, symbol=None): raise NotImplementedError
     async def fetch_order_book(self, symbol, limit=20): raise NotImplementedError
@@ -51,7 +52,29 @@ class CCXTExchange2(ExchangeInterface2):
         self.markets = await self.exchange.load_markets()
         return self.markets
 
+    async def _get_supported_timeframe(self, timeframe):
+        original_timeframe = timeframe
+        try:
+            tf_seconds = self.exchange.parse_timeframe(timeframe)
+        except:
+            tf_seconds = None
+
+        if tf_seconds is None:
+            if hasattr(self.exchange, 'timeframes') and self.exchange.timeframes:
+                supported_tfs = list(self.exchange.timeframes.keys())
+                supported_tfs.sort(key=lambda x: self.exchange.parse_timeframe(x) or 99999999)
+                timeframe = supported_tfs[0]
+                tf_seconds = self.exchange.parse_timeframe(timeframe)
+                logging.warning(f"Timeframe '{original_timeframe}' unsupported by {self.exchange_id}. Falling back to '{timeframe}'.")
+
+            if tf_seconds is None:
+                tf_seconds = 1
+                timeframe = original_timeframe
+
+        return timeframe, tf_seconds
+
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=100):
+        timeframe, _ = await self._get_supported_timeframe(timeframe)
         try:
             return await asyncio.wait_for(
                 self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit),
@@ -73,14 +96,9 @@ class CCXTExchange2(ExchangeInterface2):
         except (ValueError, TypeError):
             limit = 10000
 
-        all_ohlcv = []
-        try:
-            tf_seconds = self.exchange.parse_timeframe(timeframe)
-            if tf_seconds is None:
-                tf_seconds = 1
-        except:
-            tf_seconds = 1
+        timeframe, tf_seconds = await self._get_supported_timeframe(timeframe)
 
+        all_ohlcv = []
         duration_ms = int(limit * tf_seconds * 1000)
         since = self.exchange.milliseconds() - duration_ms
 
@@ -117,6 +135,21 @@ class CCXTExchange2(ExchangeInterface2):
 
         return all_ohlcv[-limit:]
 
+    async def watch_trades_for_symbols(self, symbols):
+        """
+        Watches trades for multiple symbols.
+        """
+        if not symbols:
+            return
+
+        while True:
+            try:
+                trades = await self.exchange.watchTradesForSymbols(symbols)
+                yield trades
+            except Exception as e:
+                logging.error(f"Error in watchTradesForSymbols: {e}")
+                await asyncio.sleep(5)
+
     async def watch_ohlcv_for_symbols(self, symbols, timeframe='1s'):
         """
         Watches OHLCV for multiple symbols using watchOHLCVForSymbols.
@@ -125,37 +158,41 @@ class CCXTExchange2(ExchangeInterface2):
         if not symbols:
             return
 
-        # Normalize to list of [symbol, timeframe] pairs as required by CCXT Pro's unified API.
-        # This prevents character-iteration bugs when passing strings where lists are expected.
+        last_symbols_snapshot = None
         ohlcv_input = []
-        if isinstance(symbols, str):
-            if symbols in self.markets:
-                ohlcv_input.append([symbols, timeframe])
-        elif hasattr(symbols, '__iter__') and not isinstance(symbols, dict):
-            seen = set()
-            for item in symbols:
-                if isinstance(item, (list, tuple)) and len(item) >= 1:
-                    s = str(item[0])
-                    t = str(item[1]) if len(item) >= 2 else timeframe
-                else:
-                    s = str(item)
-                    t = timeframe
-
-                if s in self.markets and s not in seen:
-                    ohlcv_input.append([s, t])
-                    seen.add(s)
-
-        if not ohlcv_input:
-            return
+        symbol_to_tf = {}
 
         # Track last yielded state (timestamp, close_price) to avoid redundant updates
         # while still allowing intra-candle price updates.
         last_yielded_state = {}
-        # Pre-map symbols to timeframes for faster lookup
-        symbol_to_tf = {p[0]: p[1] for p in ohlcv_input}
 
         while True:
             try:
+                # Dynamic update of ohlcv_input if symbols list changed
+                current_symbols_snapshot = str(symbols)
+                if current_symbols_snapshot != last_symbols_snapshot:
+                    ohlcv_input = []
+                    seen = set()
+                    input_list = [symbols] if isinstance(symbols, str) else symbols
+                    for item in input_list:
+                        if isinstance(item, (list, tuple)) and len(item) >= 1:
+                            s = str(item[0])
+                            t = str(item[1]) if len(item) >= 2 else timeframe
+                        else:
+                            s = str(item)
+                            t = timeframe
+
+                        if s in self.markets and s not in seen:
+                            ohlcv_input.append([s, t])
+                            seen.add(s)
+
+                    last_symbols_snapshot = current_symbols_snapshot
+                    symbol_to_tf = {p[0]: p[1] for p in ohlcv_input}
+
+                if not ohlcv_input:
+                    await asyncio.sleep(1)
+                    continue
+
                 # Call CCXT Pro unified API
                 result = await self.exchange.watchOHLCVForSymbols(ohlcv_input)
                 updates = []
