@@ -9,3 +9,12 @@ config.json
 trades_*.json
 fatal_error.log
 bot_debug.log
+ohlcv_data_*.json
+markets.json
+asset_avg_prices.json
+balance.json
+paused_for_buy.json
+pending_orders_dump.json
+volumes_trades_data.json
+my_trades_cache.json
+*.bak
