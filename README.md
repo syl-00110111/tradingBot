@@ -5,16 +5,14 @@ A universal cryptocurrency trading bot implemented in Python, leveraging multi-c
 ---
 
 ## 🔬 Scientific Foundations
-This bot implements strategies and logic recommended by leading empirical studies on cryptocurrency markets:
-
-- **Monte Carlo Validation**: Vectorized simulations to estimate the probability of success for each signal, penalizing high-risk configurations.
+This bot implements strategies and logic recommended by leading empirical studies on cryptocurrency markets.
 
 ---
 
 ## 🛠 Main Features
 
 ### 🛡 Risk Management
-- **Intelligent Suspension**: Automatically suspends trading for symbols where orders fail or if the budget is insufficient. Resumes only when 1.2x the required budget becomes available.
+- **Intelligent Suspension**: Automatically suspends trading for symbols where orders fail or if the budget is insufficient. Resumes only when the required budget becomes available.
 - **Dynamic Sizing**: Position sizes are calculated as a percentage of your available balance, divided by the maximum number of lots allowed to maintain controlled exposure.
 
 ---
@@ -34,42 +32,6 @@ The bot offers over 30 distinct strategies, including:
 - **Scalping & Order Flow**: `order_flow_proxy`, `renko_proxy`, `tick_proxy`, `ema_rsi_volume`.
 - **Advanced Proxies**: `scientific_ensemble`, `whale_detection_proxy`, `pump_dump_proxy`, `market_regime_proxy`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`.
 - **Monte Carlo Engines**: `mc_mean_reversion`, `mc_momentum`, `mc_dynamic_allocation`, `mc_market_making`, `mc_stop_loss_eval`.
-
----
-
-## ⚙️ Configuration
-
-### 🛠 `config.json`
-Main parameters of the bot. To personalize only certain parameters, you must copy the `config.default.json` file to `config.json` and then modify your settings in the latter.
-
-*   **`quote_asset`**: (string) A quote asset you define (default: `USD`). The bot automatically fetch the most dynamic symbols with a base asset associated with it.
-*   **`max_lots_per_symbol`**: (int) Maximum number of buy lots allowed per symbol (default: `1`).
-*   **`max_open_positions`**: (int) Maximum number of distinct trading pairs open simultaneously (default: `10`).
-*   **`max_trade_percentage`**: (float) Maximum percentage of your total balance to expose per symbol (total of all lots) (default: `2`).
-*   **Per-Base-Asset Configuration**: You can define different maximums for different base currencies:
-    ```json
-    "max_trade_percentage": {
-        "BTC": 5.0,
-        "USDT": 12.0,
-        "USDC": 10.0,
-        "default": 12.0
-    }
-    ```
-*   **`global_risk_multiplier`**: (float) Multiplier for position sizing and technical confirmations (default: `1.1`).
-*   **`dynamic_pair_multiplier`**: (float) Multiplier applied specifically to 1-second timeframe pairs (default: `1.4`).
-*   **`no_signal_threshold`**: (int) Number of candles without signals.
-
-#### Advanced Overrides (Optional)
-*   **`pairs`**: (Object) Allows per-pair configuration.
-    Example:
-    ```json
-    "pairs": {
-        "BTC/USDC": {
-            "strategy": "ichimoku_cloud",
-            "aggr": "aggressive"
-        }
-    }
-    ```
 
 ---
 
@@ -105,10 +67,7 @@ Store your API credentials and preferred exchange.
 To stay up to date with API call changes: `pip install --upgrade ccxt` or `pip install --upgrade -r requirements.txt` to run the full dependency update procedure. Also, ensure your computer's **clock** is synchronized.
 
 ### Execution
-- **Live**: `python bot2.py`
-- **Options**:
-    - `--no-gpu`: Force CPU execution.
-    - `--fast-start`: Skip initial candle fetching for faster startup.
+- **Live**: `python botv4.py`
 
 ---
 
