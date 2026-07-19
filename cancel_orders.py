@@ -51,7 +51,7 @@ def load_exchange_from_apifile(path='api.json'):
     return exchange
 
 
-def cancel_open_orders(exchange, symbol=None, execute=False, interactive=True, auto_confirm=False):
+def cancel_open_orders(exchange, symbol=None, dry_run=False):
     try:
         # fetch_open_orders may accept symbol argument on some exchanges
         if symbol:
@@ -67,127 +67,47 @@ def cancel_open_orders(exchange, symbol=None, execute=False, interactive=True, a
         return 0
 
     cancelled = 0
-    total = len(open_orders)
-    mode = 'execute' if execute else 'dry-run'
-    console.print(f"{total} ordre(s) ouvert(s) trouvé(s). Mode: {mode}")
-
-    execute_all = False
-    for idx, o in enumerate(open_orders, start=1):
+    console.print(f"{len(open_orders)} ordre(s) ouvert(s) trouvé(s).{' (dry-run)' if dry_run else ''}")
+    for o in open_orders:
         oid = o.get('id') or o.get('orderId')
         osymbol = o.get('symbol')
-        status = o.get('status')
-        side = o.get('side')
-        price = o.get('price')
-        amount = o.get('amount')
         if not oid:
             console.print(f"Ignoré ordre sans id: {o}")
             continue
         if symbol and osymbol and osymbol.upper() != symbol.upper():
+            # Skip if symbol filter provided and doesn't match
             continue
-
-        # récupérer le prix courant pour comparaison
-        current_price = None
-        price_diff_pct = None
-        if osymbol:
-            try:
-                time.sleep(getattr(exchange, 'rateLimit', 200) / 1000)
-                tk = exchange.fetch_ticker(osymbol)
-                # tenter différentes clefs possibles
-                current_price = tk.get('last') if tk.get('last') is not None else tk.get('close')
-                if current_price is None and isinstance(tk.get('info'), dict):
-                    # fallback: chercher un champ numérique dans info
-                    info = tk.get('info')
-                    for k, v in info.items():
-                        try:
-                            fv = float(v)
-                            current_price = fv
-                            break
-                        except Exception:
-                            continue
-                if current_price is not None and price is not None:
-                    try:
-                        price_diff_pct = (float(price) - float(current_price)) / float(current_price) * 100.0
-                    except Exception:
-                        price_diff_pct = None
-            except Exception:
-                current_price = None
-                price_diff_pct = None
-
-        diff_str = ''
-        if current_price is not None:
-            diff_str = f" current={current_price:.8g}"
-            if price_diff_pct is not None:
-                sign = '+' if price_diff_pct >= 0 else ''
-                diff_str += f" ({sign}{price_diff_pct:.2f}%)"
-
-        console.print(f"[{idx}/{total}] id={oid} symbol={osymbol} side={side} price={price} amount={amount} status={status}{diff_str}")
-
-        # decide action
-        if interactive and not execute_all and not auto_confirm and not execute:
-            # dry-run interactive default
-            prompt = "Action? [s]imuler/[e]xécuter/[k]skip/[a]exécuter tout/[q]quit (défaut s): "
-            try:
-                ans = input(prompt).strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                console.print("Interrompu par l'utilisateur.")
-                break
-            if ans == 'q':
-                break
-            if ans == 'k':
-                continue
-            if ans == 'a':
-                # ask confirm to actually perform
-                confirm = input('Confirmer exécution réelle de tous les ordres restants? (y/N): ').strip().lower()
-                if confirm == 'y':
-                    execute_all = True
-                    execute = True
-                else:
-                    console.print('Rester en dry-run.')
-                    execute_all = False
-                    execute = False
-                    continue
-            if ans == 'e':
-                # execute this one only
-                do_execute = True
-            else:
-                # default simulate (s or empty)
-                do_execute = False
-        else:
-            # non-interactive or explicit execute
-            do_execute = execute or execute_all or auto_confirm
-
-        if not do_execute:
-            console.print(f"Simulé: annulation id={oid}")
+        console.print(f"Annulation: id={oid} symbol={osymbol}")
+        if dry_run:
             cancelled += 1
             continue
-
-        # perform actual cancel
         try:
+            # respect rate limit
             time.sleep(getattr(exchange, 'rateLimit', 200) / 1000)
+            # cancel_order signature: id, symbol (optional)
             try:
                 res = exchange.cancel_order(oid, osymbol)
             except TypeError:
+                # some exch. implementations accept only id
                 res = exchange.cancel_order(oid)
             console.print(f"Annulé: {res.get('id', oid)}")
             cancelled += 1
         except Exception as e:
             console.print(f"Erreur annulation {oid}: {e}")
 
-    console.print(f"Total (simulés/annulés comptés): {cancelled}")
+    console.print(f"Total annulés: {cancelled}")
     return cancelled
 
 
 def main():
     parser = argparse.ArgumentParser(description='Annuler les ordres ouverts (script indépendant)')
     parser.add_argument('--symbol', help='Filtrer par paire (ex: BTC/USDT)', default=None)
-    parser.add_argument('--execute', action='store_true', help='Exécuter réellement les annulations (par défaut dry-run)')
-    parser.add_argument('--yes', action='store_true', help='Accepter sans confirmation (utile avec --execute)')
-    parser.add_argument('--no-interactive', action='store_true', help="Désactiver l'interaction (utile pour scripts).")
+    parser.add_argument('--dry-run', action='store_true', help='Ne pas exécuter, afficher seulement')
     parser.add_argument('--api', help='Chemin vers api.json (défaut: api.json)', default='api.json')
     args = parser.parse_args()
 
     exchange = load_exchange_from_apifile(args.api)
-    cancel_open_orders(exchange, symbol=args.symbol, execute=args.execute, interactive=not args.no_interactive, auto_confirm=args.yes)
+    cancel_open_orders(exchange, symbol=args.symbol, dry_run=args.dry_run)
 
 
 if __name__ == '__main__':

@@ -20,11 +20,6 @@ def main(symbol: str, _id: str):
         console.print(f"[red]No candle data for {symbol}[/red]")
         return
 
-    # limiter les calculs et l'affichage aux 240 dernières bougies
-    MAX_CANDLES = 480
-    if len(df_candles) > MAX_CANDLES:
-        df_candles = df_candles.tail(MAX_CANDLES).reset_index(drop=True)
-
     res = aggregate_signals(df_candles, global_config=cfg)
     N = res['N']
     global_buy = res['global_buy']
@@ -42,7 +37,7 @@ def main(symbol: str, _id: str):
     # single subplot: draw candlesticks and volumes on the same axes
     plt.subplots(1, 1)
     plt.theme('dark')
-    plt.title(f'Strategie agrégée pour {symbol} (dernieres {len(df_candles)} bougies)')
+    plt.title(f'Strategie agrégée pour {symbol}')
     plt.subplot(1, 1)
     plt.xlabel('Date')
     plt.ylabel('Prix (USD)')

@@ -89,7 +89,9 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
         global_config = load_config()
 
     STRATS = strats if strats is not None else [
-        'williams_r'
+        'bollinger_bands',
+        'pairs_trading_proxy',
+        'mc_mean_reversion'
     ]
 
     N = len(df_candles)
@@ -104,20 +106,46 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
     score_buy = [0.0] * N
     score_sell = [0.0] * N
     
-    # 1) williams_r
-    pt = signal_frames.get('williams_r')
+    # bollinger_bands buy sûr sell count 10
+    # pairs_trading_proxy buy count 3 sell count 2
+    # mc_mean_reversion buy count 3 sell count 8
+    
+    # 1) bollinger_bands
+    pt = signal_frames.get('bollinger_bands')
     if pt is not None and not pt.empty:
         # utiliser une fenêtre pour compter les signaux non-consécutifs
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=6)
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=6)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=10)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=100)
         for i in range(N):
-            if buys[i] >= 2:
+            if buys[i] >= 1:
+                score_buy[i] += 1
+            if sells[i] >= 10:
+                score_sell[i] += 1
+
+    # 2) pairs_trading_proxy
+    pt = signal_frames.get('pairs_trading_proxy')
+    if pt is not None and not pt.empty:
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=30)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
+        for i in range(N):
+            if buys[i] >= 3:
                 score_buy[i] += 1
             if sells[i] >= 2:
                 score_sell[i] += 1
 
-    global_buy = [s >= 1 for s in score_buy]
-    global_sell = [s >= 1 for s in score_sell]
+    # 3) mc_mean_reversion
+    pt = signal_frames.get('mc_mean_reversion')
+    if pt is not None and not pt.empty:
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=30)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=80)
+        for i in range(N):
+            if buys[i] >= 3:
+                score_buy[i] += 1
+            if sells[i] >= 8:
+                score_sell[i] += 1
+
+    global_buy = [s >= 3 for s in score_buy]
+    global_sell = [s >= 3 for s in score_sell]
 
     # print(f"DEBUG sell= {global_sell}")
 

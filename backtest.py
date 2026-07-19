@@ -38,7 +38,7 @@ def fetch_ohlcv_data(_id, symbol):
 candles_per_pair = {}
 df_candles = None
 
-def main(symbol: str, _id: str, chosen_strategy: str = None, max_candles: int = None):
+def main(symbol: str, _id: str):
     import torch
     # Hardware Acceleration Detection
     device = None
@@ -138,32 +138,13 @@ def main(symbol: str, _id: str, chosen_strategy: str = None, max_candles: int = 
     # Charger les bougies une seule fois (toutes les bougies disponibles)
     new_candles_df = pandas.DataFrame(df_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
-    # limiter le DataFrame aux dernières bougies si demandé
-    if max_candles is not None:
-        try:
-            max_candles_int = int(max_candles)
-            if max_candles_int > 0 and len(new_candles_df) > max_candles_int:
-                new_candles_df = new_candles_df.tail(max_candles_int).reset_index(drop=True)
-                console.print(f"Affichage limité aux {max_candles_int} dernières bougies")
-        except Exception as e:
-            console.print(f"Paramètre max_candles invalide: {e}")
-
     from datetime import datetime
 
     import logging
     logging.basicConfig(level=logging.DEBUG)
 
-    # Déterminer les stratégies à exécuter (option --strategy)
-    strategies_to_run = STRATEGIES
-    if chosen_strategy:
-        # valider l'existence
-        if chosen_strategy not in STRATEGIES:
-            console.print(f"[red]Stratégie demandée introuvable: {chosen_strategy}. Stratégies disponibles: {STRATEGIES}[/red]")
-            return
-        strategies_to_run = [chosen_strategy]
-
     # Faire un plot par stratégie
-    for i, strat in enumerate(strategies_to_run):
+    for i, strat in enumerate(STRATEGIES):
         aggr = 'dynamic'
         settings = {
             'device': device,
@@ -194,12 +175,12 @@ def main(symbol: str, _id: str, chosen_strategy: str = None, max_candles: int = 
                 if latest.get('sell_signal', False):
                     sells.append((j, float(latest.get('close', float('nan')))))
 
-        # Préparer les données pour le tracé -> utiliser new_candles_df (les signaux sont calculés dessus)
-        timestamps = new_candles_df['timestamp'].astype(int).tolist()
-        opens = new_candles_df['open'].astype(float).tolist()
-        highs = new_candles_df['high'].astype(float).tolist()
-        lows = new_candles_df['low'].astype(float).tolist()
-        closes = new_candles_df['close'].astype(float).tolist()
+        # Préparer les données pour le tracé
+        timestamps = df_candles['timestamp'].astype(int).tolist()
+        opens = df_candles['open'].astype(float).tolist()
+        highs = df_candles['high'].astype(float).tolist()
+        lows = df_candles['low'].astype(float).tolist()
+        closes = df_candles['close'].astype(float).tolist()
         dates = [datetime.fromtimestamp(int(ts) / 1000).strftime('%d/%m %H:%M') for ts in timestamps]
 
         plt.clear_figure()
@@ -220,13 +201,13 @@ def main(symbol: str, _id: str, chosen_strategy: str = None, max_candles: int = 
 
         for (pos, price) in buys:
             plt.scatter([pos], [price], marker='x', color='green')
-            # offset = price + (price_range * 0.0002 if price_range else 0)
-            # plt.text('BUY', pos, offset, color='green')
+            offset = price + (price_range * 0.0002 if price_range else 0)
+            plt.text('BUY', pos, offset, color='green')
 
         for (pos, price) in sells:
             plt.scatter([pos], [price], marker='o', color='red')
-            # offset = price - (price_range * 0.0002 if price_range else 0)
-            # plt.text('SELL', pos, offset, color='red')
+            offset = price - (price_range * 0.0002 if price_range else 0)
+            plt.text('SELL', pos, offset, color='red')
 
         # Définir des labels d'axe X échantillonnés pour lisibilité
         step = max(1, len(dates) // 8)
@@ -240,7 +221,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('symbol', help='Trading pair symbol, e.g. LTC/EUR.')
     parser.add_argument('id', help='Trading pair id, e.g. XLTC/ZEUR.')
-    parser.add_argument('--strategy', help='Nom de la stratégie à exécuter (par défaut: toutes)', default=None)
-    parser.add_argument('--max-candles', help='Nombre maximum de bougies à charger/afficher (ex: 60)', default=None)
     args = parser.parse_args()
-    main(args.symbol, args.id, chosen_strategy=args.strategy, max_candles=args.max_candles)
+    main(args.symbol, args.id)
