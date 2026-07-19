@@ -8,6 +8,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     import logging
     import time
     import pandas as pd
+    import pandas_ta as ta
     import re
     import json
     import time
@@ -59,11 +60,11 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     # periodic pending orders dump / candle consistency check
     last_pending_fetch = 0
     PENDING_DUMP_FILE = 'pending_orders_dump.json'
-        
+
     miniCount = 600
     # monnaies d'usage pour considérer les paires à leur quote asset
     baseAssets = ["USD", "EUR"]
-    
+
     # trading state (position tracking for profit calc)
     def add_pending_order(order):
         """Append a single order dict to the pending dump file.
@@ -539,7 +540,7 @@ while True:
             balance = fetch_balance(exchange)
             balanceFetched = True
             # console.print(f"original balance: {balance}")
-        
+
         # markets fetch
         if marketsFetched == False:
             _markets = loadMarkets(exchange, "markets.json")
@@ -604,6 +605,66 @@ while True:
                 latest_idx = N - 1
                 last_close = float(df_candles.iloc[latest_idx]['close'])
 
+                # 1/ récupération fetch_trades ou moyenne des chandelles stockées pour calcul seuils
+                ref_price = None
+                try:
+                    time.sleep(exchange.rateLimit / 1000)
+                    public_trades = exchange.fetch_trades(symbol, limit=20)
+                    if public_trades and len(public_trades) > 0:
+                        ref_price = sum(float(t['price']) for t in public_trades) / len(public_trades)
+                        console.print(f"[{symbol}] Prix de référence calculé sur {len(public_trades)} trades publics: {ref_price:.6f}")
+                except Exception as e:
+                    console.print(f"[{symbol}] Échec de fetch_trades, fallback sur les chandelles: {e}")
+
+                if ref_price is None:
+                    if len(df_candles) >= 20:
+                        ref_price = float(df_candles['close'].tail(20).mean())
+                    else:
+                        ref_price = float(df_candles['close'].mean())
+                    console.print(f"[{symbol}] Prix de référence calculé sur les chandelles stockées: {ref_price:.6f}")
+
+                # 2/ prise en compte tendance Bullish / Bearish
+                if len(df_candles) >= 50:
+                    sma_50 = float(df_candles['close'].tail(50).mean())
+                else:
+                    sma_50 = float(df_candles['close'].mean())
+                is_bullish = last_close > sma_50
+                trend_str = 'Bullish' if is_bullish else 'Bearish'
+                console.print(f"[{symbol}] Tendance détectée: {trend_str} (Last Close: {last_close:.6f} vs SMA 50: {sma_50:.6f})")
+
+                # 3/ détection trend following / mean reversion
+                regime_str = 'Mean Reversion'
+                try:
+                    adx_df = ta.adx(df_candles['high'], df_candles['low'], df_candles['close'], length=14)
+                    if adx_df is not None and not adx_df.empty:
+                        adx_val = float(adx_df.iloc[-1, 0])
+                        if adx_val > 25:
+                            regime_str = 'Trend Following'
+                        console.print(f"[{symbol}] ADX: {adx_val:.2f} -> Régime détecté: {regime_str}")
+                    else:
+                        console.print(f"[{symbol}] ADX indisponible, régime par défaut: {regime_str}")
+                except Exception as e:
+                    console.print(f"[{symbol}] Échec du calcul de l'ADX, régime par défaut: {regime_str}: {e}")
+
+                # Ajustement des seuils de déclenchement
+                buy_multiplier = 0.994
+                sell_multiplier = 1.006
+
+                if regime_str == 'Trend Following':
+                    if is_bullish:
+                        buy_multiplier = 0.997
+                        sell_multiplier = 1.010
+                    else:
+                        buy_multiplier = 0.990
+                        sell_multiplier = 1.003
+                else:  # Mean Reversion
+                    if is_bullish:
+                        buy_multiplier = 0.994
+                        sell_multiplier = 1.006
+                    else:
+                        buy_multiplier = 0.995
+                        sell_multiplier = 1.005
+
                 # decide buy
                 if global_buy[latest_idx]:
                     # skip if buys are paused for this symbol
@@ -630,8 +691,8 @@ while True:
                         except Exception as e:
                             console.print(f"Failed to fetch order book for {symbol}: {e}")
                             order_book = {'asks':[], 'bids':[]}
-                        price = order_book.get('asks')[0][0] if order_book.get('asks') else last_close
-                        price = price * 0.994
+                        base_price = ref_price if ref_price is not None else (order_book.get('asks')[0][0] if order_book.get('asks') else last_close)
+                        price = base_price * buy_multiplier
                         package = round(price * min_amount, int(-math.log10(price_precision)))
                         # read quote balance robustly
                         _b = balance.get('free').get(quote)
@@ -735,8 +796,8 @@ while True:
                         except Exception as e:
                             console.print(f"Failed to fetch order book for {symbol}: {e}")
                             order_book = {'asks':[], 'bids':[]}
-                        price = order_book.get('bids')[0][0] if order_book.get('bids') else last_close
-                        price = price * 1.006
+                        base_price = ref_price if ref_price is not None else (order_book.get('bids')[0][0] if order_book.get('bids') else last_close)
+                        price = base_price * sell_multiplier
                         # sell everything if symbol paused
                         now_ts = int(time.time())
                         expiry = pausedForBuy.get(symbol)
@@ -870,7 +931,7 @@ while True:
                 #    # console.print(trades)
 
                 # compute strategy
-        
+
                 # end step for allocating computationnal task
                 # if psutil.cpu_percent(interval=0.4) < 80.1 and psutil.virtual_memory().percent < 96.1 and lowerSwap <= psutil.swap_memory().used and balanceFetched:
                     # console.print("CPU usage is below 80.1%, memory usage is below 96.1%, and swap is not growing. Allocating 1 computationnal task.")
