@@ -1,4 +1,4 @@
-# CCXT Pro Trading Bot v2 (Asynchronous)
+# CCXT Pro Manual Trading Interface (Asynchronous)
 # Copyleft © 2026 Jules, Ecosia, Sylvain, the World-Wide-Web and you
 
 import asyncio
@@ -39,6 +39,9 @@ from persistence2 import DataManager, CacheManager, PatternManager
 from trading_engine2 import TradingEngine
 from monte_carlo2 import MonteCarloEngine
 
+# Import functions from symbols_utils as requested
+from symbols_utils import computeSymbols, updateTradingCount
+
 # Global Monte Carlo Engine
 mc_engine = None # Initialized in main after config load
 
@@ -46,9 +49,8 @@ mc_engine = None # Initialized in main after config load
 analysis_in_progress = set()
 analysis_lock = asyncio.Lock()
 
-# Global Watcher Task
-ohlcv_task = None
-trades_task = None
+# Global Watcher Tasks
+ohlcv_tasks = []
 
 # Global Active Pairs Management
 active_pairs = []
@@ -56,11 +58,11 @@ discovery_pool = []
 pair_last_trade_time = {}
 pair_hour_trades = {} # symbol -> deque of timestamps
 
-# Global Buy Queue for turn-based processing
+# Global Buy Queue for manual processing tracking if any
 buy_queue = []
 buy_queue_lock = asyncio.Lock()
 
-# Track orders placed by the bot to process them via WebSocket confirmation
+# Track orders placed manually
 pending_orders = {} # order_id -> metadata_dict
 pending_orders_lock = asyncio.Lock()
 processed_orders = None # Initialized in main after config load
@@ -202,7 +204,7 @@ class AsyncDashboardHandler(logging.Handler):
                     log['expiry'] = expiry
                     return
 
-        if "Bot v2 fully operational." in msg or "[bold green]Bot v2 fully operational." in msg:
+        if "Manual trader fully operational." in msg or "[bold green]Manual trader fully operational." in msg:
             for log in all_logs:
                 if "Waiting for system initialization..." in log['msg']:
                     log['msg'] = msg
@@ -329,20 +331,6 @@ def sanitize_order_dict(order):
     except Exception:
         pass
     return order
-    if isinstance(v, str):
-        try:
-            return float(v.replace(',', ''))
-        except Exception:
-            try:
-                # Strip non-numeric characters
-                filtered = ''.join(ch for ch in v if (ch.isdigit() or ch in '.-eE'))
-                return float(filtered) if filtered not in ('', '.', '-', '-.') else float(default)
-            except Exception:
-                return float(default)
-    try:
-        return float(v)
-    except Exception:
-        return float(default)
 
 def format_price(price, precision=None, config=None):
     if price is None: return "-"
@@ -637,375 +625,92 @@ async def input_task(exchange, config, data_manager, engine):
             logging.error(f"Input error: {e}")
         await asyncio.sleep(0.1)
 
-async def build_discovery_pool_from_balances(exchange, config):
+async def watch_ohlcv_single_market(exchange, symbol, timeframe, config, device, executor):
     """
-    Build discovery pool based on available balances and 24h volume.
-    For each currency we have balance for, find all symbols trading with that currency as quote or base,
-    then pick the top volume symbols.
+    Watcher for a single market (pair) that streams updates and calculates signals only for display purposes.
     """
-    global discovery_pool
-    try:
-        logging.info("Building discovery pool from available balances...")
-
-        # 1. Fetch current balances and store globally
-        balance = await exchange.fetch_balance()
-        async with bot_lock:
-            global current_balances
-            current_balances = balance
-
-        # 2. Determine currencies with non-zero free balance
-        free_balances = balance.get('free', {}) if isinstance(balance, dict) and 'free' in balance else {}
-        currencies_with_balance = []
-        # Treat amounts below dust threshold as zero
-        dust_threshold_amount = float(config.get('exchange', {}).get('dust_threshold_amount', 1e-6))
-        for curr, amount in free_balances.items():
-            try:
-                # handle nested balance dicts or raw numeric values
-                if isinstance(amount, dict):
-                    amt = amount.get('free') or amount.get('total') or amount.get('used') or 0
-                else:
-                    amt = amount
-                amount_float = float(amt) if amt is not None else 0
-                if amount_float > dust_threshold_amount:
-                    currencies_with_balance.append(curr)
-            except (ValueError, TypeError):
-                continue
-
-        # 3. Fallback if none found
-        if not currencies_with_balance:
-            logging.warning("No currencies with non-dust balance found. Building fallback currency list from markets but filtering dust.")
-            # Use most common currencies from markets as fallback but only include those present in balances and not dust
-            markets_keys = list(exchange.markets.keys()) if hasattr(exchange, 'markets') else []
-            bases = [s.split('/')[0] for s in markets_keys if '/' in s]
-            quotes = [s.split('/')[1] for s in markets_keys if '/' in s]
-            candidate_currencies = list(dict.fromkeys(bases + quotes))
-
-            # Filter candidate currencies against any balance entries (free/total) and dust threshold
-            filtered = []
-            for c in candidate_currencies:
-                found_amt = None
-                # check free, total top-level, or any nested dict
-                try:
-                    if isinstance(balance, dict):
-                        # direct key
-                        if c in balance and not isinstance(balance[c], dict):
-                            found_amt = float(balance[c])
-                        # check total/free dicts
-                        if found_amt is None and 'free' in balance and isinstance(balance['free'], dict) and c in balance['free']:
-                            found_amt = float(balance['free'].get(c) or 0)
-                        if found_amt is None and 'total' in balance and isinstance(balance['total'], dict) and c in balance['total']:
-                            found_amt = float(balance['total'].get(c) or 0)
-                except Exception:
-                    found_amt = None
-                if found_amt is not None and found_amt > dust_threshold_amount:
-                    filtered.append(c)
-
-            if not filtered:
-                # final fallback to common stable currencies
-                currencies_with_balance = ['EUR']
-            else:
-                currencies_with_balance = filtered
-
-        # 4. Fetch tickers and prepare top 24h volume pairs
-        all_tickers = await exchange.fetch_tickers()
-        tickers_list = []
-        for symbol, tk in (all_tickers.items() if isinstance(all_tickers, dict) else []):
-            if symbol not in exchange.markets:
-                continue
-            vol = tk.get('quoteVolume') or ((tk.get('baseVolume') or 0) * (tk.get('last') or 0)) or 0
-            tickers_list.append({'symbol': symbol, 'volume24h': float(vol)})
-
-        # sort by 24h volume descending and keep top candidates to analyze recent trades
-        tickers_list.sort(key=lambda x: x['volume24h'], reverse=True)
-        top_scan_limit = int(config.get('discovery', {}).get('top_24h_scan_limit', 200))
-        top_candidates = tickers_list[:top_scan_limit]
-
-        # 5. From top 24h pairs, fetch recent trades and count trades within last hour
-        now = time.time()
-        one_hour_ago = now - 3600
-        traded_counts = []
-        for item in top_candidates:
-            s = item['symbol']
-            try:
-                trades = await exchange.fetch_trades(s, since=None, limit=1000)
-            except Exception:
-                trades = []
-            count = 0
-            try:
-                for t in trades:
-                    ts = (t.get('timestamp') or t.get('time') or 0) / 1000.0
-                    if ts >= one_hour_ago:
-                        count += 1
-                    else:
-                        # trades are usually returned newest-first or oldest-first depending on exchange; don't rely on order
-                        continue
-            except Exception:
-                count = 0
-            traded_counts.append({'symbol': s, 'trades_last_hour': count, 'volume24h': item['volume24h']})
-
-        # sort by trades in last hour (desc), then by 24h volume
-        traded_counts.sort(key=lambda x: (x['trades_last_hour'], x['volume24h']), reverse=True)
-
-        # 6. Compose discovery pool: first include best pairs for currencies with balance
-        max_pairs = int(config.get('max_number_of_pairs', 40))
-        pool = []
-        added = set()
-
-        # helper: find best pair for a currency from top 24h list
-        symbol_by_currency = {}
-        for rec in tickers_list:
-            try:
-                base, quote = rec['symbol'].split('/')
-            except Exception:
-                continue
-            # prefer pair where currency is base first, else quote
-            symbol_by_currency.setdefault(base, []).append((rec['symbol'], rec['volume24h']))
-            symbol_by_currency.setdefault(quote, []).append((rec['symbol'], rec['volume24h']))
-        # Only pairs buyable with available quote balances should be considered.
-        buyable_quotes = set(currencies_with_balance)
-
-        for curr in currencies_with_balance:
-            # Prefer pairs where the quote currency equals the currency with balance
-            found = False
-            for rec in tickers_list:
-                sym = rec['symbol']
-                if '/' not in sym: continue
-                base, quote = sym.split('/')
-                if quote == curr and sym in exchange.markets and sym not in added:
-                    pool.append(sym)
-                    added.add(sym)
-                    found = True
+    logging.info(f"Starting single market OHLCV watcher for {symbol}")
+    while not shutdown_event.is_set():
+        try:
+            async for symbol_upd, tf_upd, candles in exchange.watch_ohlcv(symbol, timeframe):
+                if shutdown_event.is_set():
                     break
-            if found:
-                if len(pool) >= max_pairs:
-                    break
-                continue
-            # If none found in top tickers, try symbol_by_currency fallback but require quote to be buyable
-            candidates_for_curr = symbol_by_currency.get(curr, [])
-            if not candidates_for_curr:
-                continue
-            candidates_for_curr.sort(key=lambda x: x[1], reverse=True)
-            for sym, _ in candidates_for_curr:
-                if '/' not in sym: continue
-                b, q = sym.split('/')
-                if q in buyable_quotes and sym in exchange.markets and sym not in added:
-                    pool.append(sym)
-                    added.add(sym)
-                    break
-            if len(pool) >= max_pairs:
-                break
-
-        # 7. Fill the rest with the top traded pairs from traded_counts
-        for rec in traded_counts:
-            if len(pool) >= max_pairs:
-                break
-            sym = rec['symbol']
-            if '/' not in sym: continue
-            if sym not in added and sym in exchange.markets:
-                b, q = sym.split('/')
-                if buyable_quotes and q not in buyable_quotes:
+                if not candles:
                     continue
-                pool.append(sym)
-                added.add(sym)
 
-        # 8. Final fallback: if still not enough, fill with highest 24h volume pairs
-        if len(pool) < max_pairs:
-            for rec in tickers_list:
-                if len(pool) >= max_pairs:
-                    break
-                sym = rec['symbol']
-                if '/' not in sym: continue
-                if sym not in added and sym in exchange.markets:
-                    b, q = sym.split('/')
-                    if buyable_quotes and q not in buyable_quotes:
-                        continue
-                    pool.append(sym)
-                    added.add(sym)
-
-        discovery_pool = pool[:max_pairs]
-        logging.info(f"Discovery pool built with {len(discovery_pool)} symbols (currencies with balance: {len(currencies_with_balance)}).")
-        return discovery_pool
-    except Exception as e:
-        logging.error(f"Error building discovery pool: {e}")
-        return []
-
-
-async def refresh_discovery_pool_task(exchange, config):
-    """
-    Refreshes the discovery pool every hour based on balances and 24h volume.
-    """
-    global discovery_pool
-    while not shutdown_event.is_set():
-        try:
-            await asyncio.sleep(3600)
-            await build_discovery_pool_from_balances(exchange, config)
-        except Exception as e:
-            logging.error(f"Error refreshing discovery pool: {e}")
-            await asyncio.sleep(60)
-
-async def fetch_trades_count_task(exchange, config):
-    """
-    Periodically fetches the number of trades for pairs during the latest hour.
-    Updates pair_hour_trades for active monitoring.
-    """
-    logging.info(f"[bold cyan]Starting trades count fetcher.")
-    
-    while not shutdown_event.is_set():
-        try:
-            # Fetch trade counts for all symbols we care about (discovery_pool + active_pairs)
-            symbols_to_fetch = list(set(discovery_pool + active_pairs))
-            
-            for symbol in symbols_to_fetch:
-                try:
-                    # Fetch recent trades for this symbol
-                    # Use limit to get trades from approximately the last hour
-                    trades = await exchange.fetch_trades(symbol, since=None, limit=1000)
-                    
-                    now = time.time()
-                    if symbol not in pair_hour_trades:
-                        pair_hour_trades[symbol] = deque()
-                    
-                    # Clear old data
-                    pair_hour_trades[symbol].clear()
-                    
-                    # Add timestamps of recent trades (within the last hour)
-                    one_hour_ago = now - 3600
-                    for trade_data in trades:
-                        trade_time = trade_data['timestamp'] / 1000  # Convert ms to seconds
-                        if trade_time >= one_hour_ago:
-                            pair_hour_trades[symbol].append(trade_time)
-                        else:
-                            # Trades are in chronological order, so we can break early
-                            break
-                    
-                    # Update last trade time
-                    if trades:
-                        pair_last_trade_time[symbol] = trades[-1]['timestamp'] / 1000
-                    
-                except Exception as e:
-                    logging.debug(f"Failed to fetch trades for {symbol}: {e}")
-                    continue
-            
-            # Wait before next fetch
-            await asyncio.sleep(60)  # Fetch every minute
-            
-        except Exception as e:
-            if not shutdown_event.is_set():
-                logging.error(f"Trades count fetch error: {e}")
-                await asyncio.sleep(10)
-            else: break
-
-async def add_active_pair(symbol, exchange, config, data_manager):
-    if symbol in active_pairs: return
-    
-    # Initialize bot state
-    pair_cfg = config.get('pairs', {}).get(symbol, {})
-    strat = pair_cfg.get('strategy') or random.choice(STRATEGIES)
-    aggr = pair_cfg.get('aggr') or random.choice(['normal', 'aggressive', 'dynamic'])
-
-    bot_state[symbol] = {
-        'price': 0, 'rsi': 0, 'tendency': 'Neutral',
-        'last_signal': 'Init',
-        'position': data_manager.get_position(symbol),
-        'aggr': aggr,
-        'strategy': strat,
-        'consecutive_buys': 0,
-        'consecutive_sells': 0,
-        'score': 0,
-        'ema_f': 0,
-        'ema_s': 0,
-        'adx': 0,
-        'volatility': 0,
-        'expected_profit': 0,
-        'last_analysis_ts': 0
-    }
-    pair_last_trade_time[symbol] = time.time()
-    
-    if symbol not in ohlcv_cache:
-        ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-        
-    active_pairs.append(symbol)
-    symbol_timeframes.setdefault(symbol, default_candle_timeframe)
-    logging.info(f"[{symbol}] Added to active monitoring set.")
-
-async def remove_active_pair(symbol):
-    if symbol in active_pairs:
-        active_pairs.remove(symbol)
-        # We keep bot_state and ohlcv_cache for a bit or just leave them, 
-        # but they won't be updated by the watcher anymore.
-        logging.info(f"[{symbol}] Removed from active monitoring set.")
-
-async def watch_ohlcv_global_task(exchange, watch_pairs_list, config, data_manager, pattern_manager, engine, device, executor):
-    """
-    Single watcher task for all symbols in active_pairs.
-    'watch_pairs_list' is the live list active_pairs.
-    """
-    logging.info(f"[bold cyan]Starting global OHLCV watcher.")
-
-    while not shutdown_event.is_set():
-        try:
-            # We pass a wrapper that yields [symbol, '1s'] for each symbol in active_pairs
-            # But I modified watch_ohlcv_for_symbols to handle dynamic lists if I pass the list itself.
-            async for updates in exchange.watch_ohlcv_for_symbols(watch_pairs_list):
-                if shutdown_event.is_set(): break
-
-                # Update all prices in the batch first for maximum perceived responsiveness in the dashboard
+                # 1. Update the price immediately in bot_state
                 async with bot_lock:
-                    for update in updates:
-                        symbol, _, candles = update
-                        if symbol in bot_state:
-                            bot_state[symbol]['price'] = candles[-1][4]
+                    if symbol in bot_state:
+                        bot_state[symbol]['price'] = candles[-1][4]
 
-                for symbol, timeframe, candles in updates:
-                    symbol_timeframes[symbol] = timeframe
-                    async with ohlcv_lock:
-                        if symbol not in ohlcv_cache:
-                            ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                # 2. Update the in-memory ohlcv cache
+                async with ohlcv_lock:
+                    if symbol not in ohlcv_cache:
+                        ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
 
-                        df = ohlcv_cache[symbol]
+                    df = ohlcv_cache[symbol]
+                    last_candle = candles[-1]
+                    last_ts = pd.to_datetime(last_candle[0], unit='ms')
 
-                        # Optimization: if only updating the current/last candle, do it in-place
-                        last_candle = candles[-1]
-                        last_ts = pd.to_datetime(last_candle[0], unit='ms')
+                    if not df.empty and last_ts == df.index[-1]:
+                        df.iloc[-1] = last_candle[1:]
+                    elif not df.empty and last_ts > df.index[-1] and len(candles) == 1:
+                        new_row = pd.DataFrame([last_candle[1:]], columns=['open', 'high', 'low', 'close', 'volume'], index=[last_ts])
+                        ohlcv_cache[symbol] = pd.concat([df, new_row]).tail(1000)
+                    else:
+                        new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
+                        new_candles_df.set_index('timestamp', inplace=True)
+                        df = pd.concat([df, new_candles_df])
+                        df = df[~df.index.duplicated(keep='last')]
+                        df.sort_index(inplace=True)
+                        ohlcv_cache[symbol] = df.tail(1000)
 
-                        if not df.empty and last_ts == df.index[-1]:
-                            # In-place update of the most recent candle
-                            df.iloc[-1] = last_candle[1:]
-                        elif not df.empty and last_ts > df.index[-1] and len(candles) == 1:
-                            # Efficiently append a single new candle
-                            new_row = pd.DataFrame([last_candle[1:]], columns=['open', 'high', 'low', 'close', 'volume'], index=[last_ts])
-                            ohlcv_cache[symbol] = pd.concat([df, new_row]).tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
-                        else:
-                            # Full update for gaps or multiple new candles
-                            new_candles_df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                            new_candles_df['timestamp'] = pd.to_datetime(new_candles_df['timestamp'], unit='ms')
-                            new_candles_df.set_index('timestamp', inplace=True)
+                    # Trigger calculations in process pool only for UI display metrics
+                    df_copy = ohlcv_cache[symbol].copy()
 
-                            df = pd.concat([df, new_candles_df])
-                            df = df[~df.index.duplicated(keep='last')]
-                            df.sort_index(inplace=True)
-                            ohlcv_cache[symbol] = df.tail(config.get('exchange', {}).get('fetch_ohlcv_limit', 10000))
+                if len(df_copy) >= 20:
+                    strat = bot_state.get(symbol, {}).get('strategy', random.choice(STRATEGIES))
+                    aggr = bot_state.get(symbol, {}).get('aggr', 'normal')
+                    settings = {
+                        'device': device,
+                        'strategy': strat,
+                        'aggr': aggr,
+                        'ema_fast': config.get('ema_fast'),
+                        'ema_slow': config.get('ema_slow'),
+                        'macd_fast': config.get('macd_fast'),
+                        'macd_slow': config.get('macd_slow'),
+                        'macd_signal': config.get('macd_signal'),
+                        'rsi_period': config.get('rsi_period'),
+                        'tema_length': config.get('tema_length')
+                    }
 
-                    # Trigger analysis only if cooldown passed to avoid task spam
-                    async with bot_lock:
-                        last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
+                    loop = asyncio.get_running_loop()
+                    if executor:
+                        df_signals = await loop.run_in_executor(executor, get_signals, df_copy, settings, False, config)
+                    else:
+                        df_signals = get_signals(df_copy, settings, global_config=config)
 
-                    cooldown = config.get('timeouts', {}).get('analysis_cooldown', 12)
-                    if time.time() - last_analysis >= cooldown:
-                        async with analysis_lock:
-                            if symbol not in analysis_in_progress:
-                                analysis_in_progress.add(symbol)
-                                asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
+                    if not df_signals.empty:
+                        latest = df_signals.iloc[-1]
+                        async with bot_lock:
+                            bot_state[symbol].update({
+                                'ema_f': latest.get('ema_f', 0),
+                                'ema_s': latest.get('ema_s', 0),
+                                'macd_hist': latest.get('macd_hist', 0),
+                                'rsi': latest.get('rsi', 0),
+                                'adx': latest.get('adx', 0),
+                                'volatility': latest.get('volatility', 0),
+                                'score': 1 if latest.get('buy_signal') else (-1 if latest.get('sell_signal') else 0),
+                                'tendency': "Bullish" if latest.get('buy_signal') else ("Bearish" if latest.get('sell_signal') else "Neutral")
+                            })
 
         except Exception as e:
             if not shutdown_event.is_set():
-                err_msg = str(e).lower()
-                logging.error(f"WebSocket OHLCV error: {e}")
-                if "ping-pong" in err_msg or "timeout" in err_msg:
-                    try: await exchange.close()
-                    except: pass
+                logging.error(f"WebSocket OHLCV watcher error for {symbol}: {e}")
                 await asyncio.sleep(5)
-            else: break
+            else:
+                break
 
 async def sync_live_positions(exchange, data_manager, config):
     exchange_id = exchange.exchange_id
@@ -1022,25 +727,19 @@ async def sync_live_positions(exchange, data_manager, config):
 
     pairs_dict = config.get('pairs', {})
     
-    # Collect quote currencies from configured pairs and common fallback currencies
-    # These are used as the quote part when matching assets to symbols
     base_currencies = set()
-    
-    # Add quote currencies from configured pairs
     for p in pairs_dict.keys():
         if '/' in p:
             parts = p.split('/')
             if len(parts) == 2:
-                base_currencies.add(parts[1])  # quote currency
+                base_currencies.add(parts[1])
     
-    # Add common fallback currencies (these are typically quote currencies)
     fallbacks = ['EUR']
     for currency in fallbacks:
         base_currencies.add(currency)
     
     base_currencies = sorted(list(base_currencies))
     
-    # Ensure we have at least some base currencies
     if not base_currencies:
         base_currencies = ['EUR']
 
@@ -1049,10 +748,6 @@ async def sync_live_positions(exchange, data_manager, config):
     try:
         all_tickers = await exchange.fetch_tickers()
     except: pass
-
-    logging.info(f"[{exchange_id}] Starting position sync. Free balances: {list(free_balances.keys())}")
-    logging.info(f"[{exchange_id}] Active pairs: {active_pairs}")
-    logging.info(f"[{exchange_id}] Base currencies: {base_currencies}")
 
     async def process_asset(asset, amount):
         nonlocal sellable_found
@@ -1063,15 +758,12 @@ async def sync_live_positions(exchange, data_manager, config):
         if asset in base_currencies or amount <= 0: return
 
         symbol = None
-        # Try to find a matching symbol for this asset
-        # First priority: symbols from pairs_dict (configured pairs)
         for bc in base_currencies:
             candidate = f"{asset}/{bc}"
             if candidate in pairs_dict:
                 symbol = candidate
                 break
         
-        # Second priority: symbols from exchange markets
         if not symbol and hasattr(exchange, 'markets') and exchange.markets:
             for bc in base_currencies:
                 candidate = f"{asset}/{bc}"
@@ -1079,7 +771,6 @@ async def sync_live_positions(exchange, data_manager, config):
                     symbol = candidate
                     break
             
-            # Also try reverse pair (some exchanges use quote/base format)
             if not symbol:
                 for bc in base_currencies:
                     candidate = f"{bc}/{asset}"
@@ -1087,7 +778,6 @@ async def sync_live_positions(exchange, data_manager, config):
                         symbol = candidate
                         break
         
-        # Third priority: check if the asset itself is in active_pairs or pairs_dict
         if not symbol:
             if asset in active_pairs:
                 symbol = asset
@@ -1095,10 +785,8 @@ async def sync_live_positions(exchange, data_manager, config):
                 symbol = asset
         
         if not symbol:
-            logging.warning(f"[{asset}] Could not find matching symbol in active_pairs: {active_pairs}, config pairs: {list(pairs_dict.keys())}, exchange markets: {list(exchange.markets.keys()) if hasattr(exchange, 'markets') and exchange.markets else 'N/A'}")
             return
 
-        logging.info(f"[{symbol}] Processing asset {asset} with amount {amount}")
         existing_pos_list = data_manager.get_position(symbol)
         if existing_pos_list:
             total_existing_amount = sum(p['amount'] for p in existing_pos_list)
@@ -1132,42 +820,31 @@ async def sync_live_positions(exchange, data_manager, config):
                     is_dust = True
         except: pass
 
-        if is_dust:
-            logging.warning(f"[{symbol}] Asset amount {amount} is below minimum thresholds (dust), but will create position for tracking")
-            # Don't return - continue to create position for dust amounts too
-        sellable_found = True
-
         avg_price = 0
         total_cost = 0
         total_fee = 0
         accumulated_amount = 0
         try:
-            # Add timeout to prevent hanging on slow responses
-            # Primary attempt: fetch recent user trades
             trades = []
             try:
                 trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=50), timeout=config.get('timeouts', {}).get('order_fetch', 10))
             except Exception:
-                # Best-effort: try again with a larger limit without blocking too long
                 try:
                     trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=200), timeout=5)
                 except Exception:
                     trades = []
 
-            # Normalize and sort by timestamp descending
             try:
                 trades = sorted(trades, key=lambda t: t.get('timestamp', 0), reverse=True)
             except Exception:
                 pass
 
-            # Helper: compute fallback fee when missing
             async def compute_estimated_fee(sym, trade_amt, trade_price):
                 try:
                     fee_rate = await exchange.fetch_trading_fee(sym)
                 except Exception:
                     fee_rate = config.get('exchange', {}).get('default_fee', 0.001)
                 estimated_cost = trade_amt * trade_price * (fee_rate or 0)
-                # Assume fee currency is quote; convert to quote value via get_fee_in_quote
                 try:
                     est = await exchange.get_fee_in_quote(sym, estimated_cost, None)
                     return float(est or 0)
@@ -1190,7 +867,6 @@ async def sync_live_positions(exchange, data_manager, config):
                     fee_cost = fee_info.get('cost', 0) if isinstance(fee_info, dict) else 0
                     fee_currency = fee_info.get('currency') if isinstance(fee_info, dict) else None
                     if not fee_cost or float(fee_cost) == 0:
-                        # estimate fee when missing or zero
                         est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
                         total_fee += est_fee
                     else:
@@ -1198,7 +874,6 @@ async def sync_live_positions(exchange, data_manager, config):
                             actual_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
                             total_fee += actual_fee * (trade_amt / float(t.get('amount') or trade_amt))
                         except Exception:
-                            # fallback to estimated fee
                             est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
                             total_fee += est_fee
 
@@ -1206,57 +881,9 @@ async def sync_live_positions(exchange, data_manager, config):
                 except Exception:
                     continue
 
-            # If trades didn't cover the expected amount, try a larger historical fetch as fallback
             if accumulated_amount > 0:
                 avg_price = total_cost / accumulated_amount
-                sync_threshold = float(config.get('exchange', {}).get('sync_threshold', 0.99))
-                if accumulated_amount < amount * sync_threshold:
-                    # Try fetching a larger set of trades (could be paginated) to recover missing fills
-                    try:
-                        more_trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=500), timeout=10)
-                        more_trades = sorted(more_trades, key=lambda t: t.get('timestamp', 0), reverse=True)
-                        for t in more_trades:
-                            if accumulated_amount >= amount: break
-                            if t.get('side') != 'buy': continue
-                            trade_amt = min(float(t.get('amount') or 0), amount - accumulated_amount)
-                            trade_price = float(t.get('price') or 0)
-                            total_cost += trade_amt * trade_price
-                            fee_info = t.get('fee') or {}
-                            fee_cost = fee_info.get('cost', 0) if isinstance(fee_info, dict) else 0
-                            fee_currency = fee_info.get('currency') if isinstance(fee_info, dict) else None
-                            if not fee_cost or float(fee_cost) == 0:
-                                est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
-                                total_fee += est_fee
-                            else:
-                                try:
-                                    actual_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
-                                    total_fee += actual_fee * (trade_amt / float(t.get('amount') or trade_amt))
-                                except Exception:
-                                    est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
-                                    total_fee += est_fee
-                            accumulated_amount += trade_amt
-                    except Exception:
-                        pass
-
-                    # Fill missing remainder using current ticker price as best-effort
-                    try:
-                        ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
-                        curr_p = float((ticker.get('last') or 0) if ticker else 0)
-                    except Exception:
-                        curr_p = 0
-                    if curr_p > 0 and accumulated_amount < amount:
-                        rest_amount = amount - accumulated_amount
-                        rest_cost = rest_amount * curr_p
-                        total_cost += rest_cost
-                        # approximate remaining fee
-                        try:
-                            est_fee = await compute_estimated_fee(symbol, rest_amount, curr_p)
-                            total_fee += est_fee
-                        except Exception:
-                            pass
-                        avg_price = total_cost / amount
             elif len(trades) == 0:
-                # No trades found - use current price for the full amount
                 ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
                 curr_p = (ticker.get('last') or 0) if ticker else 0
                 if curr_p > 0:
@@ -1264,7 +891,6 @@ async def sync_live_positions(exchange, data_manager, config):
                     total_cost = amount * avg_price
         except Exception as e:
             logging.warning(f"[{symbol}] Error fetching trade history for sync: {e}")
-            # If trade history fetch fails completely, try to use current price
             ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
             curr_p = (ticker.get('last') or 0) if ticker else 0
             if curr_p > 0:
@@ -1275,7 +901,7 @@ async def sync_live_positions(exchange, data_manager, config):
             ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
             avg_price = (ticker.get('last') or 0) if ticker else 0
             if avg_price > 0:
-                total_cost = amount * avg_price  # Ensure total_cost is consistent
+                total_cost = amount * avg_price
 
         if avg_price > 0:
             data_manager.add_position(
@@ -1284,10 +910,7 @@ async def sync_live_positions(exchange, data_manager, config):
                 total_base=total_cost + total_fee
             )
             logging.info(f"[{symbol}] Synced balance: {amount} at calculated avg price {format_price(avg_price)}")
-        else:
-            logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. avg_price={avg_price}, total_cost={total_cost}")
 
-    # Parallelize processing of all assets with a semaphore to avoid rate limits
     sync_semaphore = asyncio.Semaphore(config.get('exchange', {}).get('max_concurrent_syncs', 3))
     async def process_with_semaphore(asset, amount):
         async with sync_semaphore:
@@ -1295,7 +918,6 @@ async def sync_live_positions(exchange, data_manager, config):
 
     await asyncio.gather(*[process_with_semaphore(a, am) for a, am in free_balances.items()])
 
-    # Ensure symbols with positions are in active_pairs for monitoring
     open_positions = data_manager.get_open_positions()
     new_symbols = []
     for symbol in open_positions.keys():
@@ -1304,12 +926,10 @@ async def sync_live_positions(exchange, data_manager, config):
             new_symbols.append(symbol)
             logging.info(f"[{symbol}] Added to active_pairs due to existing position")
     
-    # Initialize OHLCV cache and bot_state for newly added symbols
     for symbol in new_symbols:
         async with ohlcv_lock:
             if symbol not in ohlcv_cache:
                 ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-                logging.info(f"[{symbol}] Initialized OHLCV cache due to existing position")
         if symbol not in bot_state:
             bot_state[symbol] = {
                 'price': 0, 'rsi': 0, 'tendency': 'Neutral',
@@ -1322,7 +942,6 @@ async def sync_live_positions(exchange, data_manager, config):
 
     logging.info(f"[{exchange_id}] Position sync completed. Created positions: {list(open_positions.keys())}")
     
-    # Update global bot_state for dashboard
     async with bot_lock:
         for symbol, pos_list in open_positions.items():
             if symbol not in bot_state:
@@ -1334,278 +953,13 @@ async def sync_live_positions(exchange, data_manager, config):
 def worker_process_init():
     import signal
     try:
-        # Ignore SIGINT in worker processes to avoid messy KeyboardInterrupt tracebacks
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     except:
         pass
 
-async def analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor):
-    # Cooldown check is now also performed before calling the wrapper for efficiency,
-    # but kept here for safety.
-    async with bot_lock:
-        last_analysis = bot_state.get(symbol, {}).get('last_analysis_ts', 0)
-
-    cooldown = config.get('timeouts', {}).get('analysis_cooldown', 12)
-    if time.time() - last_analysis < cooldown:
-        async with analysis_lock:
-            if symbol in analysis_in_progress:
-                analysis_in_progress.remove(symbol)
-        return
-
-    try:
-        # Added timeout to prevent individual analysis tasks from locking up indefinitely
-        analysis_timeout = config.get('timeouts', {}).get('analysis_timeout', 60)
-        await asyncio.wait_for(
-            analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor),
-            timeout=analysis_timeout
-        )
-    except asyncio.TimeoutError:
-        logging.warning(f"Analysis for {symbol} timed out after {analysis_timeout}s.")
-    except Exception as e:
-        logging.error(f"Error in analysis for {symbol}: {e}", exc_info=True)
-    finally:
-        async with bot_lock:
-            if symbol in bot_state:
-                bot_state[symbol]['last_analysis_ts'] = time.time()
-                # Schedule strategy change
-                bot_state[symbol]['strategy'] = random.choice(STRATEGIES)
-        async with analysis_lock:
-            if symbol in analysis_in_progress:
-                analysis_in_progress.remove(symbol)
-
-async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor=None):
-    try:
-        # Check suspensions
-        now_ts = time.time()
-        is_suspended = False
-        positions = data_manager.get_position(symbol)
-        if symbol in pair_suspensions:
-            susp = pair_suspensions[symbol]
-            if now_ts < susp.get('until', 0):
-                is_suspended = True
-                logging.debug(f"[{symbol}] Suspended until {susp.get('until', 0)}: {susp.get('reason')}")
-            elif susp.get('reason') == 'budget':
-                balance = current_balances or {}
-                base_curr = symbol.split('/')[1] if '/' in symbol else symbol
-                free_bal = 0
-                try:
-                    free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0) or 0
-                    free_bal = float(free_bal) if free_bal is not None else 0
-                except:
-                    free_bal = 0
-                required_amount = float(susp.get('amount_required', 0) or 0) * 1.2
-                if free_bal >= required_amount:
-                    logging.info(f"[{symbol}] Budget recovered. Resuming pair.")
-                    del pair_suspensions[symbol]
-                else:
-                    is_suspended = True
-            elif susp.get('reason') == 'volume_minimum':
-                balance = current_balances or {}
-                base_curr = symbol.split('/')[1] if '/' in symbol else symbol
-                free_bal = 0
-                try:
-                    free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0) or 0
-                    free_bal = float(free_bal) if free_bal is not None else 0
-                except:
-                    free_bal = 0
-                
-                min_amount = float(susp.get('min_amount', 0) or 0)
-                min_cost = float(susp.get('min_cost', 0) or 0)
-                
-                # Get current price from OHLCV cache or bot_state
-                current_price = 0
-                try:
-                    async with ohlcv_lock:
-                        if symbol in ohlcv_cache and not ohlcv_cache[symbol].empty:
-                            current_price = float(ohlcv_cache[symbol]['close'].iloc[-1] or 0)
-                    if current_price == 0:
-                        # Fallback to bot_state price
-                        current_price = float(bot_state.get(symbol, {}).get('price', 0) or 0)
-                except:
-                    current_price = 0
-                
-                # Check if we have enough balance to meet minimum volume requirements
-                if free_bal > 0 and current_price > 0:
-                    # We can meet the minimum if our balance >= min_amount OR (balance * price) >= min_cost
-                    can_meet_min_amount = free_bal >= min_amount
-                    can_meet_min_cost = (free_bal * current_price) >= min_cost
-                    
-                    if can_meet_min_amount or can_meet_min_cost:
-                        logging.info(f"[{symbol}] Volume minimum requirements met (balance: {free_bal}, min_amount: {min_amount}, min_cost: {min_cost}). Resuming pair.")
-                        del pair_suspensions[symbol]
-                    else:
-                        is_suspended = True
-                        logging.debug(f"[{symbol}] Still suspended: balance {free_bal} < min_amount {min_amount}, and balance*price {free_bal * current_price:.8f} < min_cost {min_cost}")
-                else:
-                    # If we can't determine requirements, keep suspended
-                    is_suspended = True
-                    logging.debug(f"[{symbol}] Volume minimum suspension: insufficient data for recovery check (free_bal={free_bal}, price={current_price})")
-            else:
-                del pair_suspensions[symbol]
-
-        async with ohlcv_lock:
-            if symbol not in ohlcv_cache: return
-            df = ohlcv_cache[symbol].copy()
-
-        # For symbols with existing positions, use lower candle requirement
-        min_candles = config.get('trading', {}).get('min_candles_for_analysis', 250) or 250
-        try:
-            min_candles = int(min_candles)
-        except (ValueError, TypeError):
-            min_candles = 250
-        if positions:  # If we have positions for this symbol, be more lenient
-            min_candles = max(1, min_candles // 10)  # Use 10% of normal requirement, minimum 1
-            logging.debug(f"[{symbol}] Using reduced candle requirement: {min_candles}")
-        
-        # Safety check for df
-        df_len = len(df) if isinstance(df, pd.DataFrame) else 0
-        if not isinstance(df, pd.DataFrame) or df.empty or df_len < min_candles: 
-            logging.debug(f"[{symbol}] Insufficient candles ({df_len} < {min_candles}) for analysis")
-            return
-
-        loop = asyncio.get_event_loop()
-
-        # Single Strategy Evaluation - Determined BEFORE executor call to consolidate
-        pair_config = config['pairs'].get(symbol, {})
-        strat = pair_config.get('strategy') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('strategy') or bot_state.get(symbol, {}).get('strategy')
-        aggr = pair_config.get('aggr') or data_manager.data.get('open_positions', {}).get(symbol, [{}])[0].get('aggr') or bot_state.get(symbol, {}).get('aggr')
-
-        if not strat: strat = random.choice(STRATEGIES)
-        if not aggr: aggr = random.choice(['normal', 'aggressive', 'dynamic'])
-
-        # Consolidate indicator settings
-        settings = {
-            'device': device,
-            'strategy': strat,
-            'aggr': aggr,
-            'ema_fast': config.get('ema_fast'),
-            'ema_slow': config.get('ema_slow'),
-            'macd_fast': config.get('macd_fast'),
-            'macd_slow': config.get('macd_slow'),
-            'macd_signal': config.get('macd_signal'),
-            'rsi_period': config.get('rsi_period'),
-            'tema_length': config.get('tema_length')
-        }
-
-        # Run analysis in one go
-        if executor:
-            df = await loop.run_in_executor(executor, get_signals, df, settings, False, config)
-        else:
-            df = get_signals(df, settings, global_config=config)
-
-        if df.empty: return
-
-        latest = df.iloc[-1]
-        buy_candidate = latest.get('buy_signal', False)
-        sell_candidate = latest.get('sell_signal', False)
-        total_score = 1 if buy_candidate else (-1 if sell_candidate else 0)
-
-        # Simple backtest profit metric for display (Vectorized-ish)
-        test_df = df.tail(config.get('trading', {}).get('backtest_profit_candles', 400))
-        buys = test_df[test_df['buy_signal']]['close']
-        sells = test_df[test_df['sell_signal']]['close']
-
-        profit = 0
-        if not buys.empty and not sells.empty:
-            # Simplified matched-trade profit
-            # Check if indices are datetime64 and convert to numeric timestamps for comparison
-            buys_numeric = buys.copy()
-            sells_numeric = sells.copy()
-            
-            # Convert datetime64 index to numeric timestamp if needed
-            if pd.api.types.is_datetime64_any_dtype(buys.index):
-                buys_numeric.index = buys.index.astype('int64') // 10**6  # Convert nanoseconds to milliseconds
-            if pd.api.types.is_datetime64_any_dtype(sells.index):
-                sells_numeric.index = sells.index.astype('int64') // 10**6
-            
-            for b_idx, b_p in buys_numeric.items():
-                future_sells = sells_numeric[sells_numeric.index > b_idx]
-                if not future_sells.empty:
-                    s_idx = future_sells.index[0]
-                    profit += (future_sells.iloc[0] - b_p)
-                    sells_numeric = sells_numeric[sells_numeric.index > s_idx]
-                else: break
-
-        # Consolidated Update State
-        async with bot_lock:
-            if symbol not in bot_state: bot_state[symbol] = {}
-            bot_state[symbol].update({
-                'strategy': strat,
-                'aggr': latest.get('effective_aggr', aggr),
-                'expected_profit': profit,
-                'price': latest['close'],
-                'ema_f': latest.get('ema_f', 0),
-                'ema_s': latest.get('ema_s', 0),
-                'macd_hist': latest.get('macd_hist', 0),
-                'rsi': latest.get('rsi', 0),
-                'adx': latest.get('adx', 0),
-                'volatility': latest.get('volatility', 0),
-                'score': total_score,
-                'consecutive_buys': 1 if buy_candidate else 0,
-                'consecutive_sells': 1 if sell_candidate else 0,
-                'tendency': "Bullish" if total_score > 0 else ("Bearish" if total_score < 0 else "Neutral"),
-                'last_signal': 'Buy' if buy_candidate else ('Sell' if sell_candidate else 'Waiting')
-            })
-
-        if buy_candidate and not is_suspended:
-            # Monte Carlo validation for buy signals
-            mc_score = await loop.run_in_executor(None, mc_engine.validate_strategy, df)
-
-            # Reassign mc_threshold as requested (defaulting to 1.0)
-            mc_threshold = config.get('mc_threshold', 1.0)
-
-            # Ensure numeric types for comparison
-            try:
-                mc_score = float(mc_score) if mc_score is not None else 0
-            except (ValueError, TypeError):
-                mc_score = 0
-            try:
-                mc_threshold = float(mc_threshold) if mc_threshold is not None else 1.0
-            except (ValueError, TypeError):
-                mc_threshold = 1.0
-
-            if mc_score >= mc_threshold:
-                # Do not add to queue if expected profit is negative
-                try:
-                    profit = float(profit) if profit is not None else 0
-                except (ValueError, TypeError):
-                    profit = 0
-                if profit <= 0:
-                    logging.debug(f"[{symbol}] Buy signal validated but profit is non-positive ({profit:.4f}). Not adding to queue.")
-                else:
-                    # Add to buy queue instead of immediate execution
-                    async with buy_queue_lock:
-                        # Check if already in queue
-                        if not any(item['symbol'] == symbol for item in buy_queue):
-                            buy_queue.append({
-                                'symbol': symbol,
-                                'data': latest,
-                                'expected_profit': profit,
-                                'strategy': strat,
-                                'candle_count': len(df),
-                                'timestamp': time.time()
-                            })
-                            logging.info(f"[{symbol}] Buy signal validated (MC Score: {mc_score:.2f}). Added to queue (Profit: {profit:.4f}).")
-            else:
-                async with bot_lock:
-                    if symbol in bot_state:
-                        bot_state[symbol].update({
-                            'last_signal': 'Waiting',
-                            'score': 0,
-                            'consecutive_buys': 0,
-                            'consecutive_sells': 0,
-                            'strategy': random.choice(STRATEGIES)
-                        })
-        elif sell_candidate:
-            await execute_sell(exchange, symbol, latest, data_manager, engine, config, strategy=strat, candle_count=len(df))
-
-    except Exception as e:
-        logging.error(f"Analysis error for {symbol}: {e}")
-
 async def execute_buy(exchange, symbol, data, data_manager, engine, config, manual=False, strategy=None, candle_count=0):
     global current_balances
 
-    # Check for pending orders to avoid duplicates
     async with pending_orders_lock:
         for oid, po in pending_orders.items():
             if po['symbol'] == symbol and po['side'] == 'buy':
@@ -1626,14 +980,12 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
             return
 
     try:
-        # Improve purchasing behavior: fetch order book and compute 50% spread
         price = None
         try:
             order_book = await exchange.fetch_order_book(symbol, limit=200)
             if order_book and order_book['bids'] and order_book['asks']:
                 best_bid = order_book['bids'][0][0]
                 best_ask = order_book['asks'][0][0]
-                # 50% of the spread with bids and asks
                 price = (best_bid + best_ask) / 2
                 logging.info(f"[{symbol}] Mid-price calculated: {price} (Bid: {best_bid}, Ask: {best_ask})")
         except Exception as e:
@@ -1646,15 +998,11 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                 raise ValueError("Unable to determine price")
 
         order = None
-
-        # Check Notional Limit
         market = exchange.markets.get(symbol)
-
         quote_curr = symbol.split('/')[1]
         async with bot_lock:
             balance = current_balances
 
-        # Ensure we have a valid balance
         if not balance:
             logging.info(f"[{symbol}] No balance data available. Fetching from exchange...")
             balance = await exchange.fetch_balance()
@@ -1676,7 +1024,6 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
             raise ValueError(f"Cannot convert amount or price to float: amount={amount}, price={price}")
 
         if amount <= 0:
-            # logging.warning(f"[{symbol}] Cannot execute buy: calculated amount is {amount} (balance: {balance}, price: {price})")
             raise Exception(f"Non-positive amount: {amount}")
 
         if amount > 0:
@@ -1699,15 +1046,12 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                     else:
                         raise ValueError(f"Cannot calculate adjusted amount: min_notional={min_notional}, price={price}")
             except (ValueError, TypeError) as e:
-                if "Cannot calculate adjusted amount" not in str(e):
-                    raise ValueError(f"Cost comparison failed: {e}")
-                else:
-                    raise
+                raise
 
             quote_curr = symbol.split('/')[1]
             quote_bal = balance.get(quote_curr)
             if isinstance(quote_bal, dict):
-                free_balance = quote_bal.get('total', 0) or 0 # quick fix
+                free_balance = quote_bal.get('total', 0) or 0
                 try:
                     free_balance = float(free_balance) if free_balance is not None else 0
                 except (ValueError, TypeError):
@@ -1741,46 +1085,26 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
                 raise Exception(f"Order creation failed: no order ID returned")
 
-        if order and order.get('status') == 'closed':
+        # Since we do not use WS watch_orders in manual trader to avoid conflicting state, we process the order fill manually after a short delay or synchronously
+        if order:
+            await asyncio.sleep(1.0)
+            try:
+                verified = await exchange.fetch_order(order['id'], symbol)
+                if verified:
+                    order = verified
+            except Exception as e:
+                logging.debug(f"Failed to fetch order status for manual buy: {e}")
             await process_order_fill(order, exchange, data_manager, config, engine)
     except Exception as e:
         error_str = str(e)
         logging.error(f"Buy failed for {symbol}: {e}")
-        
-        # Handle volume minimum not met error - don't retry until acceptable volume can be met
-        if "volume minimum not met" in error_str.lower():
-            # Calculate the minimum required amount based on exchange limits
-            min_required_amount = 0
-            min_required_cost = 0
-            if market and 'limits' in market:
-                try:
-                    min_amount = float(market.get('limits', {}).get('amount', {}).get('min') or 0)
-                    min_cost = float(market.get('limits', {}).get('cost', {}).get('min') or 0)
-                    current_price = float(price or data.get('close') or 0)
-                    if current_price > 0:
-                        # We need to meet either min_amount OR min_cost
-                        min_required_amount = max(min_amount, min_cost / current_price) if min_cost > 0 else min_amount
-                        min_required_cost = min_required_amount * current_price
-                except (ValueError, TypeError):
-                    min_required_amount = 0
-                    min_required_cost = 0
-            
-            # Suspend the symbol until we have enough balance for minimum volume
-            pair_suspensions[symbol] = {
-                'reason': 'volume_minimum',
-                'min_amount': min_required_amount,
-                'min_cost': min_required_cost
-            }
-            logging.warning(f"[{symbol}] Suspended due to volume minimum not met. Need at least {min_required_amount} amount or {min_required_cost} {quote_curr} cost.")
 
 async def execute_sell(exchange, symbol, data, data_manager, engine, config, force=False, strategy=None, candle_count=0):
-    # Prevent concurrent sells for the same symbol: check pending_sells first
     async with pending_sells_lock:
         if symbol in pending_sells:
             logging.debug(f"[{symbol}] Skipping SELL: another sell is already in-flight for this symbol.")
             return
 
-    # Also check pending_orders for already pending sell orders (older path)
     async with pending_orders_lock:
         for oid, po in pending_orders.items():
             if po['symbol'] == symbol and po['side'] == 'sell':
@@ -1791,7 +1115,6 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
         positions = data_manager.get_position(symbol)
         if not positions: return
 
-    # Use ticker price if possible for more accurate profitability check
     try:
         ticker = await exchange.fetch_ticker(symbol)
         price = float(ticker.get('last') or data['close']) if ticker else float(data['close'])
@@ -1800,10 +1123,9 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
 
     fee_rate = await exchange.fetch_trading_fee(symbol)
 
-    # Fetch actual balance to avoid "insufficient balance" errors due to external trades or fees
-    asset = symbol.split('/')[0]
     balance = await exchange.fetch_balance()
     free_balance = 0
+    asset = symbol.split('/')[0]
     if balance and 'free' in balance:
         free_balance = balance['free'].get(asset, 0)
         try:
@@ -1817,14 +1139,11 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
         except (ValueError, TypeError):
             free_balance = 0
 
-    # Stage 1: Collect profitable lots (or all if forced)
     sell_lot_indices = []
     total_sell_amount = 0
     total_entry_cost = 0
     for i, pos in enumerate(positions):
         is_profitable = engine.is_profitable(price, pos['entry_price'], fee_rate=fee_rate, entry_total_base=pos.get('entry_total_base', 0), amount=pos['amount'])
-
-        # Respect auto_sell_disabled flag for automated sells
         auto_disabled = pos.get('trigger_data', {}).get('auto_sell_disabled', False)
         if (force or is_profitable) and (force or not auto_disabled):
             sell_lot_indices.append(i)
@@ -1834,7 +1153,6 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     if not sell_lot_indices:
         return
 
-    # Stage 2: If under limit, try adding non-profitable lots to reach limit IF entire bundle remains profitable
     market = exchange.markets.get(symbol)
     min_amt = 0
     min_cost = 0
@@ -1857,35 +1175,10 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
         min_cost = 0
         price = 0
 
-    if not force and (total_sell_amount < min_amt or (total_sell_amount * price) < min_cost):
-        other_indices = [i for i in range(len(positions)) if i not in sell_lot_indices]
-        # Sort by performance (closest to break-even first)
-        other_indices.sort(key=lambda idx: float(price) / float(positions[idx]['entry_price']), reverse=True)
-
-        for idx in other_indices:
-            pos = positions[idx]
-            # Skip if auto-sell is disabled for this lot
-            if pos.get('trigger_data', {}).get('auto_sell_disabled', False):
-                continue
-
-            new_amount = total_sell_amount + float(pos['amount'])
-            new_entry_cost = total_entry_cost + float(pos.get('entry_total_base', 0))
-            # estimated net proceeds for the whole bundle
-            new_net_proceeds = new_amount * price * (1 - float(fee_rate))
-
-            if new_net_proceeds > new_entry_cost:
-                sell_lot_indices.append(idx)
-                total_sell_amount = new_amount
-                total_entry_cost = new_entry_cost
-                if total_sell_amount >= min_amt and (total_sell_amount * price) >= min_cost:
-                    break
-
-    # Cap total sell amount to actual free balance
     free_balance = float(free_balance) if free_balance is not None else 0
     if total_sell_amount > free_balance:
         total_sell_amount = free_balance
 
-    # Final check against exchange limits
     if total_sell_amount < min_amt:
         logging.warning(f"[{symbol}] Bundle sell amount {total_sell_amount:.4f} still below minimum {min_amt}. Skipping.")
         return
@@ -1894,8 +1187,6 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
         return
 
     try:
-        # Create the order first (outside the lock) to avoid blocking other symbols/tasks
-        # Mark sell in-flight to avoid consecutive triggers while we create the order
         async with pending_sells_lock:
             pending_sells.add(symbol)
 
@@ -1914,21 +1205,24 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                         'candle_count': candle_count
                     }
         except Exception as exc:
-            # Ensure we clear the in-flight marker on failure to create order
             async with pending_sells_lock:
                 if symbol in pending_sells:
                     pending_sells.discard(symbol)
             raise
 
-        # If order is already closed, process it immediately
-        # We call this outside the lock to avoid re-entrancy issues with process_order_fill
-        if order and order.get('status') == 'closed':
+        if order:
+            await asyncio.sleep(1.0)
+            try:
+                verified = await exchange.fetch_order(order['id'], symbol)
+                if verified:
+                    order = verified
+            except Exception as e:
+                logging.debug(f"Failed to fetch order status for manual sell: {e}")
             await process_order_fill(order, exchange, data_manager, config, engine)
     except Exception as e:
         logging.error(f"Aggregated sell failed for {symbol}: {e}")
         async with bot_lock:
             bot_state[symbol]['position'] = data_manager.get_position(symbol)
-        # Clear any in-flight marker on unexpected failure
         async with pending_sells_lock:
             if symbol in pending_sells:
                 pending_sells.discard(symbol)
@@ -1945,11 +1239,9 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     order_id = str(order.get('id'))
     async with processed_orders_lock:
         if order_id in processed_orders:
-            # Ensure it's removed from pending even if already processed
             async with pending_orders_lock:
                 if order_id in pending_orders:
                     meta = pending_orders.pop(order_id)
-                    # Also clear pending_sells if this was a sell
                     try:
                         if meta and meta.get('side') == 'sell':
                             async with pending_sells_lock:
@@ -1960,8 +1252,6 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
         processed_orders.append(order_id)
 
     meta = None
-    # Short retry loop to wait for metadata if it was placed by the bot but not yet registered
-    # This addresses the race condition where WebSocket update arrives before create_order returns its ID
     for _ in range(5):
         async with pending_orders_lock:
             if order_id in pending_orders:
@@ -1969,7 +1259,6 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
                 break
         await asyncio.sleep(0.1)
 
-    # Use data from order object, or meta if order is missing info
     symbol = order.get('symbol') or (meta['symbol'] if meta else None)
 
     if status != 'closed' and order.get('filled', 0) == 0:
@@ -1983,7 +1272,6 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     if not symbol or not side:
         return False
 
-    # Normalize numeric fields safely
     filled_amount = safe_float(order.get('filled', 0.0) or 0.0)
     actual_price = safe_float(order.get('price') or order.get('average', 0.0) or 0.0)
     cost = safe_float(order.get('cost') or (filled_amount * actual_price) or 0.0)
@@ -2002,7 +1290,6 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     except Exception:
         total_fee = safe_float(fee_cost, 0.0)
 
-    # Fallback: if fee missing or zero, estimate using trading fee rate and filled amount*price
     try:
         if (not total_fee or float(total_fee) == 0.0) and filled_amount > 0 and actual_price > 0:
             try:
@@ -2028,38 +1315,7 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     candle_count = meta.get('candle_count', 0) if meta else 0
 
     if side == 'buy':
-        # Wait at least 2 minutes before trying to fetch order to ensure it's propagated on the exchange
-        order_age = time.time() - timestamp
-        if order_age < 120:  # 120 seconds = 2 minutes
-            remaining_wait = 120 - order_age
-            logging.info(f"[{symbol}] Order {order_id} is {order_age:.0f}s old, waiting {remaining_wait:.0f}s more before fetching...")
-            await asyncio.sleep(remaining_wait)
-        
-        # Verify amount on exchange to account for fees deducted from the acquired asset
-        try:
-            verified_order = await exchange.fetch_order(order_id, symbol)
-        except Exception as e:
-            logging.warning(f"[{symbol}] Failed to fetch order {order_id} after 2 minute wait: {e}. Proceeding without verification.")
-            verified_order = None
-        
-        if verified_order and verified_order.get('status') == 'closed':
-            filled_amount = float(verified_order.get('filled', filled_amount) or 0)
-            actual_price = float(verified_order.get('price') or verified_order.get('average', actual_price) or 0)
-            cost = float(verified_order.get('cost') or (filled_amount * actual_price) or 0)
-            fee_data = verified_order.get('fee')
-            if fee_data:
-                fee_cost = float(fee_data.get('cost', 0.0) or 0)
-                fee_currency = fee_data.get('currency')
-
-                # If fee was deducted from the acquired asset (base currency), update filled_amount
-                base_asset = symbol.split('/')[0]
-                if fee_currency == base_asset:
-                    filled_amount -= fee_cost
-
-                total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
-
         total_val = cost + total_fee
-        # Ensure trigger_data includes strategy and candle_count for persistence
         final_strategy = meta.get('strategy', 'Unknown') if meta else 'Unknown'
         final_candle_count = meta.get('candle_count', 0) if meta else 0
 
@@ -2082,7 +1338,6 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
             positions = data_manager.get_position(symbol)
             if positions:
                 if not sell_lot_indices:
-                    # If external sell or missing indices, close from the oldest lots
                     sell_lot_indices = list(range(len(positions)))
                 
                 sell_lot_indices.sort(reverse=True)
@@ -2132,7 +1387,6 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
                 logging.info(f"[{symbol}] {lot_prefix} at {format_price(actual_price, config=config)} (Filled: {format_amt(filled_amount, config=config)}, Profit: {format_price(actual_total_profit, config=config)}, Received: {format_price(total_net_received, config=config)} {quote}, Technique: {final_strategy}, Candles: {final_candle_count})")
                 play_sound("sell", config)
 
-        # Fetch fresh balance to ensure dust check and future buys are accurate
         try:
             fresh_balance = await exchange.fetch_balance()
             if fresh_balance:
@@ -2142,87 +1396,15 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
         except Exception as e:
             logging.warning(f"Failed to update balance after sell for {symbol}: {e}")
 
-        # Post-sale dust cleanup
         if await is_pair_dust(symbol, exchange, config):
             data_manager.clear_positions(symbol)
             logging.info(f"[{symbol}] Remaining balance is dust. Clearing open positions.")
-
-        # Trigger re-analysis for budget-suspended pairs to resume them quickly
-        asyncio.create_task(resume_suspended_pairs(exchange, config, data_manager, engine))
 
     async with bot_lock:
         if symbol not in bot_state: bot_state[symbol] = {}
         bot_state[symbol]['position'] = data_manager.get_position(symbol)
     
     return True
-
-async def resume_suspended_pairs(exchange, config, data_manager, engine):
-    """
-    Attempts to resume trading for pairs that were suspended due to budget constraints.
-    """
-    suspended_symbols = [s for s, susp in pair_suspensions.items() if susp.get('reason') == 'budget']
-    if not suspended_symbols:
-        return
-
-    # Give the exchange a moment to settle
-    await asyncio.sleep(0.5)
-
-    for symbol in suspended_symbols:
-        # Triggering a re-analysis will automatically check the budget again in analyze_and_trade
-        async with analysis_lock:
-            if symbol not in analysis_in_progress:
-                analysis_in_progress.add(symbol)
-                # Note: This might use None for pattern_manager, device, executor if not globally available,
-                # but analyze_and_trade handles it. We'll use the ones from main() if possible or let the next update handle it.
-                # Actually, it's safer to just let the next candle update do it, or we need to pass these refs.
-                # Let's try to find a way to trigger analyze_and_trade with current globals.
-                pass
-
-async def watch_balance_task(exchange, data_manager):
-    global current_balances
-    logging.info("WebSocket: watch_balance task started.")
-    while not shutdown_event.is_set():
-        try:
-            async for balance in exchange.watch_balance():
-                async with bot_lock:
-                    current_balances = balance
-                logging.debug("Balance updated via WebSocket")
-        except Exception as e:
-            if not shutdown_event.is_set():
-                err_msg = str(e).lower()
-                logging.error(f"WebSocket balance error: {e}")
-                if "ping-pong" in err_msg or "timeout" in err_msg:
-                    try: await exchange.close()
-                    except: pass
-                await asyncio.sleep(5)
-            else: break
-
-async def watch_orders_task(exchange, data_manager, config, engine):
-    logging.info("WebSocket: watch_orders task started.")
-    while not shutdown_event.is_set():
-        try:
-            async for orders in exchange.watch_orders():
-                for order in orders:
-                    try:
-                        await process_order_fill(order, exchange, data_manager, config, engine)
-                    except TypeError as te:
-                        logging.error(f"TypeError processing WS order: {te}. Attempting to sanitize order and retry. Order: {order}")
-                        try:
-                            sanitize_order_dict(order)
-                            await process_order_fill(order, exchange, data_manager, config, engine)
-                        except Exception as e2:
-                            logging.exception(f"Failed to process order after sanitization: {e2}. Order: {order}")
-                    except Exception as e:
-                        logging.exception(f"Unexpected error processing WS order: {e}. Order: {order}")
-        except Exception as e:
-            if not shutdown_event.is_set():
-                err_msg = str(e).lower()
-                logging.error(f"WebSocket orders error: {e}")
-                if "ping-pong" in err_msg or "timeout" in err_msg:
-                    try: await exchange.close()
-                    except: pass
-                await asyncio.sleep(5)
-            else: break
 
 async def is_pair_dust(symbol, exchange, config):
     """
@@ -2247,7 +1429,7 @@ async def is_pair_dust(symbol, exchange, config):
 
     market = exchange.markets.get(symbol)
     if not market: 
-        return amount < 1e-6 # Fallback for unknown markets
+        return amount < 1e-6
 
     limits = market.get('limits', {})
     min_amt = limits.get('amount', {}).get('min') or config.get('exchange', {}).get('min_amount_fallback', 1e-8)
@@ -2256,7 +1438,6 @@ async def is_pair_dust(symbol, exchange, config):
     if amount < min_amt: return True
     if price > 0 and (amount * price) < min_cost: return True
     
-    # Very small absolute amount check
     if amount < config.get('exchange', {}).get('dust_threshold_cost', 1e-10): return True
 
     return False
@@ -2462,7 +1643,7 @@ def make_dashboard(config):
         help_text.append("  X      : Toggle Expert Mode\n")
         help_text.append("  M      : Toggle Marquee Effect\n")
         help_text.append("  H      : Close this help menu\n")
-        help_text.append("  Ctrl+C : Stop the bot gracefully\n")
+        help_text.append("  Ctrl+C : Stop manual interface gracefully\n")
         pairs_panel = Panel(help_text, title="[bold]Help / Info[/]", border_style="bold yellow")
 
     if show_chart and chart_symbol:
@@ -2477,7 +1658,7 @@ def make_dashboard(config):
 
     layout = Layout()
     layout.split(
-        Layout(Panel(Text("🛸 CCXT Pro Trading Bot v2 (Async)", style="bold magenta", justify="center"), border_style="blue"), size=3),
+        Layout(Panel(Text("🛸 CCXT Pro Manual Trader (Async)", style="bold magenta", justify="center"), border_style="blue"), size=3),
         Layout(log_panel, size=log_height+2),
         Layout(pairs_panel, name="main"),
         Layout(Panel(status_display, title="Status", border_style="cyan"), size=3)
@@ -2487,16 +1668,10 @@ def make_dashboard(config):
 async def run_dashboard(config):
     try:
         refresh_rate = config.get('ui', {}).get('refresh_rate', 4)
-        # Start Live immediately but without screen=True to allow startup logs to be visible
-        # or use a simplified layout during startup.
         with Live(make_dashboard(config), refresh_per_second=refresh_rate, screen=False) as live:
             while not startup_complete and not shutdown_event.is_set():
                 live.update(make_dashboard(config))
                 await asyncio.sleep(0.5)
-
-            # Switch to screen mode once startup is complete
-            # We have to close the old live and start a new one to change screen=True
-            pass
 
         if shutdown_event.is_set(): return
 
@@ -2509,99 +1684,11 @@ async def run_dashboard(config):
     except Exception as e:
         logging.info(f"[red]Dashboard error: {e}")
 
-async def buy_queue_processor_task(exchange, data_manager, engine, config):
-    """
-    Processes the buy queue every 'turn' (linked to analysis_cooldown).
-    Picks the pair with the highest expected profit.
-    """
-    while not shutdown_event.is_set():
-        cooldown = config.get('timeouts', {}).get('analysis_cooldown', 12)
-        await asyncio.sleep(cooldown)
-
-        async with buy_queue_lock:
-            if not buy_queue:
-                continue
-
-            # Sort by expected profit descending
-            buy_queue.sort(key=lambda x: x['expected_profit'], reverse=True)
-
-            # Process all items in queue, starting with highest profit
-            items_to_keep = []
-            for item in buy_queue:
-                best_buy = item
-                logging.info(f"[Queue] Processing {best_buy['symbol']} (Profit: {best_buy['expected_profit']:.4f}).")
-
-                try:
-                    # Execute buy and wait for it to complete
-                    await execute_buy(
-                        exchange, best_buy['symbol'], best_buy['data'],
-                        data_manager, engine, config,
-                        strategy=best_buy['strategy'],
-                        candle_count=best_buy['candle_count']
-                    )
-                    # Only keep in queue if execution failed (it will raise exception)
-                    # If successful, don't re-queue
-                except Exception as e:
-                    logging.error(f"[Queue] Buy failed for {best_buy['symbol']}: {e}. Keeping in queue for retry.")
-                    items_to_keep.append(best_buy)
-
-            # Update queue with only items that failed (for retry)
-            buy_queue[:] = items_to_keep
-
-async def heartbeat_task(exchange, data_manager, engine, config):
-    while not shutdown_event.is_set():
-        # Cleanup stuck pending orders
-        stuck_timeout = config.get('timeouts', {}).get('stuck_order_cleanup', 300)
-        limit_order_timeout = 300 # 5 minutes as requested
-
-        async with pending_orders_lock:
-            now = time.time()
-            stuck_candidates = []
-            for oid, meta in pending_orders.items():
-                timeout = limit_order_timeout if meta.get('is_limit') else stuck_timeout
-                if now - meta.get('timestamp', 0) > timeout:
-                    stuck_candidates.append((oid, meta))
-
-        for oid, meta in stuck_candidates:
-            symbol = meta.get('symbol')
-            try:
-                # Double check status with the exchange before giving up
-                logging.info(f"[{symbol}] Checking status of potentially stuck order {oid}...")
-                verified_order = await exchange.fetch_order(oid, symbol)
-                if verified_order:
-                    if verified_order.get('status') == 'open' and meta.get('is_limit'):
-                        logging.info(f"[{symbol}] Cancelling unfilled limit order {oid} after timeout.")
-                        await exchange.cancel_order(oid, symbol)
-                        async with pending_orders_lock:
-                            if oid in pending_orders: pending_orders.pop(oid)
-                        continue
-
-                    is_processed = await process_order_fill(verified_order, exchange, data_manager, config, engine)
-                    if is_processed:
-                        logging.info(f"[{symbol}] Stuck order {oid} was found to be {verified_order.get('status')} and has been processed.")
-                        continue
-                    elif verified_order.get('status') in ['canceled', 'expired', 'rejected']:
-                        # process_order_fill already removed it if it saw the terminal status
-                        continue
-
-                # If still open or not found, remove it manually to unblock the pair
-                async with pending_orders_lock:
-                    if oid in pending_orders:
-                        pending_orders.pop(oid)
-                logging.warning(f"[{symbol}] Removing stuck pending {meta.get('side')} order {oid} after timeout (Order status on exchange: {verified_order.get('status') if verified_order else 'unknown'}).")
-            except Exception as e:
-                logging.error(f"[{symbol}] Error during stuck order cleanup for {oid}: {e}")
-                async with pending_orders_lock:
-                    if oid in pending_orders:
-                        pending_orders.pop(oid)
-
-        await asyncio.sleep(config.get('timeouts', {}).get('heartbeat_interval', 30))
-
 async def main():
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(global_exception_handler)
 
-    parser = argparse.ArgumentParser(description='CCXT Pro Trading Bot v2 (Asynchronous)')
+    parser = argparse.ArgumentParser(description='CCXT Pro Manual Trader (Asynchronous)')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration (force CPU)')
     parser.add_argument('--fast-start', action='store_true', help='Skip fetching initial candles')
 
@@ -2669,99 +1756,27 @@ async def main():
     if 'pairs' not in config:
         config['pairs'] = {}
 
-    # Discover and select pairs based on balances and 24h volume
-    logging.info("Retrieving best pairs based on balances and 24h volume...")
+    logging.info("Retrieving best pairs based on balances and 24h volume using computeSymbols...")
     global discovery_pool, active_pairs, default_candle_timeframe
     try:
-        # 1. Build discovery pool from available balances
-        discovery_pool = await build_discovery_pool_from_balances(exchange, config)
+        # Retrieve balance and compute symbols using botv4-style computeSymbols
+        balance = await exchange.fetch_balance()
+        async with bot_lock:
+            global current_balances
+            current_balances = balance
+
+        # availablePairs = computeSymbols(balance, None)
+        available_pairs_data = computeSymbols(balance, None)
+        discovery_pool = [item[0] for item in available_pairs_data]
         
-        # 2. If discovery pool is empty, fallback to config pairs
-        if not discovery_pool:
-            discovery_pool = list(config.get('pairs', {}).keys())
-        
-        # 3. Fetch trade counts for the last hour for discovery pool symbols
-        # This populates pair_hour_trades before trading starts
-        logging.info("Fetching initial trade counts for the last hour... PLEASE WAIT... It can be taking up to three minutes...")
         num_pairs = int(config.get('max_number_of_pairs', 40))
-        
-        # Fetch trades for discovery pool symbols
-        for symbol in discovery_pool:
-            try:
-                trades = await exchange.fetch_trades(symbol, limit=10)
-                now = time.time()
-                if symbol not in pair_hour_trades:
-                    pair_hour_trades[symbol] = deque()
-                pair_hour_trades[symbol].clear()
-                one_hour_ago = now - 3600
-                for trade_data in trades:
-                    trade_time = trade_data['timestamp'] / 1000
-                    if trade_time >= one_hour_ago:
-                        pair_hour_trades[symbol].append(trade_time)
-                    else:
-                        break
-                if trades:
-                    pair_last_trade_time[symbol] = trades[-1]['timestamp'] / 1000
-            except Exception as e:
-                logging.debug(f"Failed to fetch initial trades for {symbol}: {e}")
-                continue
-        
-        # 4. Initialize active pairs from discovery pool (only buyable pairs)
-        num_pairs = int(config.get('max_number_of_pairs', 40))
+        active_pairs = discovery_pool[:num_pairs]
 
-        # Determine buyable quotes (non-dust free balances)
-        try:
-            bal = await exchange.fetch_balance()
-            free_bal = bal.get('free', {}) if isinstance(bal, dict) and 'free' in bal else (bal if isinstance(bal, dict) else {})
-            currencies_with_balance = []
-            for c, v in free_bal.items():
-                try:
-                    amt = 0
-                    if isinstance(v, dict):
-                        amt = float(v.get('free') or v.get('total') or 0)
-                    else:
-                        amt = float(v or 0)
-                    if amt > float(config.get('exchange', {}).get('dust_threshold_amount', 1e-6)):
-                        currencies_with_balance.append(c)
-                except Exception:
-                    continue
-        except Exception:
-            currencies_with_balance = []
-
-        buyable_quotes = set(currencies_with_balance)
-
-        active_pairs = []
-
-        # First, for each currency with balance, prefer pairs from discovery_pool where quote == currency
-        for curr in currencies_with_balance:
-            if len(active_pairs) >= num_pairs:
-                break
-            for sym in discovery_pool:
-                if '/' not in sym: continue
-                if sym not in exchange.markets: continue
-                base, quote = sym.split('/')
-                if quote == curr and sym not in active_pairs:
-                    active_pairs.append(sym)
-                    break
-
-        # Then fill remaining slots with discovery_pool symbols whose quote is buyable
-        for sym in discovery_pool:
-            if len(active_pairs) >= num_pairs:
-                break
-            if '/' not in sym: continue
-            if sym not in exchange.markets: continue
-            base, quote = sym.split('/')
-            if buyable_quotes and quote not in buyable_quotes:
-                continue
-            if sym not in active_pairs:
-                active_pairs.append(sym)
-
-        logging.info(f"Initialized discovery pool with {len(discovery_pool)} pairs.")
+        logging.info(f"Initialized discovery pool with {len(discovery_pool)} pairs using computeSymbols.")
         logging.info(f"Initial active set: {len(active_pairs)} pairs.")
 
     except Exception as e:
-        logging.error(f"Failed to initialize pairs: {e}")
-        # Fallback to config pairs
+        logging.error(f"Failed to initialize pairs using computeSymbols: {e}")
         active_pairs = list(config.get('pairs', {}).keys())
         discovery_pool = active_pairs[:40]
 
@@ -2771,7 +1786,7 @@ async def main():
         return
 
     # Start UI task
-    global ui_task, background_tasks, startup_complete, ohlcv_task, trades_task
+    global ui_task, background_tasks, startup_complete, ohlcv_tasks
     ui_task = asyncio.create_task(run_dashboard(config))
 
     logging.info("[bold cyan]System initialization started...")
@@ -2824,59 +1839,8 @@ async def main():
 
                 except Exception as e:
                     logging.warning(f"Failed to load candles for {symbol}: {e}")
-                    # Try to find an alternative symbol format that works
-                    alt_symbol = None
-                    if hasattr(exchange, 'markets') and exchange.markets:
-                        # Try to find the symbol in available markets
-                        if symbol in exchange.markets:
-                            alt_symbol = symbol
-                        else:
-                            # Try common variations
-                            parts = symbol.split('/') if '/' in symbol else []
-                            if len(parts) == 2:
-                                base, quote = parts
-                                variations = [
-                                    f"{base}/{quote}",  # original format
-                                    f"{quote}/{base}",  # reversed
-                                ]
-                                # Try Kraken-specific variations
-                                if base == "BTC": variations.append(f"XBT/{quote}")
-                                if base == "XBT": variations.append(f"BTC/{quote}")
-                                # Try to find any market that contains the same assets
-                                for market_symbol, market_info in exchange.markets.items():
-                                    market_parts = market_symbol.split('/') if '/' in market_symbol else []
-                                    if len(market_parts) == 2:
-                                        market_base, market_quote = market_parts
-                                        if (base == market_base and quote == market_quote) or \
-                                           (base == market_quote and quote == market_base):
-                                            variations.append(market_symbol)
-                                
-                                for var in variations:
-                                    if var in exchange.markets and var != symbol:
-                                        alt_symbol = var
-                                        break
-                    
-                    if alt_symbol and alt_symbol != symbol:
-                        try:
-                            logging.info(f"Trying alternative symbol {alt_symbol} for {symbol}...")
-                            ohlcv_res, actual_tf = await exchange.fetch_ohlcv_10k(alt_symbol, '1s', limit=10000)
-                            df_1s = pd.DataFrame(ohlcv_res, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                            df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
-                            for col in ['open', 'high', 'low', 'close', 'volume']:
-                                df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
-                            df_1s.set_index('timestamp', inplace=True)
-                            ohlcv_cache[symbol] = df_1s
-                            symbol_timeframes[symbol] = actual_tf
-                            logging.info(f"[{symbol}] Loaded {len(df_1s)} candles ({actual_tf}) using {alt_symbol}.")
-                        except Exception as e2:
-                            logging.debug(f"Alternative symbol {alt_symbol} also failed for {symbol}: {e2}")
-                            # Fallback empty dataframes to avoid crashes
-                            empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-                            ohlcv_cache[symbol] = empty_df
-                    else:
-                        # Fallback empty dataframes to avoid crashes
-                        empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-                        ohlcv_cache[symbol] = empty_df
+                    empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                    ohlcv_cache[symbol] = empty_df
 
         await asyncio.gather(*[init_symbol(s) for s in active_pairs])
 
@@ -2884,14 +1848,11 @@ async def main():
     for symbol in active_pairs:
         symbol_timeframes.setdefault(symbol, default_candle_timeframe)
 
-    # Keep pairs even with empty candle data for price watching and trading
     async with ohlcv_lock:
         for s in active_pairs:
             if s not in ohlcv_cache:
-                # Ensure all active pairs have at least an empty dataframe
                 empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
                 ohlcv_cache[s] = empty_df
-                logging.warning(f"[{s}] No candle data available. Will use empty cache for price watching.")
 
     # Analysis Executor
     max_workers = max(1, (os.cpu_count() or 4) - 2)
@@ -2900,31 +1861,23 @@ async def main():
         initializer=worker_process_init
     )
 
-    # Start WebSocket Tasks
-    logging.info("[bold green]Starting WebSocket tasks...")
+    # Start minimal essential manual background tasks
+    logging.info("[bold green]Starting background tasks...")
     background_tasks = [
-        asyncio.create_task(watch_balance_task(exchange, data_manager)),
-        asyncio.create_task(watch_orders_task(exchange, data_manager, config, engine)),
         asyncio.create_task(input_task(exchange, config, data_manager, engine)),
-        asyncio.create_task(heartbeat_task(exchange, data_manager, engine, config)),
-        asyncio.create_task(buy_queue_processor_task(exchange, data_manager, engine, config)),
         asyncio.create_task(chart_renderer_task(config))
     ]
 
-    # Start Global OHLCV Watcher
-    ohlcv_task = asyncio.create_task(watch_ohlcv_global_task(exchange, active_pairs, config, data_manager, pattern_manager, engine, device, executor))
-    
-    # Start Trades Count Fetcher (fetch instead of watch)
-    trades_task = asyncio.create_task(fetch_trades_count_task(exchange, config))
-    
-    # Start Discovery Pool Refresher
-    background_tasks.append(asyncio.create_task(refresh_discovery_pool_task(exchange, config)))
+    # Start single market watchers - ONE watcher task per active pair to update candles as requested
+    logging.info("[bold green]Spawning one OHLCV watcher per market...")
+    for symbol in active_pairs:
+        tf = symbol_timeframes.get(symbol, default_candle_timeframe)
+        watcher = asyncio.create_task(watch_ohlcv_single_market(exchange, symbol, tf, config, device, executor))
+        ohlcv_tasks.append(watcher)
 
-    # Ensure all watchers are setup (Wait a bit for connections to stabilize)
     await asyncio.sleep(2)
 
-
-    # Synchronizing positions from the exchange API
+    # Synchronizing positions
     logging.info(f"Synchronizing positions from the {exchange_id.capitalize()} API...")
     try:
         await asyncio.wait_for(sync_live_positions(exchange, data_manager, config), timeout=120)
@@ -2933,22 +1886,10 @@ async def main():
     except Exception as e:
         logging.error(f"Error during balance synchronization: {e}")
 
-    # Initial analysis for all pairs (Skipped as requested)
-    # for symbol in active_pairs:
-    #     async with analysis_lock:
-    #         if symbol not in analysis_in_progress:
-    #             analysis_in_progress.add(symbol)
-    #             asyncio.create_task(analyze_and_trade_wrapper(exchange, symbol, config, data_manager, pattern_manager, engine, device, executor))
-
-    # Wait a tad bit before dropping the message startup complete since the previous task can be taking the lead sometime
     await asyncio.sleep(config.get('timeouts', {}).get('startup_wait', 4))
     startup_complete = True
     play_sound("startup", config)
-    logging.info("[bold green]Bot v2 fully operational.")
-
-    # Trigger initial chart and display update
-    # In rich Live, the dashboard is already refreshing at 4Hz.
-    # We just need to make sure the data is there.
+    logging.info("[bold green]Manual trader fully operational.")
 
     # Signal handling for graceful shutdown
     loop = asyncio.get_running_loop()
@@ -2971,19 +1912,14 @@ async def main():
         shutdown_event.set()
         logging.info("Shutting down... cancelling tasks.")
 
-        # Consolidate all tasks for cleanup
-        all_tasks = background_tasks.copy()
+        all_tasks = background_tasks.copy() + ohlcv_tasks.copy()
         if ui_task:
             all_tasks.append(ui_task)
-        if ohlcv_task:
-            all_tasks.append(ohlcv_task)
 
-        # Cancel all pending tasks
         for t in all_tasks:
             if not t.done():
                 t.cancel()
 
-        # Wait for all tasks to acknowledge cancellation with a timeout
         if all_tasks:
             try:
                 await asyncio.wait_for(asyncio.gather(*all_tasks, return_exceptions=True), timeout=5)
@@ -2993,16 +1929,13 @@ async def main():
                 logging.error(f"Error during shutdown cleanup: {e}")
 
         if executor: executor.shutdown(wait=False)
-        global bench_executor
-        if bench_executor: bench_executor.shutdown(wait=False)
 
         try:
             await exchange.close()
         except: pass
 
-        # Clear screen and show final logs
         console.clear()
-        console.print("[bold red]Bot v2 shutdown sequence complete.[/]")
+        console.print("[bold red]Manual trader shutdown sequence complete.[/]")
         console.print("[bold white]Final Log Summary:[/]")
         for log in all_logs[-20:]:
             console.print(f"[{log['timestamp']}] {log['msg']}")
@@ -3013,9 +1946,4 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass
     except Exception as e:
-        # Final emergency log
-        with open("fatal_error.log", "a") as f:
-            f.write(f"{datetime.now()} - FATAL ERROR: {str(e)}\n")
-            import traceback
-            f.write(traceback.format_exc())
         console.print_exception()
