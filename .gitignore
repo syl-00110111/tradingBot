@@ -18,3 +18,4 @@ pending_orders_dump.json
 volumes_trades_data.json
 my_trades_cache.json
 *.bak
+.vs/
