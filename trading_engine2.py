@@ -22,8 +22,8 @@ class TradingEngine:
     """
     def __init__(self, config):
         self.config = config
-        self.risk_multiplier = float(config.get('global_risk_multiplier'))
-        self.min_profit_margin = float(config.get('min_profit_margin'))
+        self.risk_multiplier = float(config.get('global_risk_multiplier', 1.0))
+        self.min_profit_margin = float(config.get('min_profit_margin', 0.01))
 
     def get_dynamic_settings(self, adx, volatility, aggr='normal'):
         """
@@ -152,20 +152,88 @@ class TradingEngine:
         Calcule la quantité d'un actif à acheter en fonction du solde du portefeuille et du risque.
         Applique un multiplicateur pour les paires dynamiques (1s).
         """
-        base_balance = 0
+        # Helper function to safely convert to float
+        def to_float(value):
+            if value is None:
+                return 0.0
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return 0.0
+        
+        # Ensure current_price is a float
+        current_price = to_float(current_price)
+        # Normalize currency key checks to be case-insensitive
+        def find_key(d, key):
+            if not isinstance(d, dict):
+                return None
+            if key in d:
+                return key
+            up = key.upper()
+            low = key.lower()
+            if up in d:
+                return up
+            if low in d:
+                return low
+            return None
+        
+        base_balance = 0.0
         if balance and isinstance(balance, dict):
-            if 'free' in balance:
+            # Try multiple ways to get the balance, in order of preference
+            
+            # 1. Kraken format: balance[currency] = {free, used, total}
+            bkey = find_key(balance, base_currency)
+            if bkey:
+                currency_data = balance[bkey]
+                if isinstance(currency_data, dict):
+                    base_balance = to_float(currency_data.get('total')) or to_float(currency_data.get('free')) or 0.0
+                else:
+                    base_balance = to_float(currency_data)
+            
+            # 2. If not found, try balance['total'][currency]
+            if base_balance == 0 and 'total' in balance and balance['total'] is not None:
+                total_data = balance['total']
+                if isinstance(total_data, dict):
+                    tkey = find_key(total_data, base_currency)
+                    raw_balance = total_data.get(tkey) if tkey else None
+                    base_balance = to_float(raw_balance)
+                else:
+                    base_balance = to_float(total_data)
+            
+            # 3. If still 0, try balance['free'][currency]
+            if base_balance == 0 and 'free' in balance and balance['free'] is not None:
                 free_data = balance['free']
-                base_balance = free_data.get(base_currency, 0) if isinstance(free_data, dict) else 0
-            else:
-                base_balance = balance.get(base_currency, 0)
+                if isinstance(free_data, dict):
+                    fkey = find_key(free_data, base_currency)
+                    raw_balance = free_data.get(fkey) if fkey else None
+                    base_balance = to_float(raw_balance)
+                else:
+                    base_balance = to_float(free_data)
+            
+            # 4. Direct fallback
+            if base_balance == 0:
+                # Last resort: try keys with different casing
+                try_val = None
+                direct_key = find_key(balance, base_currency)
+                if direct_key:
+                    try_val = balance.get(direct_key)
+                else:
+                    try_val = balance.get(base_currency)
+                base_balance = to_float(try_val)
+
+        # Ensure max_lots is a float
+        max_lots = to_float(max_lots) if max_lots is not None else 1.0
+        if max_lots <= 0:
+            max_lots = 1.0
 
         # 1. Déterminer le plafond strict pour cet actif de base
         cfg_val = self.config.get('max_trade_percentage')
-        if isinstance(cfg_val, dict):
-             max_pct = float(cfg_val.get(base_currency, cfg_val.get('default')))
+        if cfg_val is None:
+            max_pct = 10.0  # Default 10% if not configured
+        elif isinstance(cfg_val, dict):
+            max_pct = to_float(cfg_val.get(base_currency, cfg_val.get('default', 10.0)))
         else:
-             max_pct = float(cfg_val)
+            max_pct = to_float(cfg_val)
 
         ceiling_pct = max_pct / 100.0 if max_pct >= 1.0 else max_pct
 
@@ -174,7 +242,8 @@ class TradingEngine:
 
         # 2. Calculer le montant de base initial en partant d'en bas
         # Nous commençons avec une base configurable (défaut 75%) du plafond autorisé par lot
-        base_target_multiplier = self.config.get('trading', {}).get('base_target_pct', 0.75)
+        trading_config = self.config.get('trading', {})
+        base_target_multiplier = to_float(trading_config.get('base_target_pct', 0.75)) if trading_config else 0.75
         base_target_pct = (ceiling_pct * base_target_multiplier) / max_lots
         trade_amount_base = base_balance * base_target_pct
 
@@ -182,21 +251,21 @@ class TradingEngine:
         trade_amount_base *= self.risk_multiplier
 
         # Multiplicateur pour les paires dynamiques (1s) - Toujours actif car 1s est le seul TF désormais
-        dynamic_multiplier = float(self.config.get('dynamic_pair_multiplier'))
+        dynamic_multiplier = to_float(self.config.get('dynamic_pair_multiplier', 1.0))
         trade_amount_base *= dynamic_multiplier
 
         # 4. Appliquer le bonus de série de victoires
         ws_config = self.config.get('win_streak_bonus', {})
-        if ws_config.get('enabled') and win_streak >= ws_config.get('threshold'):
-             multiplier = ws_config.get('multiplier')
-             trade_amount_base *= multiplier
-             # logging.info(f"Série de victoires détectée ({win_streak}), application d'un multiplicateur {multiplier}x.")
+        if ws_config and ws_config.get('enabled') and win_streak >= to_float(ws_config.get('threshold', 2)):
+            multiplier = to_float(ws_config.get('multiplier', 1.2))
+            trade_amount_base *= multiplier
 
         # 5. Appliquer le plafond strict
         if trade_amount_base > max_allowed_base:
-             trade_amount_base = max_allowed_base
-             # logging.info(f"Montant de la transaction plafonné au plafond strict : {max_pct}% du solde {base_currency}.")
+            trade_amount_base = max_allowed_base
 
-        if trade_amount_base > base_balance: trade_amount_base = base_balance
-        if current_price > 0: return trade_amount_base / current_price
+        if trade_amount_base > base_balance: 
+            trade_amount_base = base_balance
+        if current_price > 0: 
+            return trade_amount_base / current_price
         return 0

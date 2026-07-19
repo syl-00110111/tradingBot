@@ -54,6 +54,7 @@ trades_task = None
 active_pairs = []
 discovery_pool = []
 pair_last_trade_time = {}
+pair_hour_trades = {} # symbol -> deque of timestamps
 
 # Global Buy Queue for turn-based processing
 buy_queue = []
@@ -64,6 +65,9 @@ pending_orders = {} # order_id -> metadata_dict
 pending_orders_lock = asyncio.Lock()
 processed_orders = None # Initialized in main after config load
 processed_orders_lock = asyncio.Lock()
+# Prevent consecutive sells on the same symbol until confirmation
+pending_sells = set()
+pending_sells_lock = asyncio.Lock()
 
 # Global controls for dashboard
 pairs_scroll_offset = 0
@@ -76,6 +80,8 @@ plotext_lock = threading.Lock()
 logs_scroll_offset = 0
 focused_panel = "pairs"
 ohlcv_cache = {}
+symbol_timeframes = {}
+default_candle_timeframe = '1s'
 all_logs = []
 status_scroll_index = 0
 expert_mode = False
@@ -139,7 +145,7 @@ def sound_worker():
                 import winsound
                 if action == "startup":
                     cfg = audio_cfg.get('startup', {})
-                    for _ in range(cfg.get('beeps', 5)):
+                    for _ in range(max(random.randint(int(cfg.get('beeps', 5)), int(cfg.get('beeps', 5))*2))):
                         winsound.Beep(random.randint(cfg.get('min_freq', 440), cfg.get('max_freq', 880)), cfg.get('duration', 100))
                 elif action == "buy":
                     cfg = audio_cfg.get('buy', {})
@@ -285,6 +291,59 @@ def precision_to_int(p):
             return max(0, int(-math.log10(p)))
     return 8
 
+
+def safe_float(v, default=0.0):
+    """Convert value to float safely, tolerate strings with commas or None."""
+    if v is None:
+        return float(default)
+    if isinstance(v, (int, float)):
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+
+def sanitize_order_dict(order):
+    """Attempt to coerce common order fields to expected types in-place."""
+    if not isinstance(order, dict):
+        return order
+    # numeric fields
+    for k in ('filled', 'price', 'average', 'cost'):
+        if k in order:
+            try:
+                order[k] = safe_float(order[k], 0.0)
+            except Exception:
+                order[k] = 0.0
+    # timestamp
+    if 'timestamp' in order:
+        try:
+            order['timestamp'] = safe_float(order['timestamp'], time.time())
+        except Exception:
+            order['timestamp'] = time.time()
+    # fee
+    try:
+        fee = order.get('fee')
+        if fee and isinstance(fee, dict):
+            fee['cost'] = safe_float(fee.get('cost', 0.0), 0.0)
+            order['fee'] = fee
+    except Exception:
+        pass
+    return order
+    if isinstance(v, str):
+        try:
+            return float(v.replace(',', ''))
+        except Exception:
+            try:
+                # Strip non-numeric characters
+                filtered = ''.join(ch for ch in v if (ch.isdigit() or ch in '.-eE'))
+                return float(filtered) if filtered not in ('', '.', '-', '-.') else float(default)
+            except Exception:
+                return float(default)
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
 def format_price(price, precision=None, config=None):
     if price is None: return "-"
     if not isinstance(price, (int, float)): return str(price)
@@ -326,9 +385,12 @@ def format_amt(amt, precision=None, config=None):
     return formatted if formatted != "" else "0"
 
 def render_ascii_chart_sync(symbol, df, config, width, height):
-    global local_timezone
     with plotext_lock:
         try:
+            # Check if dataframe has data
+            if df.empty or len(df) == 0:
+                return Text("No chart data available", style="yellow")
+            
             plt_ascii.clear_figure()
             plt_ascii.clf()
             plt_ascii.theme('dark')
@@ -337,39 +399,51 @@ def render_ascii_chart_sync(symbol, df, config, width, height):
             plt_ascii.subplot(1, 1)
             plt_ascii.clf()
             plt_ascii.theme('dark')
-            plt_ascii.title(f"K-Lines: {symbol} (1s)")
 
-            if df.index.tz is None:
-                utc_times = df.index.tz_localize(timezone.utc)
-            else:
-                utc_times = df.index.tz_convert(timezone.utc)
-
-            labels = [t.astimezone(local_timezone).strftime("%H:%M:%S") for t in utc_times]
-
-            indices = list(range(len(df)))
-            df_plot = df[['open', 'high', 'low', 'close']].copy()
-            df_plot.columns = ['Open', 'High', 'Low', 'Close']
-            df_plot.reset_index(drop=True, inplace=True)
-
-            plt_ascii.candlestick(indices, df_plot)
-            tick_indices = np.linspace(0, len(df) - 1, min(10, len(df)), dtype=int).tolist()
-            plt_ascii.xticks(tick_indices, [labels[i] for i in tick_indices])
+            # Use simple OHLC data without any date/time indices
+            # Reset index and extract numeric values
+            try:
+                # Reset index to avoid any string index issues
+                df_reset = df.reset_index(drop=True)
+                
+                # Create clean numeric series
+                opens = pd.to_numeric(df_reset['open'], errors='coerce').fillna(0).astype(float)
+                highs = pd.to_numeric(df_reset['high'], errors='coerce').fillna(0).astype(float)
+                lows = pd.to_numeric(df_reset['low'], errors='coerce').fillna(0).astype(float)
+                closes = pd.to_numeric(df_reset['close'], errors='coerce').fillna(0).astype(float)
+                
+                # Create a clean DataFrame for candlestick
+                df_ohlc = pd.DataFrame({
+                    'Open': opens,
+                    'High': highs,
+                    'Low': lows,
+                    'Close': closes
+                })
+                
+                # Use numeric indices to avoid date parsing issues
+                indices = list(range(len(df_ohlc)))
+                plt_ascii.candlestick(indices, df_ohlc)
+            except Exception as e:
+                logging.error(f"Failed to prepare OHLC data for {symbol}: {e}")
+                raise
 
             plt_ascii.subplot(2, 1)
             plt_ascii.clf()
             plt_ascii.theme('dark')
-            volumes = df['volume'].tolist()
+            volumes = pd.to_numeric(df_reset['volume'], errors='coerce').fillna(0).astype(float).tolist()
             plt_ascii.bar(indices, volumes, color='blue', label='Volume')
             plt_ascii.title("Volume")
-            plt_ascii.xticks(tick_indices, [labels[i] for i in tick_indices])
 
             h_volume = max(5, height // 3)
             h_klines = height - h_volume
 
             plt_ascii.subplot(1, 1).plotsize(width, h_klines)
             plt_ascii.subplot(2, 1).plotsize(width, h_volume)
-            return Text.from_ansi(plt_ascii.build())
+            result = plt_ascii.build()
+            return Text.from_ansi(result)
         except Exception as e:
+            import traceback
+            logging.error(f"Chart rendering error: {e}\n{traceback.format_exc()}")
             return Text(f"Rendering error: {e}", style="bold red")
 
 def render_ascii_chart(symbol, config):
@@ -445,9 +519,18 @@ async def input_task(exchange, config, data_manager, engine):
 
             all_pairs = get_sorted_symbols(config)
             ui_cfg = config.get('ui', {})
-            h_offset = ui_cfg.get('panel_height_offset', 20)
-            pairs_height = console.height - h_offset
-            if pairs_height < 3: pairs_height = 3
+            # Ensure numeric UI config values are converted safely to integers
+            try:
+                h_offset = int(ui_cfg.get('panel_height_offset', 20) or 20)
+            except (ValueError, TypeError):
+                h_offset = 20
+            try:
+                console_height = int(console.height)
+            except (ValueError, TypeError):
+                console_height = 24
+            pairs_height = console_height - h_offset
+            if pairs_height < 3:
+                pairs_height = 3
 
             if show_chart or show_help:
                 if key in [readchar.key.ENTER, readchar.key.ESC, 'q', 'Q', 'h', 'H']:
@@ -455,16 +538,24 @@ async def input_task(exchange, config, data_manager, engine):
                     show_help = False
                 elif show_chart and chart_symbol and key.lower() == 'b':
                     price = bot_state.get(chart_symbol, {}).get('price', 0)
-                    if price > 0:
+                    try:
+                        price_f = float(price)
+                    except (ValueError, TypeError):
+                        price_f = 0
+                    if price_f > 0:
                         logging.info(f"[Manual] Triggering BUY for {chart_symbol}")
                         candle_count = len(ohlcv_cache.get(chart_symbol, []))
-                        asyncio.create_task(execute_buy(exchange, chart_symbol, {'close': price}, data_manager, engine, config, manual=True, strategy="Manual", candle_count=candle_count))
+                        asyncio.create_task(execute_buy(exchange, chart_symbol, {'close': price_f}, data_manager, engine, config, manual=True, strategy="Manual", candle_count=candle_count))
                 elif show_chart and chart_symbol and key.lower() == 's':
                     price = bot_state.get(chart_symbol, {}).get('price', 0)
-                    if price > 0:
+                    try:
+                        price_f = float(price)
+                    except (ValueError, TypeError):
+                        price_f = 0
+                    if price_f > 0:
                         logging.info(f"[Manual] Triggering SELL for {chart_symbol}")
                         candle_count = len(ohlcv_cache.get(chart_symbol, []))
-                        asyncio.create_task(execute_sell(exchange, chart_symbol, {'close': price}, data_manager, engine, config, force=True, strategy="Manual", candle_count=candle_count))
+                        asyncio.create_task(execute_sell(exchange, chart_symbol, {'close': price_f}, data_manager, engine, config, force=True, strategy="Manual", candle_count=candle_count))
                 continue
 
             if key == readchar.key.TAB:
@@ -488,7 +579,10 @@ async def input_task(exchange, config, data_manager, engine):
                     logs_scroll_offset = max(0, logs_scroll_offset - 1)
                     logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key == readchar.key.PAGE_UP:
-                scroll_step = ui_cfg.get('scroll_step', 10)
+                try:
+                    scroll_step = int(ui_cfg.get('scroll_step', 10) or 10)
+                except (ValueError, TypeError):
+                    scroll_step = 10
                 if focused_panel == "pairs":
                     selected_pair_index = max(0, selected_pair_index - pairs_height)
                     pairs_scroll_offset = max(0, pairs_scroll_offset - pairs_height)
@@ -497,7 +591,10 @@ async def input_task(exchange, config, data_manager, engine):
                     logs_scroll_offset += scroll_step
                     logs_pause_until = time.time() + config.get('timeouts', {}).get('ui_pause_long', 30)
             elif key == readchar.key.PAGE_DOWN:
-                scroll_step = ui_cfg.get('scroll_step', 10)
+                try:
+                    scroll_step = int(ui_cfg.get('scroll_step', 10) or 10)
+                except (ValueError, TypeError):
+                    scroll_step = 10
                 if focused_panel == "pairs":
                     max_pairs_offset = max(0, len(all_pairs) - pairs_height)
                     selected_pair_index = min(len(all_pairs) - 1, selected_pair_index + pairs_height)
@@ -540,62 +637,267 @@ async def input_task(exchange, config, data_manager, engine):
             logging.error(f"Input error: {e}")
         await asyncio.sleep(0.1)
 
-async def watch_trades_pool_task(exchange, discovery_pool, config, data_manager):
+async def build_discovery_pool_from_balances(exchange, config):
     """
-    Watches trades for all pairs in the discovery pool to track activity.
+    Build discovery pool based on available balances and 24h volume.
+    For each currency we have balance for, find all symbols trading with that currency as quote or base,
+    then pick the top volume symbols.
     """
-    logging.info(f"[bold cyan]Starting trades pool watcher for {len(discovery_pool)} symbols.")
+    global discovery_pool
+    try:
+        logging.info("Building discovery pool from available balances...")
 
+        # 1. Fetch current balances and store globally
+        balance = await exchange.fetch_balance()
+        async with bot_lock:
+            global current_balances
+            current_balances = balance
+
+        # 2. Determine currencies with non-zero free balance
+        free_balances = balance.get('free', {}) if isinstance(balance, dict) and 'free' in balance else {}
+        currencies_with_balance = []
+        # Treat amounts below dust threshold as zero
+        dust_threshold_amount = float(config.get('exchange', {}).get('dust_threshold_amount', 1e-6))
+        for curr, amount in free_balances.items():
+            try:
+                # handle nested balance dicts or raw numeric values
+                if isinstance(amount, dict):
+                    amt = amount.get('free') or amount.get('total') or amount.get('used') or 0
+                else:
+                    amt = amount
+                amount_float = float(amt) if amt is not None else 0
+                if amount_float > dust_threshold_amount:
+                    currencies_with_balance.append(curr)
+            except (ValueError, TypeError):
+                continue
+
+        # 3. Fallback if none found
+        if not currencies_with_balance:
+            logging.warning("No currencies with non-dust balance found. Building fallback currency list from markets but filtering dust.")
+            # Use most common currencies from markets as fallback but only include those present in balances and not dust
+            markets_keys = list(exchange.markets.keys()) if hasattr(exchange, 'markets') else []
+            bases = [s.split('/')[0] for s in markets_keys if '/' in s]
+            quotes = [s.split('/')[1] for s in markets_keys if '/' in s]
+            candidate_currencies = list(dict.fromkeys(bases + quotes))
+
+            # Filter candidate currencies against any balance entries (free/total) and dust threshold
+            filtered = []
+            for c in candidate_currencies:
+                found_amt = None
+                # check free, total top-level, or any nested dict
+                try:
+                    if isinstance(balance, dict):
+                        # direct key
+                        if c in balance and not isinstance(balance[c], dict):
+                            found_amt = float(balance[c])
+                        # check total/free dicts
+                        if found_amt is None and 'free' in balance and isinstance(balance['free'], dict) and c in balance['free']:
+                            found_amt = float(balance['free'].get(c) or 0)
+                        if found_amt is None and 'total' in balance and isinstance(balance['total'], dict) and c in balance['total']:
+                            found_amt = float(balance['total'].get(c) or 0)
+                except Exception:
+                    found_amt = None
+                if found_amt is not None and found_amt > dust_threshold_amount:
+                    filtered.append(c)
+
+            if not filtered:
+                # final fallback to common stable currencies
+                currencies_with_balance = ['EUR']
+            else:
+                currencies_with_balance = filtered
+
+        # 4. Fetch tickers and prepare top 24h volume pairs
+        all_tickers = await exchange.fetch_tickers()
+        tickers_list = []
+        for symbol, tk in (all_tickers.items() if isinstance(all_tickers, dict) else []):
+            if symbol not in exchange.markets:
+                continue
+            vol = tk.get('quoteVolume') or ((tk.get('baseVolume') or 0) * (tk.get('last') or 0)) or 0
+            tickers_list.append({'symbol': symbol, 'volume24h': float(vol)})
+
+        # sort by 24h volume descending and keep top candidates to analyze recent trades
+        tickers_list.sort(key=lambda x: x['volume24h'], reverse=True)
+        top_scan_limit = int(config.get('discovery', {}).get('top_24h_scan_limit', 200))
+        top_candidates = tickers_list[:top_scan_limit]
+
+        # 5. From top 24h pairs, fetch recent trades and count trades within last hour
+        now = time.time()
+        one_hour_ago = now - 3600
+        traded_counts = []
+        for item in top_candidates:
+            s = item['symbol']
+            try:
+                trades = await exchange.fetch_trades(s, since=None, limit=1000)
+            except Exception:
+                trades = []
+            count = 0
+            try:
+                for t in trades:
+                    ts = (t.get('timestamp') or t.get('time') or 0) / 1000.0
+                    if ts >= one_hour_ago:
+                        count += 1
+                    else:
+                        # trades are usually returned newest-first or oldest-first depending on exchange; don't rely on order
+                        continue
+            except Exception:
+                count = 0
+            traded_counts.append({'symbol': s, 'trades_last_hour': count, 'volume24h': item['volume24h']})
+
+        # sort by trades in last hour (desc), then by 24h volume
+        traded_counts.sort(key=lambda x: (x['trades_last_hour'], x['volume24h']), reverse=True)
+
+        # 6. Compose discovery pool: first include best pairs for currencies with balance
+        max_pairs = int(config.get('max_number_of_pairs', 40))
+        pool = []
+        added = set()
+
+        # helper: find best pair for a currency from top 24h list
+        symbol_by_currency = {}
+        for rec in tickers_list:
+            try:
+                base, quote = rec['symbol'].split('/')
+            except Exception:
+                continue
+            # prefer pair where currency is base first, else quote
+            symbol_by_currency.setdefault(base, []).append((rec['symbol'], rec['volume24h']))
+            symbol_by_currency.setdefault(quote, []).append((rec['symbol'], rec['volume24h']))
+        # Only pairs buyable with available quote balances should be considered.
+        buyable_quotes = set(currencies_with_balance)
+
+        for curr in currencies_with_balance:
+            # Prefer pairs where the quote currency equals the currency with balance
+            found = False
+            for rec in tickers_list:
+                sym = rec['symbol']
+                if '/' not in sym: continue
+                base, quote = sym.split('/')
+                if quote == curr and sym in exchange.markets and sym not in added:
+                    pool.append(sym)
+                    added.add(sym)
+                    found = True
+                    break
+            if found:
+                if len(pool) >= max_pairs:
+                    break
+                continue
+            # If none found in top tickers, try symbol_by_currency fallback but require quote to be buyable
+            candidates_for_curr = symbol_by_currency.get(curr, [])
+            if not candidates_for_curr:
+                continue
+            candidates_for_curr.sort(key=lambda x: x[1], reverse=True)
+            for sym, _ in candidates_for_curr:
+                if '/' not in sym: continue
+                b, q = sym.split('/')
+                if q in buyable_quotes and sym in exchange.markets and sym not in added:
+                    pool.append(sym)
+                    added.add(sym)
+                    break
+            if len(pool) >= max_pairs:
+                break
+
+        # 7. Fill the rest with the top traded pairs from traded_counts
+        for rec in traded_counts:
+            if len(pool) >= max_pairs:
+                break
+            sym = rec['symbol']
+            if '/' not in sym: continue
+            if sym not in added and sym in exchange.markets:
+                b, q = sym.split('/')
+                if buyable_quotes and q not in buyable_quotes:
+                    continue
+                pool.append(sym)
+                added.add(sym)
+
+        # 8. Final fallback: if still not enough, fill with highest 24h volume pairs
+        if len(pool) < max_pairs:
+            for rec in tickers_list:
+                if len(pool) >= max_pairs:
+                    break
+                sym = rec['symbol']
+                if '/' not in sym: continue
+                if sym not in added and sym in exchange.markets:
+                    b, q = sym.split('/')
+                    if buyable_quotes and q not in buyable_quotes:
+                        continue
+                    pool.append(sym)
+                    added.add(sym)
+
+        discovery_pool = pool[:max_pairs]
+        logging.info(f"Discovery pool built with {len(discovery_pool)} symbols (currencies with balance: {len(currencies_with_balance)}).")
+        return discovery_pool
+    except Exception as e:
+        logging.error(f"Error building discovery pool: {e}")
+        return []
+
+
+async def refresh_discovery_pool_task(exchange, config):
+    """
+    Refreshes the discovery pool every hour based on balances and 24h volume.
+    """
+    global discovery_pool
     while not shutdown_event.is_set():
         try:
-            async for trades in exchange.watch_trades_for_symbols(discovery_pool):
-                if shutdown_event.is_set(): break
+            await asyncio.sleep(3600)
+            await build_discovery_pool_from_balances(exchange, config)
+        except Exception as e:
+            logging.error(f"Error refreshing discovery pool: {e}")
+            await asyncio.sleep(60)
 
-                for trade in trades:
-                    symbol = trade['symbol']
+async def fetch_trades_count_task(exchange, config):
+    """
+    Periodically fetches the number of trades for pairs during the latest hour.
+    Updates pair_hour_trades for active monitoring.
+    """
+    logging.info(f"[bold cyan]Starting trades count fetcher.")
+    
+    while not shutdown_event.is_set():
+        try:
+            # Fetch trade counts for all symbols we care about (discovery_pool + active_pairs)
+            symbols_to_fetch = list(set(discovery_pool + active_pairs))
+            
+            for symbol in symbols_to_fetch:
+                try:
+                    # Fetch recent trades for this symbol
+                    # Use limit to get trades from approximately the last hour
+                    trades = await exchange.fetch_trades(symbol, since=None, limit=1000)
+                    
                     now = time.time()
-                    pair_last_trade_time[symbol] = now
-
-                    if symbol not in active_pairs:
-                        # Attempt to swap in
-                        async with bot_lock:
-                            max_pairs = int(config.get('max_number_of_pairs', 40))
-                            if len(active_pairs) < max_pairs:
-                                logging.info(f"[{symbol}] Adding to active pairs (room available).")
-                                await add_active_pair(symbol, exchange, config, data_manager)
-                            else:
-                                # Find least active pair with no open position and no pending orders
-                                candidates = []
-                                for p in active_pairs:
-                                    if not data_manager.get_position(p):
-                                        has_pending = False
-                                        async with pending_orders_lock:
-                                            for po in pending_orders.values():
-                                                if po['symbol'] == p:
-                                                    has_pending = True
-                                                    break
-                                        if not has_pending:
-                                            candidates.append(p)
-
-                                if candidates:
-                                    # Sort by last trade time
-                                    candidates.sort(key=lambda p: pair_last_trade_time.get(p, 0))
-                                    least_active = candidates[0]
-
-                                    # Only swap if the new one is "fresher" or we just want to rotate
-                                    logging.info(f"[{symbol}] Swapping in. Replacing least active pair [{least_active}].")
-                                    await remove_active_pair(least_active)
-                                    await add_active_pair(symbol, exchange, config, data_manager)
-
+                    if symbol not in pair_hour_trades:
+                        pair_hour_trades[symbol] = deque()
+                    
+                    # Clear old data
+                    pair_hour_trades[symbol].clear()
+                    
+                    # Add timestamps of recent trades (within the last hour)
+                    one_hour_ago = now - 3600
+                    for trade_data in trades:
+                        trade_time = trade_data['timestamp'] / 1000  # Convert ms to seconds
+                        if trade_time >= one_hour_ago:
+                            pair_hour_trades[symbol].append(trade_time)
+                        else:
+                            # Trades are in chronological order, so we can break early
+                            break
+                    
+                    # Update last trade time
+                    if trades:
+                        pair_last_trade_time[symbol] = trades[-1]['timestamp'] / 1000
+                    
+                except Exception as e:
+                    logging.debug(f"Failed to fetch trades for {symbol}: {e}")
+                    continue
+            
+            # Wait before next fetch
+            await asyncio.sleep(60)  # Fetch every minute
+            
         except Exception as e:
             if not shutdown_event.is_set():
-                logging.error(f"WebSocket trades pool error: {e}")
-                await asyncio.sleep(5)
+                logging.error(f"Trades count fetch error: {e}")
+                await asyncio.sleep(10)
             else: break
 
 async def add_active_pair(symbol, exchange, config, data_manager):
     if symbol in active_pairs: return
-
+    
     # Initialize bot state
     pair_cfg = config.get('pairs', {}).get(symbol, {})
     strat = pair_cfg.get('strategy') or random.choice(STRATEGIES)
@@ -618,17 +920,18 @@ async def add_active_pair(symbol, exchange, config, data_manager):
         'last_analysis_ts': 0
     }
     pair_last_trade_time[symbol] = time.time()
-
+    
     if symbol not in ohlcv_cache:
         ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-
+        
     active_pairs.append(symbol)
+    symbol_timeframes.setdefault(symbol, default_candle_timeframe)
     logging.info(f"[{symbol}] Added to active monitoring set.")
 
 async def remove_active_pair(symbol):
     if symbol in active_pairs:
         active_pairs.remove(symbol)
-        # We keep bot_state and ohlcv_cache for a bit or just leave them,
+        # We keep bot_state and ohlcv_cache for a bit or just leave them, 
         # but they won't be updated by the watcher anymore.
         logging.info(f"[{symbol}] Removed from active monitoring set.")
 
@@ -654,6 +957,7 @@ async def watch_ohlcv_global_task(exchange, watch_pairs_list, config, data_manag
                             bot_state[symbol]['price'] = candles[-1][4]
 
                 for symbol, timeframe, candles in updates:
+                    symbol_timeframes[symbol] = timeframe
                     async with ohlcv_lock:
                         if symbol not in ohlcv_cache:
                             ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
@@ -717,8 +1021,28 @@ async def sync_live_positions(exchange, data_manager, config):
         free_balances = balance
 
     pairs_dict = config.get('pairs', {})
-    base_currencies = sorted(list(set([p.split('/')[1] for p in pairs_dict.keys() if '/' in p])))
-    if not base_currencies: base_currencies = ['USDT', 'USDC', 'EUR', 'USD', 'BTC', 'ETH', 'BNB']
+    
+    # Collect quote currencies from configured pairs and common fallback currencies
+    # These are used as the quote part when matching assets to symbols
+    base_currencies = set()
+    
+    # Add quote currencies from configured pairs
+    for p in pairs_dict.keys():
+        if '/' in p:
+            parts = p.split('/')
+            if len(parts) == 2:
+                base_currencies.add(parts[1])  # quote currency
+    
+    # Add common fallback currencies (these are typically quote currencies)
+    fallbacks = ['EUR']
+    for currency in fallbacks:
+        base_currencies.add(currency)
+    
+    base_currencies = sorted(list(base_currencies))
+    
+    # Ensure we have at least some base currencies
+    if not base_currencies:
+        base_currencies = ['EUR']
 
     sellable_found = False
     all_tickers = {}
@@ -726,39 +1050,91 @@ async def sync_live_positions(exchange, data_manager, config):
         all_tickers = await exchange.fetch_tickers()
     except: pass
 
+    logging.info(f"[{exchange_id}] Starting position sync. Free balances: {list(free_balances.keys())}")
+    logging.info(f"[{exchange_id}] Active pairs: {active_pairs}")
+    logging.info(f"[{exchange_id}] Base currencies: {base_currencies}")
+
     async def process_asset(asset, amount):
         nonlocal sellable_found
+        try:
+            amount = float(amount) if amount is not None else 0
+        except (ValueError, TypeError):
+            amount = 0
         if asset in base_currencies or amount <= 0: return
 
         symbol = None
+        # Try to find a matching symbol for this asset
+        # First priority: symbols from pairs_dict (configured pairs)
         for bc in base_currencies:
             candidate = f"{asset}/{bc}"
             if candidate in pairs_dict:
                 symbol = candidate
                 break
-        if not symbol: return
+        
+        # Second priority: symbols from exchange markets
+        if not symbol and hasattr(exchange, 'markets') and exchange.markets:
+            for bc in base_currencies:
+                candidate = f"{asset}/{bc}"
+                if candidate in exchange.markets:
+                    symbol = candidate
+                    break
+            
+            # Also try reverse pair (some exchanges use quote/base format)
+            if not symbol:
+                for bc in base_currencies:
+                    candidate = f"{bc}/{asset}"
+                    if candidate in exchange.markets:
+                        symbol = candidate
+                        break
+        
+        # Third priority: check if the asset itself is in active_pairs or pairs_dict
+        if not symbol:
+            if asset in active_pairs:
+                symbol = asset
+            elif asset in pairs_dict:
+                symbol = asset
+        
+        if not symbol:
+            logging.warning(f"[{asset}] Could not find matching symbol in active_pairs: {active_pairs}, config pairs: {list(pairs_dict.keys())}, exchange markets: {list(exchange.markets.keys()) if hasattr(exchange, 'markets') and exchange.markets else 'N/A'}")
+            return
 
+        logging.info(f"[{symbol}] Processing asset {asset} with amount {amount}")
         existing_pos_list = data_manager.get_position(symbol)
         if existing_pos_list:
             total_existing_amount = sum(p['amount'] for p in existing_pos_list)
             sync_tolerance = config.get('exchange', {}).get('sync_tolerance', 0.001)
-            if abs(total_existing_amount - amount) / amount < sync_tolerance:
-                sellable_found = True
-                return
+            try:
+                amount_float = float(amount)
+                total_existing_amount_float = float(total_existing_amount)
+                sync_tolerance_float = float(sync_tolerance)
+                if amount_float > 0 and abs(total_existing_amount_float - amount_float) / amount_float < sync_tolerance_float:
+                    sellable_found = True
+                    return
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
 
         is_dust = False
         try:
             ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
             if symbol in exchange.markets:
                 m = exchange.markets[symbol]
-                min_amt = m['limits']['amount']['min']
-                min_cost = m['limits']['cost']['min'] or config.get('exchange', {}).get('min_notional_fallback', 10.0)
-                if ticker and ticker.get('last') is not None and (amount < min_amt or (amount * ticker['last']) < min_cost):
+                min_amt = float(m['limits']['amount']['min']) if m['limits']['amount']['min'] is not None else 0
+                min_cost = float(m['limits']['cost']['min'] or config.get('exchange', {}).get('min_notional_fallback', 10.0))
+                if ticker and ticker.get('last') is not None:
+                    amount_float = float(amount) if amount is not None else 0
+                    ticker_last = float(ticker['last']) if ticker['last'] is not None else 0
+                    if amount_float < min_amt or (amount_float * ticker_last) < min_cost:
+                        is_dust = True
+            else:
+                amount_float = float(amount) if amount is not None else 0
+                dust_threshold = float(config.get('exchange', {}).get('dust_threshold_amount', 1e-6))
+                if amount_float <= dust_threshold:
                     is_dust = True
-            elif amount <= config.get('exchange', {}).get('dust_threshold_amount', 1e-6): is_dust = True
         except: pass
 
-        if is_dust: return
+        if is_dust:
+            logging.warning(f"[{symbol}] Asset amount {amount} is below minimum thresholds (dust), but will create position for tracking")
+            # Don't return - continue to create position for dust amounts too
         sellable_found = True
 
         avg_price = 0
@@ -767,58 +1143,149 @@ async def sync_live_positions(exchange, data_manager, config):
         accumulated_amount = 0
         try:
             # Add timeout to prevent hanging on slow responses
-            trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=50), timeout=config.get('timeouts', {}).get('order_fetch', 10))
-            trades.sort(key=lambda t: t['timestamp'], reverse=True)
+            # Primary attempt: fetch recent user trades
+            trades = []
+            try:
+                trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=50), timeout=config.get('timeouts', {}).get('order_fetch', 10))
+            except Exception:
+                # Best-effort: try again with a larger limit without blocking too long
+                try:
+                    trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=200), timeout=5)
+                except Exception:
+                    trades = []
+
+            # Normalize and sort by timestamp descending
+            try:
+                trades = sorted(trades, key=lambda t: t.get('timestamp', 0), reverse=True)
+            except Exception:
+                pass
+
+            # Helper: compute fallback fee when missing
+            async def compute_estimated_fee(sym, trade_amt, trade_price):
+                try:
+                    fee_rate = await exchange.fetch_trading_fee(sym)
+                except Exception:
+                    fee_rate = config.get('exchange', {}).get('default_fee', 0.001)
+                estimated_cost = trade_amt * trade_price * (fee_rate or 0)
+                # Assume fee currency is quote; convert to quote value via get_fee_in_quote
+                try:
+                    est = await exchange.get_fee_in_quote(sym, estimated_cost, None)
+                    return float(est or 0)
+                except Exception:
+                    return float(estimated_cost or 0)
 
             for t in trades:
-                if t['side'] == 'buy':
+                try:
+                    if t.get('side') != 'buy':
+                        continue
                     remaining_to_fill = amount - accumulated_amount
-                    if remaining_to_fill <= 0: break
+                    if remaining_to_fill <= 0:
+                        break
 
-                    trade_amt = min(t['amount'], remaining_to_fill)
-                    total_cost += trade_amt * t['price']
+                    trade_amt = min(float(t.get('amount') or 0), remaining_to_fill)
+                    trade_price = float(t.get('price') or t.get('cost') / (t.get('amount') or 1) if t.get('amount') else 0)
+                    total_cost += trade_amt * trade_price
 
-                    if 'fee' in t and t['fee']:
-                        fee_cost = t['fee'].get('cost', 0)
-                        fee_currency = t['fee'].get('currency')
-                        if fee_cost > 0:
+                    fee_info = t.get('fee') or {}
+                    fee_cost = fee_info.get('cost', 0) if isinstance(fee_info, dict) else 0
+                    fee_currency = fee_info.get('currency') if isinstance(fee_info, dict) else None
+                    if not fee_cost or float(fee_cost) == 0:
+                        # estimate fee when missing or zero
+                        est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
+                        total_fee += est_fee
+                    else:
+                        try:
                             actual_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
-                            total_fee += actual_fee * (trade_amt / t['amount'])
+                            total_fee += actual_fee * (trade_amt / float(t.get('amount') or trade_amt))
+                        except Exception:
+                            # fallback to estimated fee
+                            est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
+                            total_fee += est_fee
 
                     accumulated_amount += trade_amt
+                except Exception:
+                    continue
 
+            # If trades didn't cover the expected amount, try a larger historical fetch as fallback
             if accumulated_amount > 0:
                 avg_price = total_cost / accumulated_amount
-                sync_threshold = config.get('exchange', {}).get('sync_threshold', 0.99)
+                sync_threshold = float(config.get('exchange', {}).get('sync_threshold', 0.99))
                 if accumulated_amount < amount * sync_threshold:
-                    ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
-                    curr_p = (ticker.get('last') or 0) if ticker else 0
-                    if curr_p > 0:
+                    # Try fetching a larger set of trades (could be paginated) to recover missing fills
+                    try:
+                        more_trades = await asyncio.wait_for(exchange.fetch_my_trades(symbol, limit=500), timeout=10)
+                        more_trades = sorted(more_trades, key=lambda t: t.get('timestamp', 0), reverse=True)
+                        for t in more_trades:
+                            if accumulated_amount >= amount: break
+                            if t.get('side') != 'buy': continue
+                            trade_amt = min(float(t.get('amount') or 0), amount - accumulated_amount)
+                            trade_price = float(t.get('price') or 0)
+                            total_cost += trade_amt * trade_price
+                            fee_info = t.get('fee') or {}
+                            fee_cost = fee_info.get('cost', 0) if isinstance(fee_info, dict) else 0
+                            fee_currency = fee_info.get('currency') if isinstance(fee_info, dict) else None
+                            if not fee_cost or float(fee_cost) == 0:
+                                est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
+                                total_fee += est_fee
+                            else:
+                                try:
+                                    actual_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+                                    total_fee += actual_fee * (trade_amt / float(t.get('amount') or trade_amt))
+                                except Exception:
+                                    est_fee = await compute_estimated_fee(symbol, trade_amt, trade_price)
+                                    total_fee += est_fee
+                            accumulated_amount += trade_amt
+                    except Exception:
+                        pass
+
+                    # Fill missing remainder using current ticker price as best-effort
+                    try:
+                        ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
+                        curr_p = float((ticker.get('last') or 0) if ticker else 0)
+                    except Exception:
+                        curr_p = 0
+                    if curr_p > 0 and accumulated_amount < amount:
                         rest_amount = amount - accumulated_amount
                         rest_cost = rest_amount * curr_p
                         total_cost += rest_cost
-
-                        # Estimate remaining fee if some trades are missing
-                        if accumulated_amount > 0:
-                            total_fee += (total_fee / accumulated_amount) * rest_amount
-
+                        # approximate remaining fee
+                        try:
+                            est_fee = await compute_estimated_fee(symbol, rest_amount, curr_p)
+                            total_fee += est_fee
+                        except Exception:
+                            pass
                         avg_price = total_cost / amount
+            elif len(trades) == 0:
+                # No trades found - use current price for the full amount
+                ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
+                curr_p = (ticker.get('last') or 0) if ticker else 0
+                if curr_p > 0:
+                    avg_price = curr_p
+                    total_cost = amount * avg_price
         except Exception as e:
             logging.warning(f"[{symbol}] Error fetching trade history for sync: {e}")
+            # If trade history fetch fails completely, try to use current price
+            ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
+            curr_p = (ticker.get('last') or 0) if ticker else 0
+            if curr_p > 0:
+                avg_price = curr_p
+                total_cost = amount * avg_price
 
         if avg_price <= 0:
             ticker = all_tickers.get(symbol) or await exchange.fetch_ticker(symbol)
             avg_price = (ticker.get('last') or 0) if ticker else 0
+            if avg_price > 0:
+                total_cost = amount * avg_price  # Ensure total_cost is consistent
 
         if avg_price > 0:
             data_manager.add_position(
                 symbol, avg_price, amount, total_fee,
-                {"info": "launch_sync", "auto_sell_disabled": True}, time.time(),
+                {"info": "launch_sync", "auto_sell_disabled": False, "strategy": "Synced", "candle_count": 0}, time.time(),
                 total_base=total_cost + total_fee
             )
             logging.info(f"[{symbol}] Synced balance: {amount} at calculated avg price {format_price(avg_price)}")
         else:
-            logging.warning(f"[{symbol}] Asset found in wallet but price unavailable.")
+            logging.warning(f"[{symbol}] Asset found in wallet but price unavailable. avg_price={avg_price}, total_cost={total_cost}")
 
     # Parallelize processing of all assets with a semaphore to avoid rate limits
     sync_semaphore = asyncio.Semaphore(config.get('exchange', {}).get('max_concurrent_syncs', 3))
@@ -828,9 +1295,35 @@ async def sync_live_positions(exchange, data_manager, config):
 
     await asyncio.gather(*[process_with_semaphore(a, am) for a, am in free_balances.items()])
 
+    # Ensure symbols with positions are in active_pairs for monitoring
+    open_positions = data_manager.get_open_positions()
+    new_symbols = []
+    for symbol in open_positions.keys():
+        if symbol not in active_pairs:
+            active_pairs.append(symbol)
+            new_symbols.append(symbol)
+            logging.info(f"[{symbol}] Added to active_pairs due to existing position")
+    
+    # Initialize OHLCV cache and bot_state for newly added symbols
+    for symbol in new_symbols:
+        async with ohlcv_lock:
+            if symbol not in ohlcv_cache:
+                ohlcv_cache[symbol] = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                logging.info(f"[{symbol}] Initialized OHLCV cache due to existing position")
+        if symbol not in bot_state:
+            bot_state[symbol] = {
+                'price': 0, 'rsi': 0, 'tendency': 'Neutral',
+                'last_signal': 'Init', 'position': open_positions[symbol],
+                'consecutive_buys': 0, 'consecutive_sells': 0,
+                'score': 0, 'ema_f': 0, 'ema_s': 0, 'adx': 0,
+                'volatility': 0, 'expected_profit': 0, 'last_analysis_ts': 0,
+                'strategy': random.choice(STRATEGIES), 'aggr': random.choice(['normal', 'aggressive', 'dynamic'])
+            }
+
+    logging.info(f"[{exchange_id}] Position sync completed. Created positions: {list(open_positions.keys())}")
+    
     # Update global bot_state for dashboard
     async with bot_lock:
-        open_positions = data_manager.get_open_positions()
         for symbol, pos_list in open_positions.items():
             if symbol not in bot_state:
                 bot_state[symbol] = {}
@@ -885,19 +1378,68 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         # Check suspensions
         now_ts = time.time()
         is_suspended = False
+        positions = data_manager.get_position(symbol)
         if symbol in pair_suspensions:
             susp = pair_suspensions[symbol]
             if now_ts < susp.get('until', 0):
                 is_suspended = True
+                logging.debug(f"[{symbol}] Suspended until {susp.get('until', 0)}: {susp.get('reason')}")
             elif susp.get('reason') == 'budget':
-                balance = current_balances
-                base_curr = symbol.split('/')[1]
-                free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0)
-                if free_bal >= susp.get('amount_required', 0) * 1.2:
+                balance = current_balances or {}
+                base_curr = symbol.split('/')[1] if '/' in symbol else symbol
+                free_bal = 0
+                try:
+                    free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0) or 0
+                    free_bal = float(free_bal) if free_bal is not None else 0
+                except:
+                    free_bal = 0
+                required_amount = float(susp.get('amount_required', 0) or 0) * 1.2
+                if free_bal >= required_amount:
                     logging.info(f"[{symbol}] Budget recovered. Resuming pair.")
                     del pair_suspensions[symbol]
                 else:
                     is_suspended = True
+            elif susp.get('reason') == 'volume_minimum':
+                balance = current_balances or {}
+                base_curr = symbol.split('/')[1] if '/' in symbol else symbol
+                free_bal = 0
+                try:
+                    free_bal = balance.get(base_curr, {}).get('free', 0) if isinstance(balance.get(base_curr), dict) else balance.get(base_curr, 0) or 0
+                    free_bal = float(free_bal) if free_bal is not None else 0
+                except:
+                    free_bal = 0
+                
+                min_amount = float(susp.get('min_amount', 0) or 0)
+                min_cost = float(susp.get('min_cost', 0) or 0)
+                
+                # Get current price from OHLCV cache or bot_state
+                current_price = 0
+                try:
+                    async with ohlcv_lock:
+                        if symbol in ohlcv_cache and not ohlcv_cache[symbol].empty:
+                            current_price = float(ohlcv_cache[symbol]['close'].iloc[-1] or 0)
+                    if current_price == 0:
+                        # Fallback to bot_state price
+                        current_price = float(bot_state.get(symbol, {}).get('price', 0) or 0)
+                except:
+                    current_price = 0
+                
+                # Check if we have enough balance to meet minimum volume requirements
+                if free_bal > 0 and current_price > 0:
+                    # We can meet the minimum if our balance >= min_amount OR (balance * price) >= min_cost
+                    can_meet_min_amount = free_bal >= min_amount
+                    can_meet_min_cost = (free_bal * current_price) >= min_cost
+                    
+                    if can_meet_min_amount or can_meet_min_cost:
+                        logging.info(f"[{symbol}] Volume minimum requirements met (balance: {free_bal}, min_amount: {min_amount}, min_cost: {min_cost}). Resuming pair.")
+                        del pair_suspensions[symbol]
+                    else:
+                        is_suspended = True
+                        logging.debug(f"[{symbol}] Still suspended: balance {free_bal} < min_amount {min_amount}, and balance*price {free_bal * current_price:.8f} < min_cost {min_cost}")
+                else:
+                    # If we can't determine requirements, keep suspended
+                    is_suspended = True
+                    logging.debug(f"[{symbol}] Volume minimum suspension: insufficient data for recovery check (free_bal={free_bal}, price={current_price})")
             else:
                 del pair_suspensions[symbol]
 
@@ -905,7 +1447,21 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             if symbol not in ohlcv_cache: return
             df = ohlcv_cache[symbol].copy()
 
-        if df.empty or len(df) < config.get('trading', {}).get('min_candles_for_analysis', 250): return
+        # For symbols with existing positions, use lower candle requirement
+        min_candles = config.get('trading', {}).get('min_candles_for_analysis', 250) or 250
+        try:
+            min_candles = int(min_candles)
+        except (ValueError, TypeError):
+            min_candles = 250
+        if positions:  # If we have positions for this symbol, be more lenient
+            min_candles = max(1, min_candles // 10)  # Use 10% of normal requirement, minimum 1
+            logging.debug(f"[{symbol}] Using reduced candle requirement: {min_candles}")
+        
+        # Safety check for df
+        df_len = len(df) if isinstance(df, pd.DataFrame) else 0
+        if not isinstance(df, pd.DataFrame) or df.empty or df_len < min_candles: 
+            logging.debug(f"[{symbol}] Insufficient candles ({df_len} < {min_candles}) for analysis")
+            return
 
         loop = asyncio.get_event_loop()
 
@@ -952,12 +1508,22 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
         profit = 0
         if not buys.empty and not sells.empty:
             # Simplified matched-trade profit
-            for b_idx, b_p in buys.items():
-                future_sells = sells[sells.index > b_idx]
+            # Check if indices are datetime64 and convert to numeric timestamps for comparison
+            buys_numeric = buys.copy()
+            sells_numeric = sells.copy()
+            
+            # Convert datetime64 index to numeric timestamp if needed
+            if pd.api.types.is_datetime64_any_dtype(buys.index):
+                buys_numeric.index = buys.index.astype('int64') // 10**6  # Convert nanoseconds to milliseconds
+            if pd.api.types.is_datetime64_any_dtype(sells.index):
+                sells_numeric.index = sells.index.astype('int64') // 10**6
+            
+            for b_idx, b_p in buys_numeric.items():
+                future_sells = sells_numeric[sells_numeric.index > b_idx]
                 if not future_sells.empty:
                     s_idx = future_sells.index[0]
                     profit += (future_sells.iloc[0] - b_p)
-                    sells = sells[sells.index > s_idx]
+                    sells_numeric = sells_numeric[sells_numeric.index > s_idx]
                 else: break
 
         # Consolidated Update State
@@ -988,20 +1554,38 @@ async def analyze_and_trade(exchange, symbol, config, data_manager, pattern_mana
             # Reassign mc_threshold as requested (defaulting to 1.0)
             mc_threshold = config.get('mc_threshold', 1.0)
 
+            # Ensure numeric types for comparison
+            try:
+                mc_score = float(mc_score) if mc_score is not None else 0
+            except (ValueError, TypeError):
+                mc_score = 0
+            try:
+                mc_threshold = float(mc_threshold) if mc_threshold is not None else 1.0
+            except (ValueError, TypeError):
+                mc_threshold = 1.0
+
             if mc_score >= mc_threshold:
-                # Add to buy queue instead of immediate execution
-                async with buy_queue_lock:
-                    # Check if already in queue
-                    if not any(item['symbol'] == symbol for item in buy_queue):
-                        buy_queue.append({
-                            'symbol': symbol,
-                            'data': latest,
-                            'expected_profit': profit,
-                            'strategy': strat,
-                            'candle_count': len(df),
-                            'timestamp': time.time()
-                        })
-                        logging.info(f"[{symbol}] Buy signal validated (MC Score: {mc_score:.2f}). Added to queue (Profit: {profit:.4f}).")
+                # Do not add to queue if expected profit is negative
+                try:
+                    profit = float(profit) if profit is not None else 0
+                except (ValueError, TypeError):
+                    profit = 0
+                if profit <= 0:
+                    logging.debug(f"[{symbol}] Buy signal validated but profit is non-positive ({profit:.4f}). Not adding to queue.")
+                else:
+                    # Add to buy queue instead of immediate execution
+                    async with buy_queue_lock:
+                        # Check if already in queue
+                        if not any(item['symbol'] == symbol for item in buy_queue):
+                            buy_queue.append({
+                                'symbol': symbol,
+                                'data': latest,
+                                'expected_profit': profit,
+                                'strategy': strat,
+                                'candle_count': len(df),
+                                'timestamp': time.time()
+                            })
+                            logging.info(f"[{symbol}] Buy signal validated (MC Score: {mc_score:.2f}). Added to queue (Profit: {profit:.4f}).")
             else:
                 async with bot_lock:
                     if symbol in bot_state:
@@ -1025,33 +1609,41 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
     async with pending_orders_lock:
         for oid, po in pending_orders.items():
             if po['symbol'] == symbol and po['side'] == 'buy':
-                logging.debug(f"[{symbol}] Skipping BUY: order {oid} is already pending.")
+                logging.info(f"[{symbol}] Skipping BUY: order {oid} is already pending.")
                 return
 
     async with bot_lock:
         pos = data_manager.get_position(symbol)
-        max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol')
+        max_lots = config['pairs'].get(symbol, {}).get('max_lots_per_symbol') or config.get('max_lots_per_symbol') or float('inf')
         if pos is not None and len(pos) >= max_lots:
-            if manual: logging.warning(f"[{symbol}] Manual BUY ignored: max_lots_per_symbol ({max_lots}) reached.")
+            logging.info(f"[{symbol}] Skipping BUY: max_lots_per_symbol ({max_lots}) reached.")
             return
 
         open_positions = data_manager.get_open_positions()
-        max_open = config.get('max_open_positions')
+        max_open = config.get('max_open_positions') or float('inf')
         if symbol not in open_positions and len(open_positions) >= max_open:
-            if manual: logging.warning(f"[{symbol}] Manual BUY ignored: max_open_positions ({max_open}) reached.")
+            logging.info(f"[{symbol}] Skipping BUY: max_open_positions ({max_open}) reached.")
             return
 
     try:
         # Improve purchasing behavior: fetch order book and compute 50% spread
-        order_book = await exchange.fetch_order_book(symbol, limit=20)
-        if order_book and order_book['bids'] and order_book['asks']:
-            best_bid = order_book['bids'][0][0]
-            best_ask = order_book['asks'][0][0]
-            # 50% of the spread with bids and asks
-            price = (best_bid + best_ask) / 2
-            logging.info(f"[{symbol}] Mid-price calculated: {price} (Bid: {best_bid}, Ask: {best_ask})")
-        else:
-            price = data['close']
+        price = None
+        try:
+            order_book = await exchange.fetch_order_book(symbol, limit=200)
+            if order_book and order_book['bids'] and order_book['asks']:
+                best_bid = order_book['bids'][0][0]
+                best_ask = order_book['asks'][0][0]
+                # 50% of the spread with bids and asks
+                price = (best_bid + best_ask) / 2
+                logging.info(f"[{symbol}] Mid-price calculated: {price} (Bid: {best_bid}, Ask: {best_ask})")
+        except Exception as e:
+            logging.debug(f"[{symbol}] Failed to fetch order book: {e}")
+        
+        if price is None:
+            price = data.get('close')
+            if price is None:
+                logging.error(f"[{symbol}] No price available from order book or data")
+                raise ValueError("Unable to determine price")
 
         order = None
 
@@ -1062,33 +1654,73 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
         async with bot_lock:
             balance = current_balances
 
-        # Verify feasibility by checking the available balance for the quote asset
-        quote_bal_data = balance.get(quote_curr) if balance else None
-        if quote_bal_data is None:
-            logging.info(f"[{symbol}] Balance for {quote_curr} missing. Fetching from exchange...")
+        # Ensure we have a valid balance
+        if not balance:
+            logging.info(f"[{symbol}] No balance data available. Fetching from exchange...")
             balance = await exchange.fetch_balance()
             async with bot_lock:
                 current_balances = balance
+        
+        if not balance:
+            raise ValueError(f"[{symbol}] Unable to fetch balance data")
 
         amount = engine.calculate_position_size(balance, price, quote_curr)
-        cost = amount * price
+        if amount is None:
+            logging.error(f"[{symbol}] calculate_position_size returned None (balance: {balance}, price: {price}, quote_curr: {quote_curr})")
+            raise ValueError("Position size calculation returned None")
+        try:
+            amount = float(amount)
+            price = float(price)
+            cost = amount * price
+        except (ValueError, TypeError):
+            raise ValueError(f"Cannot convert amount or price to float: amount={amount}, price={price}")
+
+        if amount <= 0:
+            # logging.warning(f"[{symbol}] Cannot execute buy: calculated amount is {amount} (balance: {balance}, price: {price})")
+            raise Exception(f"Non-positive amount: {amount}")
 
         if amount > 0:
-            min_notional = config.get('exchange', {}).get('min_notional_fallback', 10.0)
-            if market and 'limits' in market and 'cost' in market['limits'] and market['limits']['cost']['min']:
-                min_notional = float(market['limits']['cost']['min'])
+            exchange_config = config.get('exchange', {})
+            min_notional = exchange_config.get('min_notional_fallback', 10.0) if exchange_config else 10.0
+            if market and 'limits' in market and 'cost' in market['limits'] and market['limits']['cost']:
+                min_limit = market['limits']['cost'].get('min')
+                if min_limit is not None:
+                    try:
+                        min_notional = float(min_limit)
+                    except (ValueError, TypeError):
+                        min_notional = 10.0
 
-            if cost < min_notional:
-                buffer = config.get('exchange', {}).get('notional_buffer', 1.05)
-                amount = (min_notional / price) * buffer
-                cost = amount * price
+            try:
+                if cost < min_notional:
+                    buffer = exchange_config.get('notional_buffer', 1.05) if exchange_config else 1.05
+                    if min_notional > 0 and price > 0:
+                        amount = (min_notional / price) * buffer
+                        cost = amount * price
+                    else:
+                        raise ValueError(f"Cannot calculate adjusted amount: min_notional={min_notional}, price={price}")
+            except (ValueError, TypeError) as e:
+                if "Cannot calculate adjusted amount" not in str(e):
+                    raise ValueError(f"Cost comparison failed: {e}")
+                else:
+                    raise
 
             quote_curr = symbol.split('/')[1]
-            free_balance = balance.get(quote_curr, {}).get('free', 0) if isinstance(balance.get(quote_curr), dict) else balance.get(quote_curr, 0)
+            quote_bal = balance.get(quote_curr)
+            if isinstance(quote_bal, dict):
+                free_balance = quote_bal.get('total', 0) or 0 # quick fix
+                try:
+                    free_balance = float(free_balance) if free_balance is not None else 0
+                except (ValueError, TypeError):
+                    free_balance = 0
+            else:
+                free_balance = float(quote_bal) if quote_bal is not None else 0
 
-            if free_balance < cost:
-                pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
-                return
+            try:
+                if free_balance < cost:
+                    pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
+                    raise Exception(f"Insufficient balance: need {cost}, have {free_balance}")
+            except Exception:
+                raise
 
             # Use create_order with price for limit buy
             order = await exchange.create_order(symbol, 'buy', amount, price=price)
@@ -1104,17 +1736,51 @@ async def execute_buy(exchange, symbol, data, data_manager, engine, config, manu
                         'candle_count': candle_count,
                         'is_limit': True
                     }
+                logging.info(f"[{symbol}] BUY order created: {order['id']}")
             else:
                 pair_suspensions[symbol] = {'reason': 'budget', 'amount_required': cost}
-                return
+                raise Exception(f"Order creation failed: no order ID returned")
 
         if order and order.get('status') == 'closed':
             await process_order_fill(order, exchange, data_manager, config, engine)
     except Exception as e:
+        error_str = str(e)
         logging.error(f"Buy failed for {symbol}: {e}")
+        
+        # Handle volume minimum not met error - don't retry until acceptable volume can be met
+        if "volume minimum not met" in error_str.lower():
+            # Calculate the minimum required amount based on exchange limits
+            min_required_amount = 0
+            min_required_cost = 0
+            if market and 'limits' in market:
+                try:
+                    min_amount = float(market.get('limits', {}).get('amount', {}).get('min') or 0)
+                    min_cost = float(market.get('limits', {}).get('cost', {}).get('min') or 0)
+                    current_price = float(price or data.get('close') or 0)
+                    if current_price > 0:
+                        # We need to meet either min_amount OR min_cost
+                        min_required_amount = max(min_amount, min_cost / current_price) if min_cost > 0 else min_amount
+                        min_required_cost = min_required_amount * current_price
+                except (ValueError, TypeError):
+                    min_required_amount = 0
+                    min_required_cost = 0
+            
+            # Suspend the symbol until we have enough balance for minimum volume
+            pair_suspensions[symbol] = {
+                'reason': 'volume_minimum',
+                'min_amount': min_required_amount,
+                'min_cost': min_required_cost
+            }
+            logging.warning(f"[{symbol}] Suspended due to volume minimum not met. Need at least {min_required_amount} amount or {min_required_cost} {quote_curr} cost.")
 
 async def execute_sell(exchange, symbol, data, data_manager, engine, config, force=False, strategy=None, candle_count=0):
-    # Check for pending orders to avoid duplicates
+    # Prevent concurrent sells for the same symbol: check pending_sells first
+    async with pending_sells_lock:
+        if symbol in pending_sells:
+            logging.debug(f"[{symbol}] Skipping SELL: another sell is already in-flight for this symbol.")
+            return
+
+    # Also check pending_orders for already pending sell orders (older path)
     async with pending_orders_lock:
         for oid, po in pending_orders.items():
             if po['symbol'] == symbol and po['side'] == 'sell':
@@ -1128,9 +1794,9 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     # Use ticker price if possible for more accurate profitability check
     try:
         ticker = await exchange.fetch_ticker(symbol)
-        price = (ticker.get('last') or data['close']) if ticker else data['close']
-    except:
-        price = data['close']
+        price = float(ticker.get('last') or data['close']) if ticker else float(data['close'])
+    except (ValueError, TypeError):
+        price = float(data['close'])
 
     fee_rate = await exchange.fetch_trading_fee(symbol)
 
@@ -1140,8 +1806,16 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     free_balance = 0
     if balance and 'free' in balance:
         free_balance = balance['free'].get(asset, 0)
+        try:
+            free_balance = float(free_balance) if free_balance is not None else 0
+        except (ValueError, TypeError):
+            free_balance = 0
     elif balance:
         free_balance = balance.get(asset, 0)
+        try:
+            free_balance = float(free_balance) if free_balance is not None else 0
+        except (ValueError, TypeError):
+            free_balance = 0
 
     # Stage 1: Collect profitable lots (or all if forced)
     sell_lot_indices = []
@@ -1165,13 +1839,28 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
     min_amt = 0
     min_cost = 0
     if market and 'limits' in market:
-        min_amt = market.get('limits', {}).get('amount', {}).get('min') or 0
-        min_cost = market.get('limits', {}).get('cost', {}).get('min') or 0
+        try:
+            min_amt = float(market.get('limits', {}).get('amount', {}).get('min') or 0)
+            min_cost = float(market.get('limits', {}).get('cost', {}).get('min') or 0)
+        except (ValueError, TypeError):
+            min_amt = 0
+            min_cost = 0
+
+    try:
+        total_sell_amount = float(total_sell_amount) if total_sell_amount is not None else 0
+        min_amt = float(min_amt) if min_amt is not None else 0
+        min_cost = float(min_cost) if min_cost is not None else 0
+        price = float(price) if price is not None else 0
+    except (ValueError, TypeError):
+        total_sell_amount = 0
+        min_amt = 0
+        min_cost = 0
+        price = 0
 
     if not force and (total_sell_amount < min_amt or (total_sell_amount * price) < min_cost):
         other_indices = [i for i in range(len(positions)) if i not in sell_lot_indices]
         # Sort by performance (closest to break-even first)
-        other_indices.sort(key=lambda idx: price / positions[idx]['entry_price'], reverse=True)
+        other_indices.sort(key=lambda idx: float(price) / float(positions[idx]['entry_price']), reverse=True)
 
         for idx in other_indices:
             pos = positions[idx]
@@ -1179,10 +1868,10 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
             if pos.get('trigger_data', {}).get('auto_sell_disabled', False):
                 continue
 
-            new_amount = total_sell_amount + pos['amount']
-            new_entry_cost = total_entry_cost + pos.get('entry_total_base', 0)
+            new_amount = total_sell_amount + float(pos['amount'])
+            new_entry_cost = total_entry_cost + float(pos.get('entry_total_base', 0))
             # estimated net proceeds for the whole bundle
-            new_net_proceeds = new_amount * price * (1 - fee_rate)
+            new_net_proceeds = new_amount * price * (1 - float(fee_rate))
 
             if new_net_proceeds > new_entry_cost:
                 sell_lot_indices.append(idx)
@@ -1192,6 +1881,7 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
                     break
 
     # Cap total sell amount to actual free balance
+    free_balance = float(free_balance) if free_balance is not None else 0
     if total_sell_amount > free_balance:
         total_sell_amount = free_balance
 
@@ -1205,19 +1895,30 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
 
     try:
         # Create the order first (outside the lock) to avoid blocking other symbols/tasks
-        order = await exchange.create_order(symbol, 'sell', total_sell_amount)
+        # Mark sell in-flight to avoid consecutive triggers while we create the order
+        async with pending_sells_lock:
+            pending_sells.add(symbol)
 
-        if order and 'id' in order:
-            async with pending_orders_lock:
-                pending_orders[str(order['id'])] = {
-                    'symbol': symbol,
-                    'side': 'sell',
-                    'sell_lot_indices': sell_lot_indices,
-                    'timestamp': time.time(),
-                    'trigger_data': {},
-                    'strategy': strategy or ("Manual" if force else "Unknown"),
-                    'candle_count': candle_count
-                }
+        order = None
+        try:
+            order = await exchange.create_order(symbol, 'sell', total_sell_amount)
+            if order and 'id' in order:
+                async with pending_orders_lock:
+                    pending_orders[str(order['id'])] = {
+                        'symbol': symbol,
+                        'side': 'sell',
+                        'sell_lot_indices': sell_lot_indices,
+                        'timestamp': time.time(),
+                        'trigger_data': {},
+                        'strategy': strategy or ("Manual" if force else "Unknown"),
+                        'candle_count': candle_count
+                    }
+        except Exception as exc:
+            # Ensure we clear the in-flight marker on failure to create order
+            async with pending_sells_lock:
+                if symbol in pending_sells:
+                    pending_sells.discard(symbol)
+            raise
 
         # If order is already closed, process it immediately
         # We call this outside the lock to avoid re-entrancy issues with process_order_fill
@@ -1227,6 +1928,10 @@ async def execute_sell(exchange, symbol, data, data_manager, engine, config, for
         logging.error(f"Aggregated sell failed for {symbol}: {e}")
         async with bot_lock:
             bot_state[symbol]['position'] = data_manager.get_position(symbol)
+        # Clear any in-flight marker on unexpected failure
+        async with pending_sells_lock:
+            if symbol in pending_sells:
+                pending_sells.discard(symbol)
 
 async def process_order_fill(order, exchange, data_manager, config, engine):
     """
@@ -1237,13 +1942,20 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     if status not in terminal_statuses:
         return False
 
-    order_id = str(order['id'])
+    order_id = str(order.get('id'))
     async with processed_orders_lock:
         if order_id in processed_orders:
             # Ensure it's removed from pending even if already processed
             async with pending_orders_lock:
                 if order_id in pending_orders:
-                    pending_orders.pop(order_id)
+                    meta = pending_orders.pop(order_id)
+                    # Also clear pending_sells if this was a sell
+                    try:
+                        if meta and meta.get('side') == 'sell':
+                            async with pending_sells_lock:
+                                pending_sells.discard(meta.get('symbol'))
+                    except Exception:
+                        pass
             return False
         processed_orders.append(order_id)
 
@@ -1271,29 +1983,72 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
     if not symbol or not side:
         return False
 
-    filled_amount = order.get('filled', 0.0)
-    actual_price = order.get('price') or order.get('average', 0.0)
-    cost = order.get('cost') or (filled_amount * actual_price)
+    # Normalize numeric fields safely
+    filled_amount = safe_float(order.get('filled', 0.0) or 0.0)
+    actual_price = safe_float(order.get('price') or order.get('average', 0.0) or 0.0)
+    cost = safe_float(order.get('cost') or (filled_amount * actual_price) or 0.0)
 
-    fee_cost = order.get('fee', {}).get('cost', 0.0)
-    fee_currency = order.get('fee', {}).get('currency')
-    total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+    fee_obj = order.get('fee') or {}
+    try:
+        fee_cost_raw = fee_obj.get('cost', 0.0) if isinstance(fee_obj, dict) else 0.0
+    except Exception:
+        fee_cost_raw = 0.0
+    fee_cost = safe_float(fee_cost_raw, 0.0)
+    fee_currency = fee_obj.get('currency') if isinstance(fee_obj, dict) else None
+    total_fee = 0.0
+    try:
+        total_fee = await exchange.get_fee_in_quote(symbol, fee_cost, fee_currency)
+        total_fee = safe_float(total_fee, 0.0)
+    except Exception:
+        total_fee = safe_float(fee_cost, 0.0)
+
+    # Fallback: if fee missing or zero, estimate using trading fee rate and filled amount*price
+    try:
+        if (not total_fee or float(total_fee) == 0.0) and filled_amount > 0 and actual_price > 0:
+            try:
+                fee_rate = await exchange.fetch_trading_fee(symbol)
+            except Exception:
+                fee_rate = config.get('exchange', {}).get('default_fee', 0.001)
+            try:
+                est_fee = filled_amount * actual_price * float(fee_rate or 0)
+                total_fee = float(est_fee)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     trigger_data = meta['trigger_data'] if meta else {}
-    timestamp = meta['timestamp'] if meta else time.time()
+    timestamp = time.time()
+    if meta and 'timestamp' in meta:
+        try:
+            timestamp = safe_float(meta.get('timestamp'), time.time())
+        except Exception:
+            timestamp = time.time()
     strategy = meta.get('strategy', 'Unknown') if meta else 'Unknown'
     candle_count = meta.get('candle_count', 0) if meta else 0
 
     if side == 'buy':
+        # Wait at least 2 minutes before trying to fetch order to ensure it's propagated on the exchange
+        order_age = time.time() - timestamp
+        if order_age < 120:  # 120 seconds = 2 minutes
+            remaining_wait = 120 - order_age
+            logging.info(f"[{symbol}] Order {order_id} is {order_age:.0f}s old, waiting {remaining_wait:.0f}s more before fetching...")
+            await asyncio.sleep(remaining_wait)
+        
         # Verify amount on exchange to account for fees deducted from the acquired asset
-        verified_order = await exchange.fetch_order(order_id, symbol)
+        try:
+            verified_order = await exchange.fetch_order(order_id, symbol)
+        except Exception as e:
+            logging.warning(f"[{symbol}] Failed to fetch order {order_id} after 2 minute wait: {e}. Proceeding without verification.")
+            verified_order = None
+        
         if verified_order and verified_order.get('status') == 'closed':
-            filled_amount = verified_order.get('filled', filled_amount)
-            actual_price = verified_order.get('price') or verified_order.get('average', actual_price)
-            cost = verified_order.get('cost') or (filled_amount * actual_price)
+            filled_amount = float(verified_order.get('filled', filled_amount) or 0)
+            actual_price = float(verified_order.get('price') or verified_order.get('average', actual_price) or 0)
+            cost = float(verified_order.get('cost') or (filled_amount * actual_price) or 0)
             fee_data = verified_order.get('fee')
             if fee_data:
-                fee_cost = fee_data.get('cost', 0.0)
+                fee_cost = float(fee_data.get('cost', 0.0) or 0)
                 fee_currency = fee_data.get('currency')
 
                 # If fee was deducted from the acquired asset (base currency), update filled_amount
@@ -1342,7 +2097,7 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
                     if i >= len(positions): continue
 
                     pos = positions[i]
-                    lot_close_amt = min(pos['amount'], remaining_filled)
+                    lot_close_amt = min(float(pos['amount'] or 0), remaining_filled)
                     if lot_close_amt <= 0: continue
 
                     if idx == len(sell_lot_indices) - 1 or lot_close_amt >= remaining_filled - 1e-10:
@@ -1354,8 +2109,9 @@ async def process_order_fill(order, exchange, data_manager, config, engine):
                         current_lot_received = total_net_received * proportion
                         current_lot_fee = total_fee * proportion
 
-                    entry_cost_proportion = (lot_close_amt / pos['amount']) if pos['amount'] > 0 else 1.0
-                    entry_cost_part = pos.get('entry_total_base', 0.0) * entry_cost_proportion
+                    pos_amount = float(pos['amount'] or 0)
+                    entry_cost_proportion = (lot_close_amt / pos_amount) if pos_amount > 0 else 1.0
+                    entry_cost_part = float(pos.get('entry_total_base', 0.0) or 0) * entry_cost_proportion
                     total_entry_cost_of_filled += entry_cost_part
                     lot_profit = current_lot_received - entry_cost_part
 
@@ -1447,7 +2203,17 @@ async def watch_orders_task(exchange, data_manager, config, engine):
         try:
             async for orders in exchange.watch_orders():
                 for order in orders:
-                    await process_order_fill(order, exchange, data_manager, config, engine)
+                    try:
+                        await process_order_fill(order, exchange, data_manager, config, engine)
+                    except TypeError as te:
+                        logging.error(f"TypeError processing WS order: {te}. Attempting to sanitize order and retry. Order: {order}")
+                        try:
+                            sanitize_order_dict(order)
+                            await process_order_fill(order, exchange, data_manager, config, engine)
+                        except Exception as e2:
+                            logging.exception(f"Failed to process order after sanitization: {e2}. Order: {order}")
+                    except Exception as e:
+                        logging.exception(f"Unexpected error processing WS order: {e}. Order: {order}")
         except Exception as e:
             if not shutdown_event.is_set():
                 err_msg = str(e).lower()
@@ -1621,11 +2387,11 @@ def make_dashboard(config):
                 total_fee = sum(p.get('entry_fee', 0) for p in pos)
                 amt_str = f"{format_amt(total_amount, config=config)} ({len(pos)})"
                 entry_str = format_price(avg_entry_price, config=config)
-                fee_str = f"{format_price(total_fee, config=config)} {quote}"
+                fee_str = f"{format_price(total_fee, config=config)} {quote}" if total_fee > 0 else "-"
             else:
                 amt_str = format_amt(pos['amount'], config=config)
                 entry_str = format_price(pos['entry_price'], config=config)
-                fee_str = f"{format_price(pos.get('entry_fee', 0), config=config)} {quote}"
+                fee_str = f"{format_price(pos.get('entry_fee', 0), config=config)} {quote}" if pos.get('entry_fee', 0) > 0 else "-"
 
         macd_hist = data.get('macd_hist', 0)
         macd_threshold = ui_cfg.get('macd_display_threshold', 0.001)
@@ -1701,7 +2467,8 @@ def make_dashboard(config):
 
     if show_chart and chart_symbol:
         chart_content = render_ascii_chart(chart_symbol, config)
-        pairs_panel = Panel(chart_content, title=f"[bold]K-Lines: {chart_symbol}[/]", border_style="bold magenta")
+        chart_tf = symbol_timeframes.get(chart_symbol, default_candle_timeframe)
+        pairs_panel = Panel(chart_content, title=f"[bold]Candles for {chart_symbol} at {chart_tf}[/]", border_style="bold magenta")
 
     if not startup_complete:
         waiting_text = Text.from_markup("\n\n\n\n\n[bold blink yellow]Waiting for system initialization...[/]\n", justify="center")
@@ -1758,20 +2525,28 @@ async def buy_queue_processor_task(exchange, data_manager, engine, config):
             # Sort by expected profit descending
             buy_queue.sort(key=lambda x: x['expected_profit'], reverse=True)
 
-            # Pick the best one
-            best_buy = buy_queue[0]
-            logging.info(f"[Queue] Processing turn. Highest profit: {best_buy['symbol']} ({best_buy['expected_profit']:.4f}).")
+            # Process all items in queue, starting with highest profit
+            items_to_keep = []
+            for item in buy_queue:
+                best_buy = item
+                logging.info(f"[Queue] Processing {best_buy['symbol']} (Profit: {best_buy['expected_profit']:.4f}).")
 
-            # Execute buy for the best one
-            asyncio.create_task(execute_buy(
-                exchange, best_buy['symbol'], best_buy['data'],
-                data_manager, engine, config,
-                strategy=best_buy['strategy'],
-                candle_count=best_buy['candle_count']
-            ))
+                try:
+                    # Execute buy and wait for it to complete
+                    await execute_buy(
+                        exchange, best_buy['symbol'], best_buy['data'],
+                        data_manager, engine, config,
+                        strategy=best_buy['strategy'],
+                        candle_count=best_buy['candle_count']
+                    )
+                    # Only keep in queue if execution failed (it will raise exception)
+                    # If successful, don't re-queue
+                except Exception as e:
+                    logging.error(f"[Queue] Buy failed for {best_buy['symbol']}: {e}. Keeping in queue for retry.")
+                    items_to_keep.append(best_buy)
 
-            # Clear queue for the next turn
-            buy_queue.clear()
+            # Update queue with only items that failed (for retry)
+            buy_queue[:] = items_to_keep
 
 async def heartbeat_task(exchange, data_manager, engine, config):
     while not shutdown_event.is_set():
@@ -1894,86 +2669,101 @@ async def main():
     if 'pairs' not in config:
         config['pairs'] = {}
 
-    # Discover and select pairs based on volume, configuration, and balances
-    logging.info("Retrieving best pairs based on 24h volume and balance analysis...")
-    global discovery_pool, active_pairs
+    # Discover and select pairs based on balances and 24h volume
+    logging.info("Retrieving best pairs based on balances and 24h volume...")
+    global discovery_pool, active_pairs, default_candle_timeframe
     try:
-        # Fetch initial balances and tickers early to reuse
-        logging.info("Retrieving initial balances and tickers...")
-        initial_balance = await asyncio.wait_for(exchange.fetch_balance(), timeout=30)
-        async with bot_lock:
-            global current_balances
-            current_balances = initial_balance
-
-        # 1. Fetch 24h tickers to find high activity pairs
-        all_tickers = await exchange.fetch_tickers()
-
-        quote_asset = config.get('quote_asset')
-        # Target max number of pairs to monitor
+        # 1. Build discovery pool from available balances
+        discovery_pool = await build_discovery_pool_from_balances(exchange, config)
+        
+        # 2. If discovery pool is empty, fallback to config pairs
+        if not discovery_pool:
+            discovery_pool = list(config.get('pairs', {}).keys())
+        
+        # 3. Fetch trade counts for the last hour for discovery pool symbols
+        # This populates pair_hour_trades before trading starts
+        logging.info("Fetching initial trade counts for the last hour... PLEASE WAIT... It can be taking up to three minutes...")
         num_pairs = int(config.get('max_number_of_pairs', 40))
-        discovery_pool_size = num_pairs * 2
-
-        # Candidate symbols: Must end with quote_asset
-        candidates = []
-        for symbol, ticker in all_tickers.items():
-            if not symbol.endswith(f"/{quote_asset}"):
+        
+        # Fetch trades for discovery pool symbols
+        for symbol in discovery_pool:
+            try:
+                trades = await exchange.fetch_trades(symbol, limit=10)
+                now = time.time()
+                if symbol not in pair_hour_trades:
+                    pair_hour_trades[symbol] = deque()
+                pair_hour_trades[symbol].clear()
+                one_hour_ago = now - 3600
+                for trade_data in trades:
+                    trade_time = trade_data['timestamp'] / 1000
+                    if trade_time >= one_hour_ago:
+                        pair_hour_trades[symbol].append(trade_time)
+                    else:
+                        break
+                if trades:
+                    pair_last_trade_time[symbol] = trades[-1]['timestamp'] / 1000
+            except Exception as e:
+                logging.debug(f"Failed to fetch initial trades for {symbol}: {e}")
                 continue
+        
+        # 4. Initialize active pairs from discovery pool (only buyable pairs)
+        num_pairs = int(config.get('max_number_of_pairs', 40))
 
-            # Initial ranking based on 24h volume (quoteVolume if available, otherwise estimate)
-            vol = ticker.get('quoteVolume') or ((ticker.get('baseVolume') or 0) * (ticker.get('last') or 0))
-            candidates.append({
-                'symbol': symbol,
-                'volume': vol,
-                'base': symbol.split('/')[0]
-            })
+        # Determine buyable quotes (non-dust free balances)
+        try:
+            bal = await exchange.fetch_balance()
+            free_bal = bal.get('free', {}) if isinstance(bal, dict) and 'free' in bal else (bal if isinstance(bal, dict) else {})
+            currencies_with_balance = []
+            for c, v in free_bal.items():
+                try:
+                    amt = 0
+                    if isinstance(v, dict):
+                        amt = float(v.get('free') or v.get('total') or 0)
+                    else:
+                        amt = float(v or 0)
+                    if amt > float(config.get('exchange', {}).get('dust_threshold_amount', 1e-6)):
+                        currencies_with_balance.append(c)
+                except Exception:
+                    continue
+        except Exception:
+            currencies_with_balance = []
 
-        # Sort by volume descending for discovery pool
-        candidates.sort(key=lambda x: x['volume'], reverse=True)
-        discovery_pool = [c['symbol'] for c in candidates[:discovery_pool_size]]
+        buyable_quotes = set(currencies_with_balance)
 
-        # Initial active pairs are the top volume ones
-        top_activity_pairs = discovery_pool[:num_pairs]
+        active_pairs = []
 
-        # 2. Add pairs from inventory if enabled
-        inventory_pairs = []
-        if config.get('include_inventory_pairs') or config.get('include_all_quote_pairs'):
-            balance = initial_balance
-            free_balances = balance.get('free', {}) if isinstance(balance, dict) and 'free' in balance else {}
+        # First, for each currency with balance, prefer pairs from discovery_pool where quote == currency
+        for curr in currencies_with_balance:
+            if len(active_pairs) >= num_pairs:
+                break
+            for sym in discovery_pool:
+                if '/' not in sym: continue
+                if sym not in exchange.markets: continue
+                base, quote = sym.split('/')
+                if quote == curr and sym not in active_pairs:
+                    active_pairs.append(sym)
+                    break
 
-            for asset, amount in free_balances.items():
-                if amount <= 0: continue
-
-                # Check for Base Asset matches
-                if config.get('include_inventory_pairs'):
-                    symbol = f"{asset}/{quote_asset}"
-                    if symbol in all_tickers and symbol not in top_activity_pairs:
-                        inventory_pairs.append(symbol)
-
-                # Check for any pair where user has the Quote Asset
-                if config.get('include_all_quote_pairs'):
-                    for s in all_tickers.keys():
-                        if s.endswith(f"/{asset}") and s not in top_activity_pairs and s not in inventory_pairs:
-                            inventory_pairs.append(s)
-
-        initial_active_set = list(set(top_activity_pairs + inventory_pairs + list(config['pairs'].keys())))
-
-        # Filter pairs that exist in markets and ensure discovery pool contains them too
-        initial_active_set = [p for p in initial_active_set if p in exchange.markets]
-        discovery_pool = [p for p in discovery_pool if p in exchange.markets]
-
-        # Ensure initial active set doesn't exceed too much or respect config
-        active_pairs = initial_active_set[:num_pairs]
-        # Make sure inventory pairs are prioritized if they have positions
-        for p in initial_active_set:
-            if p not in active_pairs and (data_manager.get_position(p) or p in config['pairs']):
-                active_pairs.append(p)
+        # Then fill remaining slots with discovery_pool symbols whose quote is buyable
+        for sym in discovery_pool:
+            if len(active_pairs) >= num_pairs:
+                break
+            if '/' not in sym: continue
+            if sym not in exchange.markets: continue
+            base, quote = sym.split('/')
+            if buyable_quotes and quote not in buyable_quotes:
+                continue
+            if sym not in active_pairs:
+                active_pairs.append(sym)
 
         logging.info(f"Initialized discovery pool with {len(discovery_pool)} pairs.")
         logging.info(f"Initial active set: {len(active_pairs)} pairs.")
 
     except Exception as e:
-        logging.error(f"Failed to dynamically retrieve pairs: {e}")
-        active_pairs = list(config['pairs'].keys())
+        logging.error(f"Failed to initialize pairs: {e}")
+        # Fallback to config pairs
+        active_pairs = list(config.get('pairs', {}).keys())
+        discovery_pool = active_pairs[:40]
 
     if not active_pairs:
         logging.error("No pairs could be initialized.")
@@ -2022,31 +2812,86 @@ async def main():
             async with semaphore:
                 try:
                     logging.info(f"Fetching initial 1s candles for {symbol} (Target: 10000)...")
-                    ohlcv_1s = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=10000)
-                    df_1s = pd.DataFrame(ohlcv_1s, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    ohlcv_res, actual_tf = await exchange.fetch_ohlcv_10k(symbol, '1s', limit=10000)
+                    df_1s = pd.DataFrame(ohlcv_res, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
                     for col in ['open', 'high', 'low', 'close', 'volume']:
                         df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
                     df_1s.set_index('timestamp', inplace=True)
                     ohlcv_cache[symbol] = df_1s
-                    logging.info(f"[{symbol}] Loaded {len(df_1s)} candles (1s).")
+                    symbol_timeframes[symbol] = actual_tf
+                    logging.info(f"[{symbol}] Loaded {len(df_1s)} candles ({actual_tf}).")
 
                 except Exception as e:
-                    logging.error(f"Failed to load candles for {symbol}: {e}")
-                    # Fallback empty dataframes to avoid crashes
-                    empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
-                    ohlcv_cache[symbol] = empty_df
+                    logging.warning(f"Failed to load candles for {symbol}: {e}")
+                    # Try to find an alternative symbol format that works
+                    alt_symbol = None
+                    if hasattr(exchange, 'markets') and exchange.markets:
+                        # Try to find the symbol in available markets
+                        if symbol in exchange.markets:
+                            alt_symbol = symbol
+                        else:
+                            # Try common variations
+                            parts = symbol.split('/') if '/' in symbol else []
+                            if len(parts) == 2:
+                                base, quote = parts
+                                variations = [
+                                    f"{base}/{quote}",  # original format
+                                    f"{quote}/{base}",  # reversed
+                                ]
+                                # Try Kraken-specific variations
+                                if base == "BTC": variations.append(f"XBT/{quote}")
+                                if base == "XBT": variations.append(f"BTC/{quote}")
+                                # Try to find any market that contains the same assets
+                                for market_symbol, market_info in exchange.markets.items():
+                                    market_parts = market_symbol.split('/') if '/' in market_symbol else []
+                                    if len(market_parts) == 2:
+                                        market_base, market_quote = market_parts
+                                        if (base == market_base and quote == market_quote) or \
+                                           (base == market_quote and quote == market_base):
+                                            variations.append(market_symbol)
+                                
+                                for var in variations:
+                                    if var in exchange.markets and var != symbol:
+                                        alt_symbol = var
+                                        break
+                    
+                    if alt_symbol and alt_symbol != symbol:
+                        try:
+                            logging.info(f"Trying alternative symbol {alt_symbol} for {symbol}...")
+                            ohlcv_res, actual_tf = await exchange.fetch_ohlcv_10k(alt_symbol, '1s', limit=10000)
+                            df_1s = pd.DataFrame(ohlcv_res, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                            df_1s['timestamp'] = pd.to_datetime(df_1s['timestamp'], unit='ms')
+                            for col in ['open', 'high', 'low', 'close', 'volume']:
+                                df_1s[col] = pd.to_numeric(df_1s[col], errors='coerce')
+                            df_1s.set_index('timestamp', inplace=True)
+                            ohlcv_cache[symbol] = df_1s
+                            symbol_timeframes[symbol] = actual_tf
+                            logging.info(f"[{symbol}] Loaded {len(df_1s)} candles ({actual_tf}) using {alt_symbol}.")
+                        except Exception as e2:
+                            logging.debug(f"Alternative symbol {alt_symbol} also failed for {symbol}: {e2}")
+                            # Fallback empty dataframes to avoid crashes
+                            empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                            ohlcv_cache[symbol] = empty_df
+                    else:
+                        # Fallback empty dataframes to avoid crashes
+                        empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                        ohlcv_cache[symbol] = empty_df
 
         await asyncio.gather(*[init_symbol(s) for s in active_pairs])
 
-    # Exclude pairs that have no candles after initial download
+    default_candle_timeframe, _ = await exchange._get_supported_timeframe('1s')
+    for symbol in active_pairs:
+        symbol_timeframes.setdefault(symbol, default_candle_timeframe)
+
+    # Keep pairs even with empty candle data for price watching and trading
     async with ohlcv_lock:
-        to_remove = [s for s in active_pairs if s not in ohlcv_cache or ohlcv_cache[s].empty]
-        for s in to_remove:
-            logging.warning(f"[{s}] No initial candle data available. Excluding from active monitoring.")
-            if s in bot_state:
-                del bot_state[s]
-            active_pairs.remove(s)
+        for s in active_pairs:
+            if s not in ohlcv_cache:
+                # Ensure all active pairs have at least an empty dataframe
+                empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']).set_index('timestamp')
+                ohlcv_cache[s] = empty_df
+                logging.warning(f"[{s}] No candle data available. Will use empty cache for price watching.")
 
     # Analysis Executor
     max_workers = max(1, (os.cpu_count() or 4) - 2)
@@ -2068,9 +2913,12 @@ async def main():
 
     # Start Global OHLCV Watcher
     ohlcv_task = asyncio.create_task(watch_ohlcv_global_task(exchange, active_pairs, config, data_manager, pattern_manager, engine, device, executor))
-
-    # Start Trades Pool Watcher
-    trades_task = asyncio.create_task(watch_trades_pool_task(exchange, discovery_pool, config, data_manager))
+    
+    # Start Trades Count Fetcher (fetch instead of watch)
+    trades_task = asyncio.create_task(fetch_trades_count_task(exchange, config))
+    
+    # Start Discovery Pool Refresher
+    background_tasks.append(asyncio.create_task(refresh_discovery_pool_task(exchange, config)))
 
     # Ensure all watchers are setup (Wait a bit for connections to stabilize)
     await asyncio.sleep(2)

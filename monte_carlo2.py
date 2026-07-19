@@ -135,7 +135,11 @@ class MonteCarloEngine:
         """
         mc_cfg = self.config.get('monte_carlo', {})
         min_candles = mc_cfg.get('validation_min_candles', 4000)
-        if len(df) < min_candles: return 1.0
+        
+        # Use available data, but ensure minimum of 20 candles for stable calculations
+        # Don't require the full min_candles if data is limited
+        effective_min = max(20, min(min_candles, len(df)))
+        if len(df) < effective_min: return 1.0
 
         close = df["close"].values
         valid_indices = ~np.isnan(close)
