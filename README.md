@@ -1,6 +1,6 @@
 # 🛸 CCXT Pro Trading Bot
 
-A universal cryptocurrency trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports theoretically **any exchange** provided by the CCXT library (Binance, Kraken, OKX, Coinbase, etc.) but it's been tested only on Kraken and Binance.
+A universal cryptocurrency trading bot implemented in Python, leveraging multi-core processing, GPU acceleration, and evidence-based strategies. It supports theoretically **any exchange** provided by the CCXT library (Binance, Kraken, OKX, Coinbase, etc.) but it's been tested only on Kraken.
 
 ---
 
@@ -13,7 +13,7 @@ This bot implements strategies and logic recommended by leading empirical studie
 
 ### 🛡 Risk Management
 - **Intelligent Suspension**: Automatically suspends trading for symbols where orders fail or if the budget is insufficient. Resumes only when the required budget becomes available.
-- **Dynamic Sizing**: Position sizes are calculated as a percentage of your available balance, divided by the maximum number of lots allowed to maintain controlled exposure.
+- **Dynamic Sizing**: Position sizes are calculated as a percentage of your available balance.
 
 ---
 
