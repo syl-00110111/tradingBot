@@ -41,7 +41,10 @@ Store your API credentials and preferred exchange.
 {
   "api_key": "YOUR_KEY",
   "api_secret": "YOUR_SECRET",
-  "exchange_id": "binance"
+  "exchange_id": "kraken"
+  "options": {
+        "defaultType": "spot"
+    }
 }
 ```
 *   **`exchange_id`**: The CCXT ID of the exchange (e.g., `binance`, `kraken`, `okx`, `coinbase`, `gateio`).
