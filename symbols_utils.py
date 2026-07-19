@@ -10,142 +10,119 @@ from typing import Any, List, Dict, Optional
 import json
 import os
 import random
+import time
+import safe_json
 
 import market_utils
 
-
-def updateTradingCount(symbol: Optional[str], exchange: Any, volumes_file: str = 'volumes_trades_data.json') -> int:
-    """Update trades count for symbol by fetching recent trades and persisting volumes file.
-    Returns new trades_count (int) or 0 on failure.
-    """
+def updateTradingCount(symbol):
     try:
-        with open(volumes_file, 'r') as f:
-            _volumes = json.load(f)
+        with open('volumes_trades_data.json','r') as f: _volumes = json.load(f)
     except Exception as e:
         raise ValueError(f"volume trades data file problem: {e}")
     trades_count = 0
     for _vol in _volumes:
         if symbol == _vol.get('symbol') and symbol is not None:
             _since = _vol.get('timestamp')
-            now_minus_4h = int(__import__('time').time()) * 1000 - (4*3600*1000)
+            # normalize _since to an integer timestamp (ms);
+            # if missing/invalid, consider it as current time (so we won't fetch historical trades)
+            now_minus_4h = int(time.time()) * 1000 - (4*3600*1000)
             if _since is None:
                 _since_int = now_minus_4h
             else:
-                try:
-                    _since_int = int(_since)
-                except Exception:
-                    _since_int = now_minus_4h
+                _since_int = int(_since)
+            # if now < since by 4 hours
             if (_since_int >= now_minus_4h) or _vol.get('trades_count') == 1000:
-                try:
-                    market_utils.respect_rate_limit(exchange)
-                    trades = exchange.fetch_trades(symbol, now_minus_4h)
-                    trades_count = len(trades) if trades is not None else 0
-                    # update
-                    _vol['trades_count'] = trades_count
-                    _vol['timestamp'] = int(__import__('time').time())
-                except Exception as e:
-                    market_utils.log_exception(e, "updateTradingCount:fetch_trades")
+                #console.print(f"_since: {_since_int}, since_4h: {now_minus_4h}, int(time.time()): {int(time.time())}")
+                time.sleep(exchange.rateLimit / 1000)
+                trades = exchange.fetch_trades(symbol, now_minus_4h)
+                trades_count = len(trades) if trades is not None else 0
+                # console.print(f"Old trades count for {symbol}: {_vol['trades_count']}")
+                console.print(f"New fetched trades count (last 4h) for {symbol}: {trades_count}")
+                # mettre à jour avec le nouveau volume
+                _vol['trades_count'] = trades_count
+                _vol['timestamp'] = int(time.time())
                 break
     try:
         try:
-            market_utils.write_json_atomic(volumes_file, _volumes)
-        except Exception as e:
-            market_utils.log_exception(e, "updateTradingCount:backup")
-            with open(volumes_file, 'w') as f:
+            safe_json.atomic_write_json('volumes_trades_data.json', _volumes, backup=True, indent=4)
+        except Exception:
+            with open('volumes_trades_data.json', 'w') as f:
                 json.dump(_volumes, f, indent=4)
+        # console.print(f"Fichier volumes_trades_data.json mis à jour pour le symbole {symbol}.")
     except Exception as e:
-        market_utils.log_exception(e, "updateTradingCount:write")
+        console.print(f"Impossible de mettre à jour le fichier volumes_trades_data.json: {e} pour le symbole {symbol}")
     return trades_count
 
-
-def computeSymbols(balance: Dict, previousPairs: Optional[List] = None, markets_file: str = 'markets.json', volumes_file: str = 'volumes_trades_data.json', forbidAssets: Optional[List] = None, baseAssets: Optional[List] = None, maxNumPairs: int = 50, miniCount: int = 600) -> List:
-    """Compute list of symbols to track based on balance, markets and volumes.
-    Returns list of symbol entries similar to original botv4 computeSymbols.
-    """
+def computeSymbols(balance, previousPairs):
     __symbols = []
-    if forbidAssets is None:
-        forbidAssets = ['AKE', 'DCR', 'USDT', 'XMR']
-    if baseAssets is None:
-        baseAssets = ["USD", "EUR"]
-
-    # handle balance cleanup
-    sourceAssets: List[str] = []
-    if isinstance(balance, dict):
-        free_balances = balance.get('free', {}) or {}
-        if isinstance(free_balances, dict):
+    # balance existante
+    # # Vérifier que 'balance' est un dictionnaire valide
+    if not isinstance(balance, dict):
+        console.print("[ERROR] La structure 'balance' est invalide.")
+    elif 'free' not in balance:
+        console.print("[ERROR] La clé 'free' est manquante dans 'balance'.")
+    else:
+        free_balances = balance.get('free')
+        if not isinstance(free_balances, dict):
+            console.print("[ERROR] La clé 'free' ne contient pas un dictionnaire valide.")
+        else:
             for asset, amount in free_balances.items():
                 try:
-                    if float(amount) > 0:
+                    # Convertir le montant en float
+                    amount_float = float(amount)
+                    # Ajouter l'actif à la liste si le montant est supérieur à 0
+                    if amount_float > 0:
                         sourceAssets.append(asset)
-                except Exception:
-                    market_utils.log_exception(Exception(f"bad balance amount for {asset}"), "computeSymbols:balance_asset")
-    # read markets and volumes
+                        # console.print(f"source asset: {asset} {amount_float}")
+                except (ValueError, TypeError) as e:
+                    console.print(f"[WARNING] Impossible de convertir le montant pour l'actif '{asset}' : {e}")
     try:
-        with open(markets_file, 'r') as f:
-            _markets = json.load(f)
-        with open(volumes_file, 'r') as f:
-            _volumes = json.load(f)
-    except Exception as e:
-        market_utils.log_exception(e, "computeSymbols:read_files")
-        return __symbols
-
-    # existing_symbols
-    if previousPairs is None:
-        previousPairs = []
-    try:
-        existing_symbols = {str(p[0]).upper() for p in previousPairs if isinstance(p, (list, tuple)) and len(p) > 0 and p[0] is not None}
-    except Exception as e:
-        market_utils.log_exception(e, "computeSymbols:existing_symbols")
-        existing_symbols = set()
-
-    _g = {'id': []}
-    for _v in _volumes:
+        with open('markets.json','r') as f: _markets = json.load(f)
+        with open('volumes_trades_data.json','r') as f: _volumes = json.load(f)
+        # build a set of existing symbols (normalized) to compare reliably
         try:
-            if _v.get('trades_count', 0) > miniCount:
-                _g['id'].append(_v.get('id'))
+            existing_symbols = {str(p[0]).upper() for p in previousPairs if isinstance(p, (list, tuple)) and len(p) > 0 and p[0] is not None}
         except Exception:
-            continue
-
-    sell_candidates = []
-    volume_candidates = []
-
-    # _markets can be dict or list
-    try:
-        items = _markets.items() if isinstance(_markets, dict) else list(_markets)
-    except Exception:
-        items = []
-
-    for m in items:
-        try:
-            market = m[1] if isinstance(m, tuple) else m
-            mb = market.get('base') if isinstance(market, dict) else None
-            mq = market.get('quote') if isinstance(market, dict) else None
-            mid = market.get('id') if isinstance(market, dict) else None
-            symbol = market.get('symbol') if isinstance(market, dict) else None
-            if not mb or not mq or not mid or not symbol:
-                continue
-            if mb in forbidAssets or mq in forbidAssets:
-                continue
-            if (mid in _g.get('id')) and (mq in baseAssets):
-                a = [symbol, mid, mb, mq, market.get('limits', {}).get('amount', {}).get('min'), market.get('precision', {}).get('price'), market.get('precision', {}).get('amount')]
-                if (mb in sourceAssets) and (str(a[0]).upper() not in existing_symbols):
-                    sell_candidates.append(a)
-                    existing_symbols.add(str(a[0]).upper())
-                elif str(a[0]).upper() not in existing_symbols:
-                    volume_candidates.append(a)
-                    existing_symbols.add(str(a[0]).upper())
-        except Exception as e:
-            market_utils.log_exception(e, "computeSymbols:market_loop")
-            continue
-
-    combined = []
-    for item in sell_candidates:
-        if len(combined) >= maxNumPairs:
-            break
-        combined.append(item)
-    for item in volume_candidates:
-        if len(combined) >= maxNumPairs:
-            break
-        combined.append(item)
-    __symbols.extend(combined)
+            existing_symbols = set()
+        _g = {'id':[]}
+        for _v in _volumes:
+            if _v.get('trades_count') > miniCount:
+                # tri du volume à part
+                _g['id'].append(_v.get('id'))
+        # construire deux listes distinctes : prioriser les paires à vendre (base dans sourceAssets), puis les paires volume
+        sell_candidates = []
+        volume_candidates = []
+        _a = []
+        for _m in _markets.items():
+            _a = [_m[1].get('symbol'), _m[1].get('id'), _m[1].get('base'), _m[1].get('quote'), _m[1].get('limits').get('amount').get('min'), _m[1].get('precision').get('price'), _m[1].get('precision').get('amount')]
+            # si pas interdit dans notre zone
+            if (_m[1].get('base') not in forbidAssets) and (_m[1].get('quote') not in forbidAssets):
+                # paire présente dans les volumes importants et quote dans monnaies d'usage
+                if (_m[1].get('id') in _g.get('id')) and (_m[1].get('quote') in baseAssets):
+                    # si la base est dans la balance -> priorité vente
+                    if (_m[1].get('base') in sourceAssets) and (str(_a[0]).upper() not in existing_symbols):
+                        sell_candidates.append(_a)
+                        existing_symbols.add(str(_a[0]).upper())
+                        console.print(f"balance add: {_m[1].get('symbol')}")
+                    # sinon, c'est une paire volume
+                    elif (str(_a[0]).upper() not in existing_symbols):
+                        volume_candidates.append(_a)
+                        existing_symbols.add(str(_a[0]).upper())
+                        console.print(f"volume add: {_a[0]}")
+        # combiner en respectant maxNumPairs : priorité aux ventes
+        combined = []
+        # ajouter d'abord les ventes
+        for item in sell_candidates:
+            if len(combined) >= maxNumPairs:
+                break
+            combined.append(item)
+        # compléter avec les paires volume si besoin
+        for item in volume_candidates:
+            if len(combined) >= maxNumPairs:
+                break
+            combined.append(item)
+        __symbols.extend(combined)
+    except Exception as e:
+        console.print(f"Exception computeSymbols: {e}")
     return __symbols

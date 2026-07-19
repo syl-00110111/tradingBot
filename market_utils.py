@@ -64,7 +64,10 @@ def read_json_file(path: str, default=None):
     return default
 
 
-def check_candles_consistency(symbol: str, expected_interval_ms: int = 60000) -> List:
+def check_candles_consistency(symbol, expected_interval_ms=60000):
+    # Verify temporal coherence for the symbol's local OHLCV cache.
+    # If an inconsistency is detected, discard all data chronologically preceding the first inconsistency
+    # and persist the trimmed file.
     try:
         fpath = f"ohlcv_data_{symbol}_1m.json"
         if not os.path.exists(fpath):
@@ -76,11 +79,11 @@ def check_candles_consistency(symbol: str, expected_interval_ms: int = 60000) ->
         prev = int(data[0][0])
         issue = None
         bad_index = None
+        # Parcourir les lignes à partir de la deuxième
         for i, row in enumerate(data[1:], start=1):
             try:
                 ts = int(row[0])
-            except Exception as e:
-                log_exception(e, "check_candles_consistency:parse_ts")
+            except Exception:
                 issue = 'invalid timestamp'
                 bad_index = i
                 break
@@ -89,254 +92,176 @@ def check_candles_consistency(symbol: str, expected_interval_ms: int = 60000) ->
                 bad_index = i
                 break
             diff = ts - prev
+            # allow a small tolerance (50%) for missing/faster samples
             if diff > expected_interval_ms * 1.5:
                 issue = f'gap {diff}ms'
                 bad_index = i
                 break
             prev = ts
         if issue and bad_index is not None:
+            console.print(f"Candle inconsistency detected: file={fpath} index={bad_index} issue={issue}")
             try:
+                # keep only data from the first good candle (bad_index) onwards
                 new_data = data[bad_index:]
                 try:
-                    write_json_atomic(fpath, new_data)
+                    safe_json.atomic_write_json(fpath, new_data, backup=True, indent=2)
                 except Exception:
                     with open(fpath, 'w') as f:
                         json.dump(new_data, f, indent=2)
+                console.print(f"Trimmed {fpath}: removed {bad_index} entries before inconsistency")
             except Exception as e:
-                log_exception(e, "check_candles_consistency:trim")
+                console.print(f"Failed to trim candles file {fpath}: {e}")
             return [(fpath, bad_index, issue)]
         return []
     except Exception as e:
-        log_exception(e, f"check_candles_consistency:{symbol}")
+        console.print(f"check_candles_consistency failed for {symbol}: {e}")
         return []
 
-
-def fetch_ohlcv_data(_id: str, symbol: str, exchange: Any) -> 'pd.DataFrame':
-    """Return OHLCV data as a pandas.DataFrame with columns ['timestamp','open','high','low','close','volume'].
-    Falls back to an empty DataFrame when no data is available.
-    """
-    # This function returns a DataFrame of ohlcv rows or an empty DataFrame
-    dataFile = f'ohlcv_data_{_id}_1m.json'
+def fetch_ohlcv_data(_id, symbol):
+    time.sleep (exchange.rateLimit / 1000) # time.sleep wants seconds
+    # console.print(f"Fetching OHLCV data for {symbol}...")
+    dataFile = 'ohlcv_data_'+ _id + '_1m' + '.json'
     data2 = []
     existing_data = []
+    # Charger les données existantes si le fichier existe
     if os.path.exists(dataFile):
         with open(dataFile, 'r') as f:
             try:
                 data2 = json.load(f)
             except Exception as e:
-                log_exception(e, f"fetch_ohlcv_data:parse:{dataFile}")
+                console.print(f"Warning: failed to parse {dataFile} for {symbol}: {e}")
                 data2 = []
+            # ensure data2 is a list of lists
             if not isinstance(data2, list):
                 data2 = []
             try:
                 if len(data2) > 0:
-                    lastTimestamp = int(data2[-1][0])
+                    lastTimestamp = int(data2[-1][0])  # Utilisation de [-1] pour le dernier élément
                 else:
                     lastTimestamp = None
-            except Exception as e:
-                log_exception(e, "fetch_ohlcv_data:invalid_last_ts")
+            except (IndexError, TypeError, ValueError) as e:
+                console.print(f"Warning: invalid last timestamp in cache {dataFile} for {symbol}: {e}")
                 lastTimestamp = None
+        # conserver les données précédentes
         existing_data = data2
-        currentTimestamp = int(time.time()*1000)
+        currentTimestamp = int(time.time()*1000)  # Current timestamp in milliseconds
+        #console.print(f"Last Timestamp: {lastTimestamp}")
+        #console.print(f"Current Timestamp: {currentTimestamp}")
         data = []
-        if lastTimestamp is None or lastTimestamp < currentTimestamp:
+        if lastTimestamp < currentTimestamp:
+            # fetch en boucles avec 'since' = lastTimestamp (ccxt attend un timestamp absolu en ms)
             since = lastTimestamp
             try:
                 while True:
-                    respect_rate_limit(exchange)
+                    time.sleep(exchange.rateLimit / 1000)
                     batch = exchange.fetch_ohlcv(symbol, '1m', since)
                     if not batch:
                         break
                     data.extend(batch)
                     last_ts = int(batch[-1][0])
-                    if last_ts <= (since or 0):
+                    if last_ts <= since:
                         break
                     since = last_ts + 60 * 1000
                     if last_ts >= currentTimestamp - 60*1000:
                         break
             except Exception as e:
-                log_exception(e, f"fetch_ohlcv_data:batch_fetch:{symbol}")
+                console.print(f"Warning: fetch_ohlcv batch failed for {symbol}: {e}")
                 try:
-                    respect_rate_limit(exchange)
+                    time.sleep(exchange.rateLimit / 1000)
                     data = exchange.fetch_ohlcv(symbol, '1m')
                 except Exception as e2:
-                    log_exception(e2, f"fetch_ohlcv_data:fallback:{symbol}")
+                    console.print(f"Fallback fetch failed for {symbol}: {e2}")
                     data = []
-        # merge existing_data + data and write back
-        merged = existing_data[:]
-        try:
-            if data:
-                merged.extend(data)
-            try:
-                write_json_atomic(dataFile, merged)
-            except Exception as e:
-                log_exception(e, f"fetch_ohlcv_data:write:{dataFile}")
-        except Exception as e:
-            log_exception(e, f"fetch_ohlcv_data:merge:{symbol}")
-        # return as DataFrame
-        try:
-            if merged:
-                return pd.DataFrame(merged, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        except Exception:
-            pass
-        return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # [ [1783382400000, 55953.0, 56217.1, 54798.5, 55529.0, 573.16980314], ... ]
+            # UTC timestamp in milliseconds, integer
+            #data[0].get('timestamp', 1783382400000)  # Example timestamp (milliseconds since epoch)
+            #data[0].get('open', 55953.0)  # Example open price
+            #data[0].get('highest', 56217.1)  # Example highest price
+            #data[0].get('lowest', 54798.5)  # Example lowest price
+            #data[0].get('closing', 55529.0)  # Example closing price
+            #data[0].get('volume', 573.16980314)  # Example volume
+    # sinon si le fichier n'existe pas
     else:
         try:
-            respect_rate_limit(exchange)
-            data = exchange.fetch_ohlcv(symbol, '1m')
-            try:
-                write_json_atomic(dataFile, data)
-            except Exception as e:
-                log_exception(e, f"fetch_ohlcv_data:write_new:{dataFile}")
-            try:
-                if data:
-                    return pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            except Exception:
-                pass
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            data = exchange.fetch_ohlcv(symbol, '1m')  # ce fetch trouve son max naturellement
         except Exception as e:
-            log_exception(e, f"fetch_ohlcv_data:initial_fetch:{symbol}")
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-
-def fetch_balance(exchange: Any, startup: bool, config: Dict, markets_src: Any, pending_dump_file: str, base_assets: List[str]) -> Dict:
-    """
-    A focused version of fetch_balance that computes asset_avg_prices and persists balance.
-    Returns balance dict as fetched from exchange with added 'asset_avg_prices'.
-    """
+            console.print(f"Warning: initial fetch_ohlcv failed for {symbol}: {e}")
+            data = []
+        if data is None:
+            data = []
+    # ensure data is iterable/list before using
+    if data is None:
+        data = []
+    _len = len(data)
+    # console.print(f"Fetched {_len} OHLCV data points for {symbol}.")
+    # pause this pair for 8 hours if the OHLCV fetch is empty
+    if _len == 0:
+        console.print(f"No new OHLCV for {symbol}: fetched 0 candles. existing cache size={len(existing_data) if existing_data is not None else 0}")
+        # persist cache (to keep existing data untouched)
+        try:
+            try:
+                safe_json.atomic_write_json(dataFile, existing_data if existing_data is not None else [], backup=True, indent=4)
+            except Exception:
+                with open(dataFile, 'w') as f:
+                    json.dump(existing_data if existing_data is not None else [], f, indent=4)
+        except Exception as e:
+            console.print(f"Warning: failed to write ohlcv cache for {symbol}: {e}")
+        # pause buys for this symbol for 8 hours
+        try:
+            expiry_ts = int(time.time()) + 8 * 3600
+            pausedForBuy[symbol] = expiry_ts
+            try:
+                safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+            except Exception:
+                with open(PAUSE_FILE, 'w') as f:
+                    json.dump(pausedForBuy, f)
+            console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to empty OHLCV fetch")
+        except Exception as e:
+            console.print(f"Failed to persist pausedForBuy for {symbol}: {e}")
+        return pd.DataFrame(existing_data if existing_data is not None else [], columns=['timestamp','open','high','low','close','volume'])
+    #else:
+        #try:
+            #first_ts = int(data[0][0])
+            #last_ts = int(data[-1][0])
+            #console.print(f"Fetched {len(data)} new OHLCV candles for {symbol}: first={datetime.fromtimestamp(first_ts/1000)} last={datetime.fromtimestamp(last_ts/1000)}")
+        #except Exception:
+            #console.print(f"Fetched {len(data)} new OHLCV candles for {symbol}")
+    # Retirer les doublons par timestamp
+    for data_point in data:
+        # console.print(f"Timestamp: {data_point[0]}, Open: {data_point[1]}, High: {data_point[2]}, Low: {data_point[3]}, Close: {data_point[4]}, Volume: {data_point[5]}")
+        timestamp_to_remove = data_point[0]
+        # Parcourir les bougies pour trouver celle à supprimer
+        for j, candle in enumerate(existing_data):
+            # cadence defensive: vérifier que candle est indexable
+            try:
+                if candle[0] == timestamp_to_remove:
+                    del existing_data[j]
+                    break
+            except Exception:
+                continue
+    # Ajouter les nouvelles données
+    existing_data.extend(data)
+    # Sauvegarder atomiquement
     try:
-        balance = exchange.fetch_balance()
-        balance['timestamp'] = int(time.time())
         try:
-            write_json_atomic("balance.json", balance)
-        except Exception as e:
-            log_exception(e, "fetch_balance:backup_write")
-        asset_avg_prices = {}
-        quote_preferred = config.get('quote_asset') if isinstance(config, dict) else None
-        # ensure markets_src provided
-        try:
-            items = markets_src.items() if isinstance(markets_src, dict) else list(markets_src)
+            safe_json.atomic_write_json(dataFile, existing_data, backup=True, indent=4)
         except Exception:
-            items = []
-        free_balances = balance.get('free', {}) or {}
-        for asset, amt in free_balances.items():
-            try:
-                if amt is None or float(amt) <= 0:
-                    continue
-            except Exception:
-                continue
-            if asset in base_assets:
-                continue
-            prices_by_quote = {}
-            market_symbols_by_quote = {}
-            for m in items:
-                try:
-                    market = m[1] if isinstance(m, tuple) else m
-                    m_base = market.get('base') if isinstance(market, dict) else None
-                    m_quote = market.get('quote') if isinstance(market, dict) else None
-                    m_id = market.get('id') if isinstance(market, dict) else None
-                    if not m_base or not m_quote or not m_id:
-                        continue
-                    if str(m_base).upper() != str(asset).upper():
-                        continue
-                    if str(m_quote).upper() not in [b.upper() for b in base_assets]:
-                        continue
-                    fpath = f"ohlcv_data_{m_id}_1m.json"
-                    if not os.path.exists(fpath):
-                        continue
-                    try:
-                        with open(fpath, 'r') as fh:
-                            data = json.load(fh)
-                    except Exception:
-                        continue
-                    closes = []
-                    for row in data:
-                        try:
-                            closes.append(float(row[4]))
-                        except Exception:
-                            continue
-                    if closes:
-                        q = str(m_quote).upper()
-                        prices_by_quote.setdefault(q, []).append(sum(closes) / len(closes))
-                        try:
-                            msym = market.get('symbol') if isinstance(market, dict) else None
-                        except Exception:
-                            msym = None
-                        if not msym:
-                            msym = m_id
-                        market_symbols_by_quote.setdefault(q, []).append((msym, m_id))
-                except Exception:
-                    continue
-            try:
-                avg_by_quote = {q: (sum(vals) / len(vals)) for q, vals in prices_by_quote.items() if vals}
-            except Exception:
-                avg_by_quote = {}
-            additional_prices_by_quote = {}
-            try:
-                if os.path.exists(pending_dump_file):
-                    with open(pending_dump_file, 'r') as pf:
-                        pending_snapshots = json.load(pf)
-                else:
-                    pending_snapshots = []
-            except Exception:
-                pending_snapshots = []
-            for snap in pending_snapshots:
-                try:
-                    order = snap.get('order') if isinstance(snap, dict) else None
-                    if not isinstance(order, dict):
-                        continue
-                    sym = order.get('symbol') or (order.get('info') or {}).get('symbol') or (order.get('info') or {}).get('pair')
-                    if not isinstance(sym, str):
-                        continue
-                    parts = __import__('re').split(r"[/:_-]", sym)
-                    if not parts:
-                        continue
-                    base_from_order = parts[0].upper()
-                    quote_from_order = parts[1].upper() if len(parts) > 1 else None
-                    if base_from_order != str(asset).upper():
-                        continue
-                    price = None
-                    for k in ('price', 'rate'):
-                        try:
-                            price = float(order.get(k)) if order.get(k) is not None else price
-                        except Exception:
-                            pass
-                    if price is None:
-                        info = order.get('info') or {}
-                        try:
-                            price = float(info.get('price') or info.get('rate') or info.get('price_1'))
-                        except Exception:
-                            price = None
-                    if price is None:
-                        continue
-                    q = quote_from_order or 'UNKNOWN'
-                    additional_prices_by_quote.setdefault(q, []).append(price)
-                except Exception:
-                    continue
-            # combine
-            combined_avg_by_quote = {}
-            for q, vals in avg_by_quote.items():
-                combined = [vals]
-                extra = additional_prices_by_quote.get(q.upper(), []) or additional_prices_by_quote.get(q, [])
-                if extra:
-                    combined.extend(extra)
-                try:
-                    combined_avg_by_quote[q] = sum(combined) / len(combined)
-                except Exception:
-                    combined_avg_by_quote[q] = vals
-            for q, vals in additional_prices_by_quote.items():
-                if q not in combined_avg_by_quote and vals:
-                    try:
-                        combined_avg_by_quote[q] = sum(vals) / len(vals)
-                    except Exception:
-                        continue
-            asset_avg_prices[asset] = combined_avg_by_quote
-        balance['asset_avg_prices'] = asset_avg_prices
-        try:
-            write_json_atomic('asset_avg_prices.json', asset_avg_prices)
-        except Exception:
-            pass
-        return balance
+            with open(dataFile, 'w') as f:
+                json.dump(existing_data, f, indent=4)
     except Exception as e:
-        log_exception(e, "fetch_balance:main")
-        return {}
+        console.print(f"Warning: failed to write ohlcv cache for {symbol}: {e}")
+    # ohlcv: [ [ts, open, high, low, close, volume], ... ]
+    return pd.DataFrame(existing_data, columns=['timestamp','open','high','low','close','volume'])
+
+def fetch_balance(exchange):
+    balance = exchange.fetch_balance()
+    balance['timestamp'] = int(time.time())
+    try:
+        try:
+            safe_json.atomic_write_json("balance.json", balance, backup=True, indent=4)
+        except Exception:
+            with open("balance.json", 'w') as f:
+                json.dump(balance, f, indent=4)
+    except Exception as e:
+        console.print(f"Balance backup file exception: {e}")
+    return balance
