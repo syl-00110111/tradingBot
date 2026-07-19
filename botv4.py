@@ -108,6 +108,88 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             console.print(f"dump_pending_orders failed (file read): {e}")
             return None
 
+    def cleanup_open_orders(exchange, symbol, new_price, side):
+        """Fetches open orders for the symbol and cancels:
+        - Any order older than 1 hour (3600 seconds)
+        - Any order on the same side that is 'less reasonable' (less likely to fill):
+            * For BUY orders: price is lower than new_price (price < new_price)
+            * For SELL orders: price is higher than new_price (price > new_price)
+        """
+        try:
+            console.print(f"[{symbol}] Running open orders cleanup for side {side} before placing new order at price {new_price}...")
+            time.sleep(exchange.rateLimit / 1000)
+
+            open_orders = []
+            try:
+                open_orders = exchange.fetch_open_orders(symbol)
+            except Exception as e:
+                console.print(f"[{symbol}] exchange.fetch_open_orders(symbol) failed, trying fallback: {e}")
+                try:
+                    time.sleep(exchange.rateLimit / 1000)
+                    all_open = exchange.fetch_open_orders()
+                    if all_open:
+                        open_orders = [o for o in all_open if o.get('symbol') == symbol]
+                except Exception as ex:
+                    console.print(f"[{symbol}] Fallback fetch_open_orders failed: {ex}")
+                    return
+
+            if not open_orders:
+                console.print(f"[{symbol}] No open orders found.")
+                return
+
+            now_ts = int(time.time())
+            for o in open_orders:
+                oid = o.get('id') or o.get('orderId')
+                if not oid:
+                    continue
+
+                # Check 1: Old order of more than one hour (3600 seconds)
+                # Timestamp in open order is typically in ms (epoch milliseconds)
+                o_timestamp = o.get('timestamp')
+                is_old = False
+                if o_timestamp is not None:
+                    age_seconds = now_ts - int(o_timestamp / 1000)
+                    if age_seconds > 3600:
+                        is_old = True
+
+                # Check 2: Less reasonable order (on the same side)
+                is_less_reasonable = False
+                o_side = o.get('side')
+                o_price = o.get('price')
+
+                if o_side is not None and o_price is not None:
+                    o_side_lower = o_side.lower()
+                    o_price_float = float(o_price)
+                    new_price_float = float(new_price)
+
+                    if o_side_lower == 'buy' and side.lower() == 'buy':
+                        if o_price_float < new_price_float:
+                            is_less_reasonable = True
+                    elif o_side_lower == 'sell' and side.lower() == 'sell':
+                        if o_price_float > new_price_float:
+                            is_less_reasonable = True
+
+                if is_old or is_less_reasonable:
+                    reason = []
+                    if is_old:
+                        reason.append("older than 1 hour")
+                    if is_less_reasonable:
+                        reason.append("less reasonable price")
+                    reason_str = " and ".join(reason)
+
+                    console.print(f"[{symbol}] Cancelling order {oid} ({reason_str}): price={o_price}, side={o_side}")
+                    try:
+                        time.sleep(exchange.rateLimit / 1000)
+                        try:
+                            exchange.cancel_order(oid, symbol)
+                        except TypeError:
+                            exchange.cancel_order(oid)
+                        console.print(f"[{symbol}] Order {oid} successfully cancelled.")
+                    except Exception as e:
+                        console.print(f"[{symbol}] Failed to cancel order {oid}: {e}")
+        except Exception as e:
+            console.print(f"[{symbol}] Exception in cleanup_open_orders: {e}")
+
     def check_candles_consistency(symbol, expected_interval_ms=60000):
         # Verify temporal coherence for the symbol's local OHLCV cache.
         # If an inconsistency is detected, discard all data chronologically preceding the first inconsistency
@@ -715,6 +797,7 @@ while True:
                                 console.print(f"Calculated buy amount ({amount}) is below minimum amount of {min_amount} for {symbol}")
                             else:
                                 try:
+                                    cleanup_open_orders(exchange, symbol, price, 'buy')
                                     console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
                                     order = exchange.create_limit_buy_order(symbol, amount, price)
                                     # persist pending order to file
@@ -810,6 +893,7 @@ while True:
                             console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
                         else:
                             try:
+                                cleanup_open_orders(exchange, symbol, price, 'sell')
                                 console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
                                 order = exchange.create_limit_sell_order(symbol, amount, price)
                                 # persist pending order to file
