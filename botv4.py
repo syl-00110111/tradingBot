@@ -479,8 +479,8 @@ while True:
                             console.print(f"Failed to fetch order book for {symbol}: {e}")
                             order_book = {'asks':[], 'bids':[]}
                         base_price = ref_price if ref_price is not None else (order_book.get('asks')[0][0] if order_book.get('asks') else last_close)
-                        price = base_price * buy_multiplier
-                        package = round(price * min_amount, int(-math.log10(price_precision)))
+                        price = round ( base_price * buy_multiplier, int(-math.log10( price_precision ) ) )
+                        package = round ( price * min_amount, int(-math.log10( price_precision ) ) )
                         # read quote balance robustly
                         _b = balance.get('free').get(quote)
                         if _b is not None:
@@ -494,7 +494,7 @@ while True:
                             if price > 0:
                                 desired_amount = min_amount * 1.001
                                 max_affordable = quote_free / last_close / 2.001 # tier-hardcoded
-                                amount = round(min(desired_amount, max_affordable) * (4/3), int(-math.log10(amount_precision)))
+                                amount = round ( min(desired_amount, max_affordable) * (4/3), int(-math.log10( amount_precision ) ) )
                             else:
                                 amount = 0
                             # final amount check
@@ -585,15 +585,15 @@ while True:
                             console.print(f"Failed to fetch order book for {symbol}: {e}")
                             order_book = {'asks':[], 'bids':[]}
                         base_price = ref_price if ref_price is not None else (order_book.get('bids')[0][0] if order_book.get('bids') else last_close)
-                        price = base_price * sell_multiplier
+                        price = round ( base_price * sell_multiplier, int(-math.log10( price_precision ) ) )
                         # sell everything if symbol paused
                         now_ts = int(time.time())
                         expiry = pausedForBuy.get(symbol)
                         if expiry and now_ts < int(expiry):
                             # sell everything if paused
-                            amount = round(base_free, int(-math.log10(amount_precision)))
+                            amount = round ( base_free, int(-math.log10( amount_precision ) ) )
                         else: # tier hardcoded
-                            amount = round(base_free * (5 / 6), int(-math.log10(amount_precision)))
+                            amount = round ( base_free * (5 / 6), int(-math.log10( amount_precision ) ) )
                         if amount <= min_amount:
                             console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
                         else:
