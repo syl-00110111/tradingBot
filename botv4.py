@@ -40,6 +40,8 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     import psutil
     import time
     import safe_json
+    import market_utils
+    import symbols_utils
     run = False
     #currentSwap = psutil.swap_memory().used
     #lowerSwap = currentSwap
@@ -111,12 +113,12 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     def cleanup_open_orders(exchange, symbol, new_price, side):
         """Fetches open orders for the symbol and cancels:
         - Any order older than 1 hour (3600 seconds)
-        - Any order on the same side that is 'less reasonable' (less likely to fill):
+        - Any order on either side that is 'less reasonable' (less likely to fill):
             * For BUY orders: price is lower than new_price (price < new_price)
             * For SELL orders: price is higher than new_price (price > new_price)
         """
         try:
-            console.print(f"[{symbol}] Running open orders cleanup for side {side} before placing new order at price {new_price}...")
+            console.print(f"[{symbol}] Running open orders cleanup for both sides before placing new order (side {side}) at price {new_price}...")
             time.sleep(exchange.rateLimit / 1000)
 
             open_orders = []
@@ -152,7 +154,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                     if age_seconds > 3600:
                         is_old = True
 
-                # Check 2: Less reasonable order (on the same side)
+                # Check 2: Less reasonable order (on either side)
                 is_less_reasonable = False
                 o_side = o.get('side')
                 o_price = o.get('price')
@@ -162,10 +164,10 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                     o_price_float = float(o_price)
                     new_price_float = float(new_price)
 
-                    if o_side_lower == 'buy' and side.lower() == 'buy':
+                    if o_side_lower == 'buy':
                         if o_price_float < new_price_float:
                             is_less_reasonable = True
-                    elif o_side_lower == 'sell' and side.lower() == 'sell':
+                    elif o_side_lower == 'sell':
                         if o_price_float > new_price_float:
                             is_less_reasonable = True
 
@@ -190,58 +192,6 @@ with console.status("Bot init. Please wait some time, or expect a random error i
         except Exception as e:
             console.print(f"[{symbol}] Exception in cleanup_open_orders: {e}")
 
-    def check_candles_consistency(symbol, expected_interval_ms=60000):
-        # Verify temporal coherence for the symbol's local OHLCV cache.
-        # If an inconsistency is detected, discard all data chronologically preceding the first inconsistency
-        # and persist the trimmed file.
-        try:
-            fpath = f"ohlcv_data_{symbol}_1m.json"
-            if not os.path.exists(fpath):
-                return []
-            with open(fpath, 'r') as f:
-                data = json.load(f)
-            if not isinstance(data, list) or len(data) < 2:
-                return []
-            prev = int(data[0][0])
-            issue = None
-            bad_index = None
-            # Parcourir les lignes à partir de la deuxième
-            for i, row in enumerate(data[1:], start=1):
-                try:
-                    ts = int(row[0])
-                except Exception:
-                    issue = 'invalid timestamp'
-                    bad_index = i
-                    break
-                if ts <= prev:
-                    issue = 'non-increasing timestamp'
-                    bad_index = i
-                    break
-                diff = ts - prev
-                # allow a small tolerance (50%) for missing/faster samples
-                if diff > expected_interval_ms * 1.5:
-                    issue = f'gap {diff}ms'
-                    bad_index = i
-                    break
-                prev = ts
-            if issue and bad_index is not None:
-                console.print(f"Candle inconsistency detected: file={fpath} index={bad_index} issue={issue}")
-                try:
-                    # keep only data from the first good candle (bad_index) onwards
-                    new_data = data[bad_index:]
-                    try:
-                        safe_json.atomic_write_json(fpath, new_data, backup=True, indent=2)
-                    except Exception:
-                        with open(fpath, 'w') as f:
-                            json.dump(new_data, f, indent=2)
-                    console.print(f"Trimmed {fpath}: removed {bad_index} entries before inconsistency")
-                except Exception as e:
-                    console.print(f"Failed to trim candles file {fpath}: {e}")
-                return [(fpath, bad_index, issue)]
-            return []
-        except Exception as e:
-            console.print(f"check_candles_consistency failed for {symbol}: {e}")
-            return []
 
     # mapping symbol -> expiry_timestamp for paused buys (persisted to disk)
     pausedForBuy = {}
@@ -339,267 +289,6 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             console.print(f"Error loading markets.json file: {e}")
         return _markets
 
-    def fetch_balance(exchange):
-        balance = exchange.fetch_balance()
-        balance['timestamp'] = int(time.time())
-        try:
-            try:
-                safe_json.atomic_write_json("balance.json", balance, backup=True, indent=4)
-            except Exception:
-                with open("balance.json", 'w') as f:
-                    json.dump(balance, f, indent=4)
-        except Exception as e:
-            console.print(f"Balance backup file exception: {e}")
-        return balance
-
-    def fetch_ohlcv_data(_id, symbol):
-        time.sleep (exchange.rateLimit / 1000) # time.sleep wants seconds
-        # console.print(f"Fetching OHLCV data for {symbol}...")
-        dataFile = 'ohlcv_data_'+ _id + '_1m' + '.json'
-        data2 = []
-        existing_data = []
-        # Charger les données existantes si le fichier existe
-        if os.path.exists(dataFile):
-            with open(dataFile, 'r') as f:
-                try:
-                    data2 = json.load(f)
-                except Exception as e:
-                    console.print(f"Warning: failed to parse {dataFile} for {symbol}: {e}")
-                    data2 = []
-                # ensure data2 is a list of lists
-                if not isinstance(data2, list):
-                    data2 = []
-                try:
-                    if len(data2) > 0:
-                        lastTimestamp = int(data2[-1][0])  # Utilisation de [-1] pour le dernier élément
-                    else:
-                        lastTimestamp = None
-                except (IndexError, TypeError, ValueError) as e:
-                    console.print(f"Warning: invalid last timestamp in cache {dataFile} for {symbol}: {e}")
-                    lastTimestamp = None
-            # conserver les données précédentes
-            existing_data = data2
-            currentTimestamp = int(time.time()*1000)  # Current timestamp in milliseconds
-            #console.print(f"Last Timestamp: {lastTimestamp}")
-            #console.print(f"Current Timestamp: {currentTimestamp}")
-            data = []
-            if lastTimestamp < currentTimestamp:
-                # fetch en boucles avec 'since' = lastTimestamp (ccxt attend un timestamp absolu en ms)
-                since = lastTimestamp
-                try:
-                    while True:
-                        time.sleep(exchange.rateLimit / 1000)
-                        batch = exchange.fetch_ohlcv(symbol, '1m', since)
-                        if not batch:
-                            break
-                        data.extend(batch)
-                        last_ts = int(batch[-1][0])
-                        if last_ts <= since:
-                            break
-                        since = last_ts + 60 * 1000
-                        if last_ts >= currentTimestamp - 60*1000:
-                            break
-                except Exception as e:
-                    console.print(f"Warning: fetch_ohlcv batch failed for {symbol}: {e}")
-                    try:
-                        time.sleep(exchange.rateLimit / 1000)
-                        data = exchange.fetch_ohlcv(symbol, '1m')
-                    except Exception as e2:
-                        console.print(f"Fallback fetch failed for {symbol}: {e2}")
-                        data = []
-                # [ [1783382400000, 55953.0, 56217.1, 54798.5, 55529.0, 573.16980314], ... ]
-                # UTC timestamp in milliseconds, integer
-                #data[0].get('timestamp', 1783382400000)  # Example timestamp (milliseconds since epoch)
-                #data[0].get('open', 55953.0)  # Example open price
-                #data[0].get('highest', 56217.1)  # Example highest price
-                #data[0].get('lowest', 54798.5)  # Example lowest price
-                #data[0].get('closing', 55529.0)  # Example closing price
-                #data[0].get('volume', 573.16980314)  # Example volume
-        # sinon si le fichier n'existe pas
-        else:
-            try:
-                data = exchange.fetch_ohlcv(symbol, '1m')  # ce fetch trouve son max naturellement
-            except Exception as e:
-                console.print(f"Warning: initial fetch_ohlcv failed for {symbol}: {e}")
-                data = []
-            if data is None:
-                data = []
-        # ensure data is iterable/list before using
-        if data is None:
-            data = []
-        _len = len(data)
-        # console.print(f"Fetched {_len} OHLCV data points for {symbol}.")
-        # pause this pair for 8 hours if the OHLCV fetch is empty
-        if _len == 0:
-            console.print(f"No new OHLCV for {symbol}: fetched 0 candles. existing cache size={len(existing_data) if existing_data is not None else 0}")
-            # persist cache (to keep existing data untouched)
-            try:
-                try:
-                    safe_json.atomic_write_json(dataFile, existing_data if existing_data is not None else [], backup=True, indent=4)
-                except Exception:
-                    with open(dataFile, 'w') as f:
-                        json.dump(existing_data if existing_data is not None else [], f, indent=4)
-            except Exception as e:
-                console.print(f"Warning: failed to write ohlcv cache for {symbol}: {e}")
-            # pause buys for this symbol for 8 hours
-            try:
-                expiry_ts = int(time.time()) + 8 * 3600
-                pausedForBuy[symbol] = expiry_ts
-                try:
-                    safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
-                except Exception:
-                    with open(PAUSE_FILE, 'w') as f:
-                        json.dump(pausedForBuy, f)
-                console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to empty OHLCV fetch")
-            except Exception as e:
-                console.print(f"Failed to persist pausedForBuy for {symbol}: {e}")
-            return pd.DataFrame(existing_data if existing_data is not None else [], columns=['timestamp','open','high','low','close','volume'])
-        #else:
-            #try:
-                #first_ts = int(data[0][0])
-                #last_ts = int(data[-1][0])
-                #console.print(f"Fetched {len(data)} new OHLCV candles for {symbol}: first={datetime.fromtimestamp(first_ts/1000)} last={datetime.fromtimestamp(last_ts/1000)}")
-            #except Exception:
-                #console.print(f"Fetched {len(data)} new OHLCV candles for {symbol}")
-        # Retirer les doublons par timestamp
-        for data_point in data:
-            # console.print(f"Timestamp: {data_point[0]}, Open: {data_point[1]}, High: {data_point[2]}, Low: {data_point[3]}, Close: {data_point[4]}, Volume: {data_point[5]}")
-            timestamp_to_remove = data_point[0]
-            # Parcourir les bougies pour trouver celle à supprimer
-            for j, candle in enumerate(existing_data):
-                # cadence defensive: vérifier que candle est indexable
-                try:
-                    if candle[0] == timestamp_to_remove:
-                        del existing_data[j]
-                        break
-                except Exception:
-                    continue
-        # Ajouter les nouvelles données
-        existing_data.extend(data)
-        # Sauvegarder atomiquement
-        try:
-            try:
-                safe_json.atomic_write_json(dataFile, existing_data, backup=True, indent=4)
-            except Exception:
-                with open(dataFile, 'w') as f:
-                    json.dump(existing_data, f, indent=4)
-        except Exception as e:
-            console.print(f"Warning: failed to write ohlcv cache for {symbol}: {e}")
-        # ohlcv: [ [ts, open, high, low, close, volume], ... ]
-        return pd.DataFrame(existing_data, columns=['timestamp','open','high','low','close','volume'])
-
-    def updateTradingCount(symbol):
-        try:
-            with open('volumes_trades_data.json','r') as f: _volumes = json.load(f)
-        except Exception as e:
-            raise ValueError(f"volume trades data file problem: {e}")
-        trades_count = 0
-        for _vol in _volumes:
-            if symbol == _vol.get('symbol') and symbol is not None:
-                _since = _vol.get('timestamp')
-                # normalize _since to an integer timestamp (ms);
-                # if missing/invalid, consider it as current time (so we won't fetch historical trades)
-                now_minus_4h = int(time.time()) * 1000 - (4*3600*1000)
-                if _since is None:
-                    _since_int = now_minus_4h
-                else:
-                    _since_int = int(_since)
-                # if now < since by 4 hours
-                if (_since_int >= now_minus_4h) or _vol.get('trades_count') == 1000:
-                    #console.print(f"_since: {_since_int}, since_4h: {now_minus_4h}, int(time.time()): {int(time.time())}")
-                    time.sleep(exchange.rateLimit / 1000)
-                    trades = exchange.fetch_trades(symbol, now_minus_4h)
-                    trades_count = len(trades) if trades is not None else 0
-                    # console.print(f"Old trades count for {symbol}: {_vol['trades_count']}")
-                    console.print(f"New fetched trades count (last 4h) for {symbol}: {trades_count}")
-                    # mettre à jour avec le nouveau volume
-                    _vol['trades_count'] = trades_count
-                    _vol['timestamp'] = int(time.time())
-                    break
-        try:
-            try:
-                safe_json.atomic_write_json('volumes_trades_data.json', _volumes, backup=True, indent=4)
-            except Exception:
-                with open('volumes_trades_data.json', 'w') as f:
-                    json.dump(_volumes, f, indent=4)
-            # console.print(f"Fichier volumes_trades_data.json mis à jour pour le symbole {symbol}.")
-        except Exception as e:
-            console.print(f"Impossible de mettre à jour le fichier volumes_trades_data.json: {e} pour le symbole {symbol}")
-        return trades_count
-
-    def computeSymbols(balance, previousPairs):
-        __symbols = []
-        # balance existante
-        # # Vérifier que 'balance' est un dictionnaire valide
-        if not isinstance(balance, dict):
-            console.print("[ERROR] La structure 'balance' est invalide.")
-        elif 'free' not in balance:
-            console.print("[ERROR] La clé 'free' est manquante dans 'balance'.")
-        else:
-            free_balances = balance.get('free')
-            if not isinstance(free_balances, dict):
-                console.print("[ERROR] La clé 'free' ne contient pas un dictionnaire valide.")
-            else:
-                for asset, amount in free_balances.items():
-                    try:
-                        # Convertir le montant en float
-                        amount_float = float(amount)
-                        # Ajouter l'actif à la liste si le montant est supérieur à 0
-                        if amount_float > 0:
-                            sourceAssets.append(asset)
-                            # console.print(f"source asset: {asset} {amount_float}")
-                    except (ValueError, TypeError) as e:
-                        console.print(f"[WARNING] Impossible de convertir le montant pour l'actif '{asset}' : {e}")
-        try:
-            with open('markets.json','r') as f: _markets = json.load(f)
-            with open('volumes_trades_data.json','r') as f: _volumes = json.load(f)
-            # build a set of existing symbols (normalized) to compare reliably
-            try:
-                existing_symbols = {str(p[0]).upper() for p in previousPairs if isinstance(p, (list, tuple)) and len(p) > 0 and p[0] is not None}
-            except Exception:
-                existing_symbols = set()
-            _g = {'id':[]}
-            for _v in _volumes:
-                if _v.get('trades_count') > miniCount:
-                    # tri du volume à part
-                    _g['id'].append(_v.get('id'))
-            # construire deux listes distinctes : prioriser les paires à vendre (base dans sourceAssets), puis les paires volume
-            sell_candidates = []
-            volume_candidates = []
-            _a = []
-            for _m in _markets.items():
-                _a = [_m[1].get('symbol'), _m[1].get('id'), _m[1].get('base'), _m[1].get('quote'), _m[1].get('limits').get('amount').get('min'), _m[1].get('precision').get('price'), _m[1].get('precision').get('amount')]
-                # si pas interdit dans notre zone
-                if (_m[1].get('base') not in forbidAssets) and (_m[1].get('quote') not in forbidAssets):
-                    # paire présente dans les volumes importants et quote dans monnaies d'usage
-                    if (_m[1].get('id') in _g.get('id')) and (_m[1].get('quote') in baseAssets):
-                        # si la base est dans la balance -> priorité vente
-                        if (_m[1].get('base') in sourceAssets) and (str(_a[0]).upper() not in existing_symbols):
-                            sell_candidates.append(_a)
-                            existing_symbols.add(str(_a[0]).upper())
-                            console.print(f"balance add: {_m[1].get('symbol')}")
-                        # sinon, c'est une paire volume
-                        elif (str(_a[0]).upper() not in existing_symbols):
-                            volume_candidates.append(_a)
-                            existing_symbols.add(str(_a[0]).upper())
-                            console.print(f"volume add: {_a[0]}")
-            # combiner en respectant maxNumPairs : priorité aux ventes
-            combined = []
-            # ajouter d'abord les ventes
-            for item in sell_candidates:
-                if len(combined) >= maxNumPairs:
-                    break
-                combined.append(item)
-            # compléter avec les paires volume si besoin
-            for item in volume_candidates:
-                if len(combined) >= maxNumPairs:
-                    break
-                combined.append(item)
-            __symbols.extend(combined)
-        except Exception as e:
-            console.print(f"Exception computeSymbols: {e}")
-        return __symbols
-
 # boucle principale du bot
 while True:
     try:
@@ -619,14 +308,23 @@ while True:
 
         # interroger les assets disponibles sur la plateforme pour l'utilisateur et les stocker dans une variable globale
         if balanceFetched == False:
-            balance = fetch_balance(exchange)
+            balance = market_utils.fetch_balance(exchange, console=console)
             balanceFetched = True
             # console.print(f"original balance: {balance}")
 
         # markets fetch
         if marketsFetched == False:
             _markets = loadMarkets(exchange, "markets.json")
-            availablePairs = computeSymbols(balance, None)
+            availablePairs = symbols_utils.computeSymbols(
+                balance=balance,
+                previousPairs=None,
+                source_assets=sourceAssets,
+                forbid_assets=forbidAssets,
+                base_assets=baseAssets,
+                max_num_pairs=maxNumPairs,
+                mini_count=miniCount,
+                console=console
+            )
             marketsFetched = True
 
         # taux
@@ -656,10 +354,17 @@ while True:
                 amount_precision = availablePair[6]
                 if exchange.has.get('fetchOHLCV'):
                     try:
-                        candles_per_pair[symbol] = fetch_ohlcv_data(_id, symbol)
+                        candles_per_pair[symbol] = market_utils.fetch_ohlcv_data(
+                            exchange=exchange,
+                            _id=_id,
+                            symbol=symbol,
+                            pausedForBuy=pausedForBuy,
+                            PAUSE_FILE=PAUSE_FILE,
+                            console=console
+                        )
                         try:
                             # vérifier la cohérence des chandelles immédiatement après le fetch
-                            check_candles_consistency(symbol)
+                            market_utils.check_candles_consistency(symbol, console=console)
                         except Exception as e:
                             console.print(f"check_candles_consistency failed for {symbol}: {e}")
                     except Exception as e:
@@ -804,7 +509,7 @@ while True:
                                     add_pending_order(order)
                                     console.print(f"BUY order passed: {order}")
                                     # update balance
-                                    balance = fetch_balance(exchange)
+                                    balance = market_utils.fetch_balance(exchange, console=console)
                                     # plot a small chart with the BUY marker
                                     try:
                                         plt_ascii.clf()
@@ -900,7 +605,7 @@ while True:
                                 add_pending_order(order)
                                 console.print(f"SELL order passed: {order}")
                                 # update balance
-                                balance = fetch_balance(exchange)
+                                balance = market_utils.fetch_balance(exchange, console=console)
                                 # plot SELL
                                 try:
                                     plt_ascii.clf()
@@ -964,7 +669,7 @@ while True:
                         console.print(f"Chose to update symbol: {symbolChoose}")
                     except Exception as _e:
                         symbolChoose = None
-                    if updateTradingCount(symbolChoose) > miniCount:
+                    if symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console) > miniCount:
                         availablePairs.append(symbolChoose)
                         console.print(f"Appended {symbolChoose} to tracked pairs.")
                     last_pending_fetch = now_ts

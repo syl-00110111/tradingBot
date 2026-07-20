@@ -15,7 +15,9 @@ import os
 import json
 import traceback
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 import pandas as pd
+import safe_json
 
 
 def log_exception(e: Exception, ctx: Optional[str] = None) -> None:
@@ -64,7 +66,7 @@ def read_json_file(path: str, default=None):
     return default
 
 
-def check_candles_consistency(symbol, expected_interval_ms=60000):
+def check_candles_consistency(symbol: str, expected_interval_ms: int = 60000, console: Optional[Any] = None) -> List:
     # Verify temporal coherence for the symbol's local OHLCV cache.
     # If an inconsistency is detected, discard all data chronologically preceding the first inconsistency
     # and persist the trimmed file.
@@ -99,7 +101,11 @@ def check_candles_consistency(symbol, expected_interval_ms=60000):
                 break
             prev = ts
         if issue and bad_index is not None:
-            console.print(f"Candle inconsistency detected: file={fpath} index={bad_index} issue={issue}")
+            msg = f"Candle inconsistency detected: file={fpath} index={bad_index} issue={issue}"
+            if console:
+                console.print(msg)
+            else:
+                print(msg)
             try:
                 # keep only data from the first good candle (bad_index) onwards
                 new_data = data[bad_index:]
@@ -108,19 +114,36 @@ def check_candles_consistency(symbol, expected_interval_ms=60000):
                 except Exception:
                     with open(fpath, 'w') as f:
                         json.dump(new_data, f, indent=2)
-                console.print(f"Trimmed {fpath}: removed {bad_index} entries before inconsistency")
+                msg_trim = f"Trimmed {fpath}: removed {bad_index} entries before inconsistency"
+                if console:
+                    console.print(msg_trim)
+                else:
+                    print(msg_trim)
             except Exception as e:
-                console.print(f"Failed to trim candles file {fpath}: {e}")
+                msg_fail = f"Failed to trim candles file {fpath}: {e}"
+                if console:
+                    console.print(msg_fail)
+                else:
+                    print(msg_fail)
             return [(fpath, bad_index, issue)]
         return []
     except Exception as e:
-        console.print(f"check_candles_consistency failed for {symbol}: {e}")
+        msg_exc = f"check_candles_consistency failed for {symbol}: {e}"
+        if console:
+            console.print(msg_exc)
+        else:
+            print(msg_exc)
         return []
 
-def fetch_ohlcv_data(_id, symbol):
-    time.sleep (exchange.rateLimit / 1000) # time.sleep wants seconds
-    # console.print(f"Fetching OHLCV data for {symbol}...")
-    dataFile = 'ohlcv_data_'+ _id + '_1m' + '.json'
+
+def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optional[Dict] = None, PAUSE_FILE: str = 'paused_for_buy.json', console: Optional[Any] = None) -> pd.DataFrame:
+    if pausedForBuy is None:
+        pausedForBuy = {}
+
+    rate_limit_ms = getattr(exchange, 'rateLimit', 1000) or 1000
+    time.sleep(rate_limit_ms / 1000) # time.sleep wants seconds
+
+    dataFile = f"ohlcv_data_{_id}_1m.json"
     data2 = []
     existing_data = []
     # Charger les données existantes si le fichier existe
@@ -129,7 +152,11 @@ def fetch_ohlcv_data(_id, symbol):
             try:
                 data2 = json.load(f)
             except Exception as e:
-                console.print(f"Warning: failed to parse {dataFile} for {symbol}: {e}")
+                msg_warn = f"Warning: failed to parse {dataFile} for {symbol}: {e}"
+                if console:
+                    console.print(msg_warn)
+                else:
+                    print(msg_warn)
                 data2 = []
             # ensure data2 is a list of lists
             if not isinstance(data2, list):
@@ -140,20 +167,23 @@ def fetch_ohlcv_data(_id, symbol):
                 else:
                     lastTimestamp = None
             except (IndexError, TypeError, ValueError) as e:
-                console.print(f"Warning: invalid last timestamp in cache {dataFile} for {symbol}: {e}")
+                msg_warn2 = f"Warning: invalid last timestamp in cache {dataFile} for {symbol}: {e}"
+                if console:
+                    console.print(msg_warn2)
+                else:
+                    print(msg_warn2)
                 lastTimestamp = None
         # conserver les données précédentes
         existing_data = data2
         currentTimestamp = int(time.time()*1000)  # Current timestamp in milliseconds
-        #console.print(f"Last Timestamp: {lastTimestamp}")
-        #console.print(f"Current Timestamp: {currentTimestamp}")
+
         data = []
-        if lastTimestamp < currentTimestamp:
+        if lastTimestamp is not None and lastTimestamp < currentTimestamp:
             # fetch en boucles avec 'since' = lastTimestamp (ccxt attend un timestamp absolu en ms)
             since = lastTimestamp
             try:
                 while True:
-                    time.sleep(exchange.rateLimit / 1000)
+                    time.sleep(rate_limit_ms / 1000)
                     batch = exchange.fetch_ohlcv(symbol, '1m', since)
                     if not batch:
                         break
@@ -165,38 +195,47 @@ def fetch_ohlcv_data(_id, symbol):
                     if last_ts >= currentTimestamp - 60*1000:
                         break
             except Exception as e:
-                console.print(f"Warning: fetch_ohlcv batch failed for {symbol}: {e}")
+                msg_warn3 = f"Warning: fetch_ohlcv batch failed for {symbol}: {e}"
+                if console:
+                    console.print(msg_warn3)
+                else:
+                    print(msg_warn3)
                 try:
-                    time.sleep(exchange.rateLimit / 1000)
+                    time.sleep(rate_limit_ms / 1000)
                     data = exchange.fetch_ohlcv(symbol, '1m')
                 except Exception as e2:
-                    console.print(f"Fallback fetch failed for {symbol}: {e2}")
+                    msg_fail = f"Fallback fetch failed for {symbol}: {e2}"
+                    if console:
+                        console.print(msg_fail)
+                    else:
+                        print(msg_fail)
                     data = []
-            # [ [1783382400000, 55953.0, 56217.1, 54798.5, 55529.0, 573.16980314], ... ]
-            # UTC timestamp in milliseconds, integer
-            #data[0].get('timestamp', 1783382400000)  # Example timestamp (milliseconds since epoch)
-            #data[0].get('open', 55953.0)  # Example open price
-            #data[0].get('highest', 56217.1)  # Example highest price
-            #data[0].get('lowest', 54798.5)  # Example lowest price
-            #data[0].get('closing', 55529.0)  # Example closing price
-            #data[0].get('volume', 573.16980314)  # Example volume
     # sinon si le fichier n'existe pas
     else:
         try:
             data = exchange.fetch_ohlcv(symbol, '1m')  # ce fetch trouve son max naturellement
         except Exception as e:
-            console.print(f"Warning: initial fetch_ohlcv failed for {symbol}: {e}")
+            msg_warn4 = f"Warning: initial fetch_ohlcv failed for {symbol}: {e}"
+            if console:
+                console.print(msg_warn4)
+            else:
+                print(msg_warn4)
             data = []
         if data is None:
             data = []
+
     # ensure data is iterable/list before using
     if data is None:
         data = []
     _len = len(data)
-    # console.print(f"Fetched {_len} OHLCV data points for {symbol}.")
+
     # pause this pair for 8 hours if the OHLCV fetch is empty
     if _len == 0:
-        console.print(f"No new OHLCV for {symbol}: fetched 0 candles. existing cache size={len(existing_data) if existing_data is not None else 0}")
+        msg_empty = f"No new OHLCV for {symbol}: fetched 0 candles. existing cache size={len(existing_data) if existing_data is not None else 0}"
+        if console:
+            console.print(msg_empty)
+        else:
+            print(msg_empty)
         # persist cache (to keep existing data untouched)
         try:
             try:
@@ -205,7 +244,11 @@ def fetch_ohlcv_data(_id, symbol):
                 with open(dataFile, 'w') as f:
                     json.dump(existing_data if existing_data is not None else [], f, indent=4)
         except Exception as e:
-            console.print(f"Warning: failed to write ohlcv cache for {symbol}: {e}")
+            msg_warn5 = f"Warning: failed to write ohlcv cache for {symbol}: {e}"
+            if console:
+                console.print(msg_warn5)
+            else:
+                print(msg_warn5)
         # pause buys for this symbol for 8 hours
         try:
             expiry_ts = int(time.time()) + 8 * 3600
@@ -215,24 +258,24 @@ def fetch_ohlcv_data(_id, symbol):
             except Exception:
                 with open(PAUSE_FILE, 'w') as f:
                     json.dump(pausedForBuy, f)
-            console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to empty OHLCV fetch")
+            msg_pause = f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to empty OHLCV fetch"
+            if console:
+                console.print(msg_pause)
+            else:
+                print(msg_pause)
         except Exception as e:
-            console.print(f"Failed to persist pausedForBuy for {symbol}: {e}")
+            msg_fail2 = f"Failed to persist pausedForBuy for {symbol}: {e}"
+            if console:
+                console.print(msg_fail2)
+            else:
+                print(msg_fail2)
         return pd.DataFrame(existing_data if existing_data is not None else [], columns=['timestamp','open','high','low','close','volume'])
-    #else:
-        #try:
-            #first_ts = int(data[0][0])
-            #last_ts = int(data[-1][0])
-            #console.print(f"Fetched {len(data)} new OHLCV candles for {symbol}: first={datetime.fromtimestamp(first_ts/1000)} last={datetime.fromtimestamp(last_ts/1000)}")
-        #except Exception:
-            #console.print(f"Fetched {len(data)} new OHLCV candles for {symbol}")
+
     # Retirer les doublons par timestamp
     for data_point in data:
-        # console.print(f"Timestamp: {data_point[0]}, Open: {data_point[1]}, High: {data_point[2]}, Low: {data_point[3]}, Close: {data_point[4]}, Volume: {data_point[5]}")
         timestamp_to_remove = data_point[0]
         # Parcourir les bougies pour trouver celle à supprimer
         for j, candle in enumerate(existing_data):
-            # cadence defensive: vérifier que candle est indexable
             try:
                 if candle[0] == timestamp_to_remove:
                     del existing_data[j]
@@ -249,11 +292,15 @@ def fetch_ohlcv_data(_id, symbol):
             with open(dataFile, 'w') as f:
                 json.dump(existing_data, f, indent=4)
     except Exception as e:
-        console.print(f"Warning: failed to write ohlcv cache for {symbol}: {e}")
-    # ohlcv: [ [ts, open, high, low, close, volume], ... ]
+        msg_warn6 = f"Warning: failed to write ohlcv cache for {symbol}: {e}"
+        if console:
+            console.print(msg_warn6)
+        else:
+            print(msg_warn6)
     return pd.DataFrame(existing_data, columns=['timestamp','open','high','low','close','volume'])
 
-def fetch_balance(exchange):
+
+def fetch_balance(exchange: Any, console: Optional[Any] = None) -> Dict:
     balance = exchange.fetch_balance()
     balance['timestamp'] = int(time.time())
     try:
@@ -263,5 +310,9 @@ def fetch_balance(exchange):
             with open("balance.json", 'w') as f:
                 json.dump(balance, f, indent=4)
     except Exception as e:
-        console.print(f"Balance backup file exception: {e}")
+        msg_exc = f"Balance backup file exception: {e}"
+        if console:
+            console.print(msg_exc)
+        else:
+            print(msg_exc)
     return balance
