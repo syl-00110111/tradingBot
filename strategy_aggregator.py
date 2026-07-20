@@ -115,37 +115,37 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
     if pt is not None and not pt.empty:
         # utiliser une fenêtre pour compter les signaux non-consécutifs
         buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=10)
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=100)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=10)
         for i in range(N):
-            if buys[i] >= 1:
-                score_buy[i] += 1
+            if buys[i] >= 2:
+                score_buy[i] += 2
             if sells[i] >= 10:
-                score_sell[i] += 1
+                score_sell[i] += 2
 
     # 2) pairs_trading_proxy
     pt = signal_frames.get('pairs_trading_proxy')
     if pt is not None and not pt.empty:
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=30)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
         sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
         for i in range(N):
             if buys[i] >= 3:
                 score_buy[i] += 1
-            if sells[i] >= 2:
+            if sells[i] >= 3:
                 score_sell[i] += 1
 
     # 3) mc_mean_reversion
     pt = signal_frames.get('mc_mean_reversion')
     if pt is not None and not pt.empty:
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=30)
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=80)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
         for i in range(N):
-            if buys[i] >= 3:
+            if buys[i] >= 4:
                 score_buy[i] += 1
-            if sells[i] >= 8:
+            if sells[i] >= 4:
                 score_sell[i] += 1
 
-    global_buy = [s >= 3 for s in score_buy]
-    global_sell = [s >= 3 for s in score_sell]
+    global_buy = [s >= 4 for s in score_buy]
+    global_sell = [s >= 4 for s in score_sell]
 
     # print(f"DEBUG sell= {global_sell}")
 

@@ -199,15 +199,15 @@ def main(symbol: str, _id: str):
         else:
             price_range = 0
 
-        for (pos, price) in buys:
-            plt.scatter([pos], [price], marker='x', color='green')
-            offset = price + (price_range * 0.0002 if price_range else 0)
-            plt.text('BUY', pos, offset, color='green')
-
         for (pos, price) in sells:
             plt.scatter([pos], [price], marker='o', color='red')
             offset = price - (price_range * 0.0002 if price_range else 0)
             plt.text('SELL', pos, offset, color='red')
+
+        for (pos, price) in buys:
+            plt.scatter([pos], [price], marker='x', color='green')
+            offset = price + (price_range * 0.0002 if price_range else 0)
+            plt.text('BUY', pos, offset, color='green')
 
         # Définir des labels d'axe X échantillonnés pour lisibilité
         step = max(1, len(dates) // 8)
