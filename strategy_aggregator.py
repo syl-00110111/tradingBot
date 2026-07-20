@@ -106,20 +106,20 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
     score_buy = [0.0] * N
     score_sell = [0.0] * N
     
-    # bollinger_bands buy sûr sell count 10
-    # pairs_trading_proxy buy count 3 sell count 2
-    # mc_mean_reversion buy count 3 sell count 8
+    # bollinger_bands buy count sell 2 count 10
+    # pairs_trading_proxy buy count 3 sell count 3
+    # mc_mean_reversion buy count 4 sell count 4
     
     # 1) bollinger_bands
     pt = signal_frames.get('bollinger_bands')
     if pt is not None and not pt.empty:
         # utiliser une fenêtre pour compter les signaux non-consécutifs
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=10)
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=10)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=30)
         for i in range(N):
-            if buys[i] >= 2:
+            if buys[i] >= 4:
                 score_buy[i] += 2
-            if sells[i] >= 10:
+            if sells[i] >= 20:
                 score_sell[i] += 2
 
     # 2) pairs_trading_proxy
@@ -128,9 +128,9 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
         buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
         sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
         for i in range(N):
-            if buys[i] >= 3:
+            if buys[i] >= 4:
                 score_buy[i] += 1
-            if sells[i] >= 3:
+            if sells[i] >= 6:
                 score_sell[i] += 1
 
     # 3) mc_mean_reversion
@@ -139,9 +139,9 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
         buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
         sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=20)
         for i in range(N):
-            if buys[i] >= 4:
+            if buys[i] >= 6:
                 score_buy[i] += 1
-            if sells[i] >= 4:
+            if sells[i] >= 6:
                 score_sell[i] += 1
 
     global_buy = [s >= 4 for s in score_buy]
