@@ -399,7 +399,7 @@ while True:
                     public_trades = exchange.fetch_trades(symbol, limit=20)
                     if public_trades and len(public_trades) > 0:
                         ref_price = sum(float(t['price']) for t in public_trades) / len(public_trades)
-                        console.print(f"[{symbol}] Prix de référence calculé sur {len(public_trades)} trades publics: {ref_price:.6f}")
+                        console.print(f"[{symbol}] Prix de référence calculé sur {len(public_trades)} trades publics: {ref_price:.8f}")
                 except Exception as e:
                     console.print(f"[{symbol}] Échec de fetch_trades, fallback sur les chandelles: {e}")
 
@@ -408,7 +408,7 @@ while True:
                         ref_price = float(df_candles['close'].tail(20).mean())
                     else:
                         ref_price = float(df_candles['close'].mean())
-                    console.print(f"[{symbol}] Prix de référence calculé sur les chandelles stockées: {ref_price:.6f}")
+                    console.print(f"[{symbol}] Prix de référence calculé sur les chandelles stockées: {ref_price:.8f}")
 
                 # 2/ prise en compte tendance Bullish / Bearish
                 if len(df_candles) >= 50:
@@ -417,7 +417,7 @@ while True:
                     sma_50 = float(df_candles['close'].mean())
                 is_bullish = last_close > sma_50
                 trend_str = 'Bullish' if is_bullish else 'Bearish'
-                console.print(f"[{symbol}] Tendance détectée: {trend_str} (Last Close: {last_close:.6f} vs SMA 50: {sma_50:.6f})")
+                console.print(f"[{symbol}] Tendance détectée: {trend_str} (Last Close: {last_close:.8f} vs SMA 50: {sma_50:.8f})")
 
                 # 3/ détection trend following / mean reversion
                 regime_str = 'Mean Reversion'
