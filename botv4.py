@@ -445,7 +445,7 @@ while True:
                         sell_multiplier = 1.003
                     else:
                         # c'était 10-3 il faut passer à 3-1
-                        buy_multiplier = 0.997
+                        buy_multiplier = 0.999 # test
                         sell_multiplier = 1.001
                 else:  # Mean Reversion
                     if is_bullish:
