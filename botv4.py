@@ -434,23 +434,28 @@ while True:
                     console.print(f"[{symbol}] Échec du calcul de l'ADX, régime par défaut: {regime_str}: {e}")
 
                 # Ajustement des seuils de déclenchement
-                buy_multiplier = 0.994
-                sell_multiplier = 1.006
+                # c'était 6-6 il faut passer à 2-2
+                buy_multiplier = 0.998
+                sell_multiplier = 1.002
 
                 if regime_str == 'Trend Following':
                     if is_bullish:
-                        buy_multiplier = 0.997
-                        sell_multiplier = 1.010
-                    else:
-                        buy_multiplier = 0.990
+                        # c'était 3-10 il faut passer à 1-3
+                        buy_multiplier = 0.999
                         sell_multiplier = 1.003
+                    else:
+                        # c'était 10-3 il faut passer à 3-1
+                        buy_multiplier = 0.997
+                        sell_multiplier = 1.001
                 else:  # Mean Reversion
                     if is_bullish:
-                        buy_multiplier = 0.994
-                        sell_multiplier = 1.006
+                        # c'était 6-6 il faut passer à 2-2
+                        buy_multiplier = 0.998
+                        sell_multiplier = 1.002
                     else:
-                        buy_multiplier = 0.995
-                        sell_multiplier = 1.005
+                        # c'était 5-5 il faut passer à 1-1
+                        buy_multiplier = 0.999
+                        sell_multiplier = 1.001
 
                 # decide buy
                 if global_buy[latest_idx]:
