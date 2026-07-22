@@ -569,6 +569,55 @@ if __name__ == '__main__':
                             buy_multiplier = 0.9995
                             sell_multiplier = 1.0005
 
+                    # If both buy and sell signals are present at the same time, prioritize the one most likely to occur.
+                    if global_buy[latest_idx] and global_sell[latest_idx]:
+                        console.print(f"[{symbol}] Both BUY and SELL signals triggered simultaneously. Prioritizing based on probability of occurrence...")
+                        # Compute volatility & drift for Monte Carlo from df_candles
+                        volatility = 0.0
+                        drift = 0.0
+                        if df_candles is not None and len(df_candles) > 1:
+                            try:
+                                closes = pd.to_numeric(df_candles['close'], errors='coerce')
+                                returns = np.log(closes / closes.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+                                if len(returns) > 1:
+                                    volatility = float(returns.std())
+                                    drift = float(returns.mean())
+                            except Exception as ve:
+                                console.print(f"[{symbol}] Error computing volatility for Monte Carlo: {ve}")
+
+                        from monte_carlo2 import MonteCarloEngine
+                        mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
+
+                        target_buy_price = round(ref_price * buy_multiplier, int(-math.log10(price_precision)))
+                        target_sell_price = round(ref_price * sell_multiplier, int(-math.log10(price_precision)))
+
+                        # Estimate hit probability for BUY (mode "below" because limit buy price is below current price)
+                        prob_buy = mc_engine.estimate_hit_probability(
+                            current_price=last_close,
+                            target_price=target_buy_price,
+                            volatility=volatility,
+                            drift=drift,
+                            mode="below"
+                        )
+
+                        # Estimate hit probability for SELL (mode "above" because limit sell price is above current price)
+                        prob_sell = mc_engine.estimate_hit_probability(
+                            current_price=last_close,
+                            target_price=target_sell_price,
+                            volatility=volatility,
+                            drift=drift,
+                            mode="above"
+                        )
+
+                        console.print(f"[{symbol}] Simultaneous signals: BUY prob = {prob_buy:.4f} (target: {target_buy_price:.8f}), SELL prob = {prob_sell:.4f} (target: {target_sell_price:.8f})")
+
+                        if prob_buy >= prob_sell:
+                            global_sell[latest_idx] = False
+                            console.print(f"[{symbol}] Prioritizing BUY signal (probability {prob_buy:.4f} >= {prob_sell:.4f}).")
+                        else:
+                            global_buy[latest_idx] = False
+                            console.print(f"[{symbol}] Prioritizing SELL signal (probability {prob_sell:.4f} > {prob_buy:.4f}).")
+
                     # decide buy
                     if global_buy[latest_idx]:
                         # skip if buys are paused for this symbol
