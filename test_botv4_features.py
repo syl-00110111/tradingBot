@@ -1,0 +1,179 @@
+import sys
+import os
+import json
+import math
+import unittest
+from unittest.mock import MagicMock, patch
+
+# Mock dependencies to prevent errors during import in sandbox without pandas/ccxt/numpy/torch
+mock_pandas = MagicMock()
+class MockDataFrame:
+    def __init__(self, data=None, columns=None):
+        if data is None:
+            data = []
+        self.data = data
+        self.columns = columns
+    def empty(self):
+        return len(self.data) == 0
+    def tail(self, n):
+        return MockDataFrame(self.data[-n:], self.columns)
+mock_pandas.DataFrame = MockDataFrame
+sys.modules['pandas'] = mock_pandas
+
+mock_pandas_ta = MagicMock()
+sys.modules['pandas_ta'] = mock_pandas_ta
+
+mock_numpy = MagicMock()
+mock_numpy.nan = float('nan')
+mock_numpy.log = math.log
+mock_numpy.sqrt = math.sqrt
+sys.modules['numpy'] = mock_numpy
+
+mock_torch = MagicMock()
+sys.modules['torch'] = mock_torch
+
+mock_ccxt = MagicMock()
+sys.modules['ccxt'] = mock_ccxt
+
+mock_plotext = MagicMock()
+sys.modules['plotext'] = mock_plotext
+
+mock_readchar = MagicMock()
+sys.modules['readchar'] = mock_readchar
+
+mock_psutil = MagicMock()
+sys.modules['psutil'] = mock_psutil
+
+# Mock rich elements
+mock_rich = MagicMock()
+sys.modules['rich'] = mock_rich
+sys.modules['rich.console'] = mock_rich
+sys.modules['rich.live'] = mock_rich
+sys.modules['rich.table'] = mock_rich
+sys.modules['rich.progress'] = mock_rich
+sys.modules['rich.layout'] = mock_rich
+sys.modules['rich.panel'] = mock_rich
+sys.modules['rich.logging'] = mock_rich
+sys.modules['rich.text'] = mock_rich
+
+# Now import botv4 features
+import botv4
+
+class TestBotV4Features(unittest.TestCase):
+    def setUp(self):
+        # Clean up any test files
+        self.purchases_file = 'recorded_purchases.json'
+        if os.path.exists(self.purchases_file):
+            os.remove(self.purchases_file)
+        botv4.recorded_purchases = {}
+
+    def tearDown(self):
+        if os.path.exists(self.purchases_file):
+            os.remove(self.purchases_file)
+        botv4.recorded_purchases = {}
+
+    def test_record_purchase(self):
+        botv4.record_purchase("BTC/USD", 1.5, 50000.0)
+        self.assertIn("BTC/USD", botv4.recorded_purchases)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 1)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["amount"], 1.5)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["price"], 50000.0)
+
+        # Verify it was persisted to file
+        self.assertTrue(os.path.exists(self.purchases_file))
+        with open(self.purchases_file, 'r') as f:
+            data = json.load(f)
+            self.assertIn("BTC/USD", data)
+
+    def test_is_sell_profitable_and_deductions(self):
+        # If no purchases, default to True
+        profitable, msg = botv4.is_sell_profitable("BTC/USD", 48000.0, 1.0)
+        self.assertTrue(profitable)
+
+        # Record two purchases
+        botv4.record_purchase("BTC/USD", 1.0, 40000.0)
+        botv4.record_purchase("BTC/USD", 1.0, 42000.0)
+        # Average purchase price: 41000.0
+
+        # Selling at 40500 should be unprofitable (40500 < 41000)
+        profitable, msg = botv4.is_sell_profitable("BTC/USD", 40500.0, 1.0)
+        self.assertFalse(profitable)
+
+        # Selling at 41500 should be profitable (41500 > 41000)
+        profitable, msg = botv4.is_sell_profitable("BTC/USD", 41500.0, 1.0)
+        self.assertTrue(profitable)
+
+        # Deduct some amount (1.5 BTC)
+        # Oldest purchase of 1.0 at 40000 is removed. Next of 1.0 at 42000 is reduced to 0.5.
+        botv4.remove_recorded_purchases("BTC/USD", 1.5)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 1)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["amount"], 0.5)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["price"], 42000.0)
+
+        # Now the average price is 42000.0.
+        # Selling at 41500 should now be unprofitable.
+        profitable, msg = botv4.is_sell_profitable("BTC/USD", 41500.0, 0.5)
+        self.assertFalse(profitable)
+
+        # Selling at 43000 should be profitable.
+        profitable, msg = botv4.is_sell_profitable("BTC/USD", 43000.0, 0.5)
+        self.assertTrue(profitable)
+
+    def test_cleanup_open_orders_prob_sufficient(self):
+        mock_exchange = MagicMock()
+        mock_exchange.rateLimit = 1000
+        # Mock previous orders on different side (side = 'buy', previous order = 'sell')
+        mock_exchange.fetch_open_orders.return_value = [
+            {'id': '123', 'side': 'sell', 'price': 45000.0, 'symbol': 'BTC/USD'}
+        ]
+
+        # Prepare dummy df_candles
+        # Close is 44000.0, target is 45000.0, which has very high probability to hit if we mock it or use realistic volatility.
+        # Let's mock MonteCarloEngine's estimate_hit_probability to return high probability (0.8)
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.8
+            # Under config we have sufficient_probability = 0.15 (the default)
+            botv4.config = {'monte_carlo': {'sufficient_probability': 0.15}}
+
+            botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 43000.0, "buy", None, 44000.0)
+
+            # Since execution probability (0.8) >= threshold (0.15), order should NOT be cancelled
+            mock_exchange.cancel_order.assert_not_called()
+
+    def test_cleanup_open_orders_prob_insufficient(self):
+        mock_exchange = MagicMock()
+        mock_exchange.rateLimit = 1000
+        # Mock previous orders on different side
+        mock_exchange.fetch_open_orders.return_value = [
+            {'id': '123', 'side': 'sell', 'price': 45000.0, 'symbol': 'BTC/USD'}
+        ]
+
+        # Let's mock MonteCarloEngine's estimate_hit_probability to return low probability (0.05)
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.05
+            botv4.config = {'monte_carlo': {'sufficient_probability': 0.15}}
+
+            botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 43000.0, "buy", None, 44000.0)
+
+            # Since execution probability (0.05) < threshold (0.15) and side changed (sell vs buy), it should be cancelled!
+            mock_exchange.cancel_order.assert_called_once_with('123', 'BTC/USD')
+
+    def test_cleanup_open_orders_same_side(self):
+        mock_exchange = MagicMock()
+        mock_exchange.rateLimit = 1000
+        # Mock previous order on same side (sell vs sell)
+        mock_exchange.fetch_open_orders.return_value = [
+            {'id': '123', 'side': 'sell', 'price': 45000.0, 'symbol': 'BTC/USD'}
+        ]
+
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.01 # extremely low
+            botv4.config = {'monte_carlo': {'sufficient_probability': 0.15}}
+
+            botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 46000.0, "sell", None, 44000.0)
+
+            # Side did not change (both sell), so order should NOT be cancelled even with low probability
+            mock_exchange.cancel_order.assert_not_called()
+
+if __name__ == '__main__':
+    unittest.main()
