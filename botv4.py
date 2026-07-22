@@ -547,27 +547,27 @@ if __name__ == '__main__':
 
                     # Ajustement des seuils de déclenchement
                     # c'était 6-6
-                    buy_multiplier = 0.994
-                    sell_multiplier = 1.006
+                    buy_multiplier = 0.9994
+                    sell_multiplier = 1.0006
 
                     if regime_str == 'Trend Following':
                         if is_bullish:
                             # c'était 3-10
-                            buy_multiplier = 0.997
-                            sell_multiplier = 1.010
+                            buy_multiplier = 0.9997
+                            sell_multiplier = 1.0010
                         else:
                             # c'était 10-3
-                            buy_multiplier = 0.990
-                            sell_multiplier = 1.003
+                            buy_multiplier = 0.9990
+                            sell_multiplier = 1.0003
                     else:  # Mean Reversion
                         if is_bullish:
                             # c'était 6-6
-                            buy_multiplier = 0.994
-                            sell_multiplier = 1.006
+                            buy_multiplier = 0.9994
+                            sell_multiplier = 1.0006
                         else:
                             # c'était 5-5
-                            buy_multiplier = 0.995
-                            sell_multiplier = 1.005
+                            buy_multiplier = 0.9995
+                            sell_multiplier = 1.0005
 
                     # decide buy
                     if global_buy[latest_idx]:
