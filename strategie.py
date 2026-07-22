@@ -15,7 +15,7 @@ def main(symbol: str, _id: str):
     # use sanitized id for filename
     if _id is None:
         _id = symbol.replace('/', '')
-    df_candles = fetch_ohlcv_data(_id, symbol)
+    df_candles = fetch_ohlcv_data(_id, symbol).tail(100)  # (TODO TEST variance temporelle 100 minutes)
     if df_candles is None or len(df_candles) == 0:
         console.print(f"[red]No candle data for {symbol}[/red]")
         return
@@ -66,6 +66,20 @@ def main(symbol: str, _id: str):
         plt.scatter(buy_positions, buy_prices, marker='x', color='green')
     if sell_positions:
         plt.scatter(sell_positions, sell_prices, marker='o', color='red')
+
+    # set xticks so both series share the same abscisse
+    step = max(1, len(dates) // 8)
+    x_ticks = x[::step]
+    x_labels = [dates[i] for i in x_ticks]
+    plt.xticks(x_ticks, x_labels)
+
+    plt.show()
+
+    # draw second time pour bien voir
+    if sell_positions:
+        plt.scatter(sell_positions, sell_prices, marker='o', color='red')
+    if buy_positions:
+        plt.scatter(buy_positions, buy_prices, marker='x', color='green')
 
     # set xticks so both series share the same abscisse
     step = max(1, len(dates) // 8)

@@ -361,7 +361,7 @@ while True:
                             pausedForBuy=pausedForBuy,
                             PAUSE_FILE=PAUSE_FILE,
                             console=console
-                        )
+                        ).tail(100)  # (TODO TEST variance temporelle 100 minutes)
                         try:
                             # vérifier la cohérence des chandelles immédiatement après le fetch
                             market_utils.check_candles_consistency(symbol, console=console)
@@ -434,28 +434,28 @@ while True:
                     console.print(f"[{symbol}] Échec du calcul de l'ADX, régime par défaut: {regime_str}: {e}")
 
                 # Ajustement des seuils de déclenchement
-                # c'était 6-6 il faut passer à 2-2
-                buy_multiplier = 0.999
-                sell_multiplier = 1.001
+                # c'était 6-6
+                buy_multiplier = 0.994
+                sell_multiplier = 1.006
 
                 if regime_str == 'Trend Following':
                     if is_bullish:
-                        # c'était 3-10 il faut passer à 1-3
-                        buy_multiplier = 0.999
-                        sell_multiplier = 1.001
+                        # c'était 3-10
+                        buy_multiplier = 0.997
+                        sell_multiplier = 1.010
                     else:
-                        # c'était 10-3 il faut passer à 3-1
-                        buy_multiplier = 0.999 # test
-                        sell_multiplier = 1.001
+                        # c'était 10-3
+                        buy_multiplier = 0.990
+                        sell_multiplier = 1.003
                 else:  # Mean Reversion
                     if is_bullish:
-                        # c'était 6-6 il faut passer à 2-2
-                        buy_multiplier = 0.999
-                        sell_multiplier = 1.001
+                        # c'était 6-6
+                        buy_multiplier = 0.994
+                        sell_multiplier = 1.006
                     else:
-                        # c'était 5-5 il faut passer à 1-1
-                        buy_multiplier = 0.999
-                        sell_multiplier = 1.001
+                        # c'était 5-5
+                        buy_multiplier = 0.995
+                        sell_multiplier = 1.005
 
                 # decide buy
                 if global_buy[latest_idx]:
@@ -663,23 +663,9 @@ while True:
                 if now_ts - last_pending_fetch >= 30 * 60:
                     # batch symbole au hasard - choisir correctement quand _markets est un dict
                     for _ in range(3):
-                        try:
-                            if isinstance(_markets, dict):
-                                market_sample = random.choice(list(_markets.values())) if _markets else None
-                                console.print(f"TEST 1 A")
-                            else:
-                                market_sample = random.choice(_markets) if _markets else None
-                                console.print(f"TEST 1 B")
-                            if isinstance(market_sample, dict):
-                                symbolChoose = market_sample.get('symbol') or market_sample.get('id')
-                                console.print(f"TEST 2 A")
-                            else:
-                                symbolChoose = str(market_sample) if market_sample is not None else None
-                                console.print(f"TEST 2 B")
-                            console.print(f"Chose to update symbol: {symbolChoose}")
-                        except Exception as _e:
-                            symbolChoose = None
-                            console.print(f"TEST 3")
+                        market_sample = random.choice(list(_markets.values()))
+                        symbolChoose = market_sample.get('symbol')
+                        console.print(f"Chose to update symbol: {symbolChoose}")
                         _count = symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console)
                         if _count >= miniCount:
                             availablePairs.append(symbolChoose)

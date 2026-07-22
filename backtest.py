@@ -135,8 +135,8 @@ def main(symbol: str, _id: str):
     import pandas
     import plotext as plt
 
-    # Charger les bougies une seule fois (toutes les bougies disponibles)
-    new_candles_df = pandas.DataFrame(df_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    # Charger les bougies une seule fois (TODO TEST variance temporelle 100 minutes)
+    new_candles_df = pandas.DataFrame(df_candles.tail(100), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
     from datetime import datetime
 
@@ -161,6 +161,7 @@ def main(symbol: str, _id: str):
 
         # Compute signals for all candles (is_scan=True) so MC strategies populate full series
         df = get_signals(new_candles_df.copy(), settings, is_scan=True, global_config=config)
+
         buys = []
         sells = []
         if df is None or df.empty:
@@ -176,11 +177,11 @@ def main(symbol: str, _id: str):
                     sells.append((j, float(latest.get('close', float('nan')))))
 
         # Préparer les données pour le tracé
-        timestamps = df_candles['timestamp'].astype(int).tolist()
-        opens = df_candles['open'].astype(float).tolist()
-        highs = df_candles['high'].astype(float).tolist()
-        lows = df_candles['low'].astype(float).tolist()
-        closes = df_candles['close'].astype(float).tolist()
+        timestamps = new_candles_df['timestamp'].astype(int).tolist()
+        opens = new_candles_df['open'].astype(float).tolist()
+        highs = new_candles_df['high'].astype(float).tolist()
+        lows = new_candles_df['low'].astype(float).tolist()
+        closes = new_candles_df['close'].astype(float).tolist()
         dates = [datetime.fromtimestamp(int(ts) / 1000).strftime('%d/%m %H:%M') for ts in timestamps]
 
         plt.clear_figure()
