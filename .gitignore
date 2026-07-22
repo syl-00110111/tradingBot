@@ -19,3 +19,4 @@ volumes_trades_data.json
 my_trades_cache.json
 *.bak
 .vs/
+recorded_purchases.json
