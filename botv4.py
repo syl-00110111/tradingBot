@@ -435,14 +435,14 @@ while True:
 
                 # Ajustement des seuils de déclenchement
                 # c'était 6-6 il faut passer à 2-2
-                buy_multiplier = 0.998
-                sell_multiplier = 1.002
+                buy_multiplier = 0.999
+                sell_multiplier = 1.001
 
                 if regime_str == 'Trend Following':
                     if is_bullish:
                         # c'était 3-10 il faut passer à 1-3
                         buy_multiplier = 0.999
-                        sell_multiplier = 1.003
+                        sell_multiplier = 1.001
                     else:
                         # c'était 10-3 il faut passer à 3-1
                         buy_multiplier = 0.999 # test
@@ -450,8 +450,8 @@ while True:
                 else:  # Mean Reversion
                     if is_bullish:
                         # c'était 6-6 il faut passer à 2-2
-                        buy_multiplier = 0.998
-                        sell_multiplier = 1.002
+                        buy_multiplier = 0.999
+                        sell_multiplier = 1.001
                     else:
                         # c'était 5-5 il faut passer à 1-1
                         buy_multiplier = 0.999
@@ -662,21 +662,40 @@ while True:
                 now_ts = time.time()
                 if now_ts - last_pending_fetch >= 30 * 60:
                     # batch symbole au hasard - choisir correctement quand _markets est un dict
-                    try:
-                        if isinstance(_markets, dict):
-                            market_sample = random.choice(list(_markets.values())) if _markets else None
-                        else:
-                            market_sample = random.choice(_markets) if _markets else None
-                        if isinstance(market_sample, dict):
-                            symbolChoose = market_sample.get('symbol') or market_sample.get('id')
-                        else:
-                            symbolChoose = str(market_sample) if market_sample is not None else None
-                        console.print(f"Chose to update symbol: {symbolChoose}")
-                    except Exception as _e:
-                        symbolChoose = None
-                    if symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console) > miniCount:
-                        availablePairs.append(symbolChoose)
-                        console.print(f"Appended {symbolChoose} to tracked pairs.")
+                    for _ in range(3):
+                        try:
+                            if isinstance(_markets, dict):
+                                market_sample = random.choice(list(_markets.values())) if _markets else None
+                                console.print(f"TEST 1 A")
+                            else:
+                                market_sample = random.choice(_markets) if _markets else None
+                                console.print(f"TEST 1 B")
+                            if isinstance(market_sample, dict):
+                                symbolChoose = market_sample.get('symbol') or market_sample.get('id')
+                                console.print(f"TEST 2 A")
+                            else:
+                                symbolChoose = str(market_sample) if market_sample is not None else None
+                                console.print(f"TEST 2 B")
+                            console.print(f"Chose to update symbol: {symbolChoose}")
+                        except Exception as _e:
+                            symbolChoose = None
+                            console.print(f"TEST 3")
+                        _count = symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console)
+                        if _count >= miniCount:
+                            availablePairs.append(symbolChoose)
+                            console.print(f"Appended {symbolChoose} to tracked pairs.")
+                        elif _count < miniCount:
+                            expiry_ts = int(time.time()) + (4 * 3600)
+                            pausedForBuy[symbol] = expiry_ts
+                            try:
+                                try:
+                                    safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                                except Exception:
+                                    with open(PAUSE_FILE, 'w') as f:
+                                        json.dump(pausedForBuy, f)
+                            except Exception as ex:
+                                console.print(f"Failed to persist pausedForBuy: {ex}")
+                            console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum.")
                     last_pending_fetch = now_ts
                     console.print(f"[yellow]Periodic task: fetching open orders at {datetime.fromtimestamp(now_ts)}[/yellow]")
                     recent = []

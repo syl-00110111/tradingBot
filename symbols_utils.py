@@ -133,7 +133,7 @@ def computeSymbols(
 
         _g = {'id': []}
         for _v in _volumes:
-            if _v.get('trades_count', 0) > mini_count:
+            if _v.get('trades_count', 0) >= mini_count:
                 # tri du volume à part
                 _g['id'].append(_v.get('id'))
 
