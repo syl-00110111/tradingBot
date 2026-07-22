@@ -468,7 +468,7 @@ if __name__ == '__main__':
                                 pausedForBuy=pausedForBuy,
                                 PAUSE_FILE=PAUSE_FILE,
                                 console=console
-                            ).tail(100)  # (TODO TEST variance temporelle 100 minutes)
+                            ).tail(180)  # (TODO TEST variance temporelle 180 minutes)
                             try:
                                 # vérifier la cohérence des chandelles immédiatement après le fetch
                                 market_utils.check_candles_consistency(symbol, console=console)
