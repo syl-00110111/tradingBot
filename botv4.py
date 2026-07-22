@@ -609,9 +609,9 @@ if __name__ == '__main__':
                             else:
                                 # calculate desired amount that equals package at the current price
                                 if price > 0:
-                                    desired_amount = min_amount * 1.001
-                                    max_affordable = quote_free / last_close / 2.001 # tier-hardcoded
-                                    amount = round ( min(desired_amount, max_affordable) * (4/3), int(-math.log10( amount_precision ) ) )
+                                    desired_amount = min_amount * 1.0001
+                                    max_affordable = quote_free / last_close / 4.0004 # tier-hardcoded
+                                    amount = round ( min(desired_amount, max_affordable) * (10/9), int(-math.log10( amount_precision ) ) )
                                 else:
                                     amount = 0
                                 # final amount check
@@ -712,7 +712,7 @@ if __name__ == '__main__':
                                 # sell everything if paused
                                 amount = round ( base_free, int(-math.log10( amount_precision ) ) )
                             else: # tier hardcoded
-                                amount = round ( base_free * (5 / 6), int(-math.log10( amount_precision ) ) )
+                                amount = round ( base_free * (8 / 9), int(-math.log10( amount_precision ) ) )
                             if amount <= min_amount:
                                 console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
                             else:
