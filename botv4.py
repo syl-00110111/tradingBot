@@ -658,8 +658,8 @@ if __name__ == '__main__':
                             else:
                                 # calculate desired amount that equals package at the current price
                                 if price > 0:
-                                    desired_amount = min_amount * 1.0001
-                                    max_affordable = quote_free / last_close / 4.0004 # tier-hardcoded
+                                    desired_amount = min_amount * 2.0002
+                                    max_affordable = quote_free / package / 4.0004 # tier-hardcoded
                                     amount = round ( min(desired_amount, max_affordable) * (10/9), int(-math.log10( amount_precision ) ) )
                                 else:
                                     amount = 0
@@ -831,8 +831,10 @@ if __name__ == '__main__':
                 try:
                     now_ts = time.time()
                     if now_ts - last_pending_fetch >= 30 * 60:
+                        # update balance
+                        balance = market_utils.fetch_balance(exchange, console=console)
                         # batch symbole au hasard - choisir correctement quand _markets est un dict
-                        for _ in range(3):
+                        for _ in range(15):
                             market_sample = random.choice(list(_markets.values()))
                             symbolChoose = market_sample.get('symbol')
                             console.print(f"Chose to update symbol: {symbolChoose}")
