@@ -690,8 +690,7 @@ if __name__ == '__main__':
                                 if price > 0:
                                     desired_amount = min_amount * (110/100)
                                     decimals = int(-math.log10(amount_precision))
-                                    epsilon = 10 ** (-decimals - 1)
-                                    amount = round(desired_amount - epsilon, decimals)
+                                    amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
                                 else:
                                     amount = 0
                                 # final amount check
@@ -793,12 +792,11 @@ if __name__ == '__main__':
                             now_ts = int(time.time())
                             expiry = pausedForBuy.get(symbol)
                             decimals = int(-math.log10(amount_precision))
-                            epsilon = 10 ** (-decimals - 1)
                             if expiry and now_ts < int(expiry):
                                 # sell everything if paused
-                                amount = round(base_free - epsilon, decimals)
+                                amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
                             else: # sell everything TODO TEST
-                                amount = round(base_free - epsilon, decimals)
+                                amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
                             if amount <= min_amount:
                                 console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
                             else:
