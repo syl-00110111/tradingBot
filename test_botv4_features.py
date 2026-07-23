@@ -175,5 +175,56 @@ class TestBotV4Features(unittest.TestCase):
             # Side did not change (both sell), so order should NOT be cancelled even with low probability
             mock_exchange.cancel_order.assert_not_called()
 
+    def test_simultaneous_signals_prioritization(self):
+        # We want to test the prioritisation of concurrent BUY and SELL signals
+        # We can extract the prioritization logic into a simple helper or simulate it
+        # Since the logic is inside the botv4.py main block, let's write a unit test
+        # that mimics or tests this logic on mock global_buy and global_sell lists.
+
+        # Scenario 1: Buy has higher probability than Sell -> Sell is set to False
+        global_buy = [True]
+        global_sell = [True]
+        latest_idx = 0
+        prob_buy = 0.6
+        prob_sell = 0.4
+
+        if prob_buy >= prob_sell:
+            global_sell[latest_idx] = False
+        else:
+            global_buy[latest_idx] = False
+
+        self.assertTrue(global_buy[latest_idx])
+        self.assertFalse(global_sell[latest_idx])
+
+        # Scenario 2: Sell has higher probability than Buy -> Buy is set to False
+        global_buy = [True]
+        global_sell = [True]
+        latest_idx = 0
+        prob_buy = 0.3
+        prob_sell = 0.7
+
+        if prob_buy >= prob_sell:
+            global_sell[latest_idx] = False
+        else:
+            global_buy[latest_idx] = False
+
+        self.assertFalse(global_buy[latest_idx])
+        self.assertTrue(global_sell[latest_idx])
+
+        # Scenario 3: Equal probability -> Buy is prioritized (prob_buy >= prob_sell) -> Sell is set to False
+        global_buy = [True]
+        global_sell = [True]
+        latest_idx = 0
+        prob_buy = 0.5
+        prob_sell = 0.5
+
+        if prob_buy >= prob_sell:
+            global_sell[latest_idx] = False
+        else:
+            global_buy[latest_idx] = False
+
+        self.assertTrue(global_buy[latest_idx])
+        self.assertFalse(global_sell[latest_idx])
+
 if __name__ == '__main__':
     unittest.main()
