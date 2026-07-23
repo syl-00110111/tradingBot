@@ -790,11 +790,13 @@ if __name__ == '__main__':
                             # sell everything if symbol paused
                             now_ts = int(time.time())
                             expiry = pausedForBuy.get(symbol)
+                            decimals = int(-math.log10(amount_precision))
+                            epsilon = 10 ** (-decimals - 1)
                             if expiry and now_ts < int(expiry):
                                 # sell everything if paused
-                                amount = round(base_free - 1e-10, int(-math.log10(amount_precision)))
+                                amount = round(base_free - epsilon, decimals)
                             else: # sell everything TODO TEST
-                                amount = round(base_free - 1e-10, int(-math.log10(amount_precision)))
+                                amount = round(base_free - epsilon, decimals)
                             if amount <= min_amount:
                                 console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
                             else:
