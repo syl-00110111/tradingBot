@@ -75,7 +75,7 @@ def consecutive_count(series, window=None):
     return out
 
 
-def aggregate_signals(df_candles, global_config=None, strats=None):
+def aggregate_signals(df_candles, global_config=None, strats=None, window=60, score_buy_threshold=4, score_sell_threshold=4):
     """
     Calcule les signaux agrégés à partir des stratégies listées dans `strats`.
     Retourne un dict contenant: N, signal_frames, score_buy, score_sell, global_buy, global_sell
@@ -115,8 +115,8 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
     pt = signal_frames.get('ichimoku_cloud')
     if pt is not None and not pt.empty:
         # à l'envers
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         for i in range(N):
             if buys[i] >= 4:
                 score_sell[i] += 1
@@ -127,8 +127,8 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
     pt = signal_frames.get('williams_r')
     if pt is not None and not pt.empty:
         # à l'endroit
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         for i in range(N):
             if buys[i] >= 2:
                 score_buy[i] += 1
@@ -139,8 +139,8 @@ def aggregate_signals(df_candles, global_config=None, strats=None):
     pt = signal_frames.get('vwap_momentum')
     if pt is not None and not pt.empty:
         # à l'envers
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         for i in range(N):
             if buys[i] >= 6:
                 score_sell[i] += 1
