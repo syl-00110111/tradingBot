@@ -393,20 +393,20 @@ def run_benchmark():
     STRATS = ['ichimoku_cloud', 'williams_r', 'vwap_momentum', 'pairs_trading_proxy']
 
     # Grid parameters definition
-    windows = [20, 30]
+    windows = [10, 20]
     score_buys = [2, 3]
     score_sells = [2, 3]
-    tailed_values = [120]
+    tailed_values = [240]
 
     # Sub-strategy buy/sell thresholds grids
-    ichimoku_buys = [3, 4]
-    ichimoku_sells = [3, 4]
-    williams_buys = [2, 3]
-    williams_sells = [2, 3]
-    vwap_buys = [5, 6]
-    vwap_sells = [5, 6]
-    pairs_buys = [2, 3]
-    pairs_sells = [2, 3]
+    ichimoku_buys = [2, 3]
+    ichimoku_sells = [2, 3]
+    williams_buys = [1, 2]
+    williams_sells = [1, 2]
+    vwap_buys = [4, 5]
+    vwap_sells = [4, 5]
+    pairs_buys = [1, 2]
+    pairs_sells = [1, 2]
 
     # Pre-computed lookup dictionary: pre_computed[symbol][strat][window]['buy'/'sell'] -> list
     pre_computed = {}

@@ -15,7 +15,7 @@ def main(symbol: str, _id: str):
     # use sanitized id for filename
     if _id is None:
         _id = symbol.replace('/', '')
-    df_candles = fetch_ohlcv_data(_id, symbol).tail(120)  # (TODO TEST variance temporelle 120 minutes)
+    df_candles = fetch_ohlcv_data(_id, symbol).tail(240)  # (TODO TEST variance temporelle 240 minutes)
     if df_candles is None or len(df_candles) == 0:
         console.print(f"[red]No candle data for {symbol}[/red]")
         return

@@ -135,8 +135,8 @@ def main(symbol: str, _id: str):
     import pandas
     import plotext as plt
 
-    # Charger les bougies une seule fois (TODO TEST variance temporelle 120 minutes)
-    new_candles_df = pandas.DataFrame(df_candles.tail(120), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    # Charger les bougies une seule fois (TODO TEST variance temporelle 240 minutes)
+    new_candles_df = pandas.DataFrame(df_candles.tail(240), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
     from datetime import datetime
 

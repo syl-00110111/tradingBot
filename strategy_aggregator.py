@@ -75,11 +75,11 @@ def consecutive_count(series, window=None):
     return out
 
 
-def aggregate_signals(df_candles, global_config=None, strats=None, window=20, score_buy_threshold=2, score_sell_threshold=2,
-                      ichimoku_buy_threshold=3, ichimoku_sell_threshold=4,
-                      williams_buy_threshold=2, williams_sell_threshold=2,
+def aggregate_signals(df_candles, global_config=None, strats=None, window=20, score_buy_threshold=3, score_sell_threshold=2,
+                      ichimoku_buy_threshold=2, ichimoku_sell_threshold=3,
+                      williams_buy_threshold=1, williams_sell_threshold=1,
                       vwap_buy_threshold=5, vwap_sell_threshold=5,
-                      pairs_buy_threshold=2, pairs_sell_threshold=2,
+                      pairs_buy_threshold=1, pairs_sell_threshold=1,
                       signal_frames=None):
     """
     Calcule les signaux agrégés à partir des stratégies listées dans `strats`.
