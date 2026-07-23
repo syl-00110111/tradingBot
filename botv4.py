@@ -839,12 +839,12 @@ if __name__ == '__main__':
                             symbolChoose = market_sample.get('symbol')
                             console.print(f"Chose to update symbol: {symbolChoose}")
                             _count = symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console)
-                            if _count >= miniCount:
+                            if _count >= miniCount and symbolChoose not in availablePairs:
                                 availablePairs.append(symbolChoose)
                                 console.print(f"Appended {symbolChoose} to tracked pairs.")
-                            elif _count < miniCount:
+                            elif _count < miniCount and symbolChoose in availablePairs:
                                 expiry_ts = int(time.time()) + (4 * 3600)
-                                pausedForBuy[symbol] = expiry_ts
+                                pausedForBuy[symbolChoose] = expiry_ts
                                 try:
                                     try:
                                         safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
@@ -853,7 +853,7 @@ if __name__ == '__main__':
                                             json.dump(pausedForBuy, f)
                                 except Exception as ex:
                                     console.print(f"Failed to persist pausedForBuy: {ex}")
-                                console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum.")
+                                console.print(f"Paused buys for {symbolChoose} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum.")
                         last_pending_fetch = now_ts
                         console.print(f"[yellow]Periodic task: fetching open orders at {datetime.fromtimestamp(now_ts)}[/yellow]")
                         recent = []
