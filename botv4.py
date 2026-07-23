@@ -792,9 +792,9 @@ if __name__ == '__main__':
                             expiry = pausedForBuy.get(symbol)
                             if expiry and now_ts < int(expiry):
                                 # sell everything if paused
-                                amount = round ( base_free, int(-math.log10( amount_precision ) ) )
+                                amount = round ( base_free - 1e-10, amount_precision )
                             else: # sell everything TODO TEST
-                                amount = round ( base_free, int(-math.log10( amount_precision ) ) )
+                                amount = round ( base_free - 1e-10, amount_precision )
                             if amount <= min_amount:
                                 console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
                             else:
