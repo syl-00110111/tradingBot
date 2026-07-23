@@ -75,7 +75,12 @@ def consecutive_count(series, window=None):
     return out
 
 
-def aggregate_signals(df_candles, global_config=None, strats=None, window=20, score_buy_threshold=2, score_sell_threshold=2):
+def aggregate_signals(df_candles, global_config=None, strats=None, window=20, score_buy_threshold=2, score_sell_threshold=2,
+                      ichimoku_buy_threshold=4, ichimoku_sell_threshold=4,
+                      williams_buy_threshold=2, williams_sell_threshold=2,
+                      vwap_buy_threshold=6, vwap_sell_threshold=6,
+                      pairs_buy_threshold=2, pairs_sell_threshold=2,
+                      signal_frames=None):
     """
     Calcule les signaux agrégés à partir des stratégies listées dans `strats`.
     Retourne un dict contenant: N, signal_frames, score_buy, score_sell, global_buy, global_sell
@@ -106,11 +111,11 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
 
     score_buy = [0.0] * N
     score_sell = [0.0] * N
-    
+
     # ichimoku_cloud régulier mais sensible
     # williams_r lent mais régulier
     # vwap_momentum crêtes à l'envers
-    
+
     # 1) ichimoku_cloud
     pt = signal_frames.get('ichimoku_cloud')
     if pt is not None and not pt.empty:
@@ -118,9 +123,9 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
         sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         for i in range(N):
-            if buys[i] >= 4:
+            if buys[i] >= ichimoku_sell_threshold:
                 score_sell[i] += 1
-            if sells[i] >= 4:
+            if sells[i] >= ichimoku_buy_threshold:
                 score_buy[i] += 1
 
     # 2) williams_r
@@ -130,9 +135,9 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
         sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         for i in range(N):
-            if buys[i] >= 2:
+            if buys[i] >= williams_buy_threshold:
                 score_buy[i] += 1
-            if sells[i] >= 2:
+            if sells[i] >= williams_sell_threshold:
                 score_sell[i] += 1
 
     # 3) vwap_momentum
@@ -142,9 +147,9 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
         buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
         for i in range(N):
-            if buys[i] >= 6:
+            if buys[i] >= vwap_sell_threshold:
                 score_sell[i] += 1
-            if sells[i] >= 6:
+            if sells[i] >= vwap_buy_threshold:
                 score_buy[i] += 1
 
     # 4) pairs_trading_proxy
@@ -154,13 +159,13 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
         sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
         buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
         for i in range(N):
-            if buys[i] >= 2:
+            if buys[i] >= pairs_buy_threshold:
                 score_buy[i] += 1
-            if sells[i] >= 2:
+            if sells[i] >= pairs_sell_threshold:
                 score_sell[i] += 1
 
-    global_buy = [s >= 4 for s in score_buy]
-    global_sell = [s >= 4 for s in score_sell]
+    global_buy = [s >= score_buy_threshold for s in score_buy]
+    global_sell = [s >= score_sell_threshold for s in score_sell]
 
     # print(f"DEBUG sell= {global_sell}")
 
