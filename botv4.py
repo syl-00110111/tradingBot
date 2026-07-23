@@ -660,7 +660,7 @@ if __name__ == '__main__':
                                 # calculate desired amount that equals package at the current price
                                 if price > 0:
                                     desired_amount = min_amount * 2.0002
-                                    max_affordable = quote_free / package / 4.0004 # tier-hardcoded
+                                    max_affordable = quote_free / package / 8.0008 # tier-hardcoded
                                     amount = round ( min(desired_amount, max_affordable) * (10/9), int(-math.log10( amount_precision ) ) )
                                 else:
                                     amount = 0
