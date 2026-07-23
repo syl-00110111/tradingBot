@@ -50,13 +50,14 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     balanceFetched = False
     marketsFetched = False
     sourceAssets = []
-    forbidAssets = ['USDT']
+    forbidAssets = ['USDT', 'XMR']
     previousPairs = []
     availablePairs = []
     maxNumPairs = 50
 
     # ccxt markets keyword is used
     _markets = []
+    _balance = None
     _positions = {}  # key: symbol, value: {'amount': float, 'avg_price': float}
 
     # periodic pending orders dump / candle consistency check
@@ -415,15 +416,15 @@ if __name__ == '__main__':
 
             # interroger les assets disponibles sur la plateforme pour l'utilisateur et les stocker dans une variable globale
             if balanceFetched == False:
-                balance = market_utils.fetch_balance(exchange, console=console)
+                _balance = market_utils.fetch_balance(exchange, console=console)
                 balanceFetched = True
-                # console.print(f"original balance: {balance}")
+                # console.print(f"original balance: {_balance}")
 
             # markets fetch
             if marketsFetched == False:
                 _markets = loadMarkets(exchange, "markets.json")
                 availablePairs = symbols_utils.computeSymbols(
-                    balance=balance,
+                    balance=_balance,
                     previousPairs=None,
                     source_assets=sourceAssets,
                     forbid_assets=forbidAssets,
@@ -648,7 +649,7 @@ if __name__ == '__main__':
                             price = round ( base_price * buy_multiplier, int(-math.log10( price_precision ) ) )
                             package = round ( price * min_amount, int(-math.log10( price_precision ) ) )
                             # read quote balance robustly
-                            _b = balance.get('free').get(quote)
+                            _b = _balance.get('free').get(quote)
                             if _b is not None:
                                 quote_free = float(_b)
                             else:
@@ -677,7 +678,7 @@ if __name__ == '__main__':
                                         # Record purchase to ensure that SELL events can check profitability later
                                         record_purchase(symbol, amount, price)
                                         # update balance
-                                        balance = market_utils.fetch_balance(exchange, console=console)
+                                        _balance = market_utils.fetch_balance(exchange, console=console)
                                         # plot a small chart with the BUY marker
                                         try:
                                             plt_ascii.clf()
@@ -739,7 +740,7 @@ if __name__ == '__main__':
 
                     # decide sell
                     if global_sell[latest_idx]:
-                        _b = balance.get('free').get(base)
+                        _b = _balance.get('free').get(base)
                         if _b is not None:
                             base_free = float(_b)
                         else:
@@ -780,7 +781,7 @@ if __name__ == '__main__':
                                         # Deduct sell_amount from recorded purchases
                                         remove_recorded_purchases(symbol, amount)
                                         # update balance
-                                        balance = market_utils.fetch_balance(exchange, console=console)
+                                        _balance = market_utils.fetch_balance(exchange, console=console)
                                         # plot SELL
                                         try:
                                             plt_ascii.clf()
@@ -831,8 +832,9 @@ if __name__ == '__main__':
                 try:
                     now_ts = time.time()
                     if now_ts - last_pending_fetch >= 30 * 60:
+                        _markets = loadMarkets(exchange, "markets.json")
                         # update balance
-                        balance = market_utils.fetch_balance(exchange, console=console)
+                        _balance = market_utils.fetch_balance(exchange, console=console)
                         # batch symbole au hasard - choisir correctement quand _markets est un dict
                         for _ in range(15):
                             market_sample = random.choice(list(_markets.values()))
