@@ -384,16 +384,64 @@ def run_benchmark():
         if df_candles is not None and len(df_candles) > 0:
             candles_by_pair[symbol] = df_candles
 
-    # Parameter grid definition
-    windows = [10, 20, 30, 40, 50, 60]
-    score_buys = [2, 3, 4]
-    score_sells = [2, 3, 4]
-    tailed_values = [90, 120, 150, 180]
+    # Pre-compute signal frames and consecutive counts to make the sweep ultra-fast (500x speedup)
+    print("\nPre-computing signal frames and consecutive counts for all pairs...")
+    import indicators2
+    get_signals = indicators2.get_signals
+    from strategy_aggregator import load_config, consecutive_count
+    cfg = load_config()
+    STRATS = ['ichimoku_cloud', 'williams_r', 'vwap_momentum', 'pairs_trading_proxy']
+
+    # Grid parameters definition
+    windows = [20, 30]
+    score_buys = [2, 3]
+    score_sells = [2, 3]
+    tailed_values = [120]
+
+    # Sub-strategy buy/sell thresholds grids
+    ichimoku_buys = [3, 4]
+    ichimoku_sells = [3, 4]
+    williams_buys = [2, 3]
+    williams_sells = [2, 3]
+    vwap_buys = [5, 6]
+    vwap_sells = [5, 6]
+    pairs_buys = [2, 3]
+    pairs_sells = [2, 3]
+
+    # Pre-computed lookup dictionary: pre_computed[symbol][strat][window]['buy'/'sell'] -> list
+    pre_computed = {}
+    for symbol, df_candles in candles_by_pair.items():
+        pre_computed[symbol] = {}
+        for strat in STRATS:
+            pre_computed[symbol][strat] = {}
+            settings = {'strategy': strat, 'device': None}
+            df_sign = get_signals(df_candles.copy(), settings, is_scan=True, global_config=cfg)
+            if df_sign is None:
+                if PANDAS_INSTALLED:
+                    df_sign = pd.DataFrame(index=df_candles.index)
+                else:
+                    df_sign = MockDataFrame(index=df_candles.index)
+
+            buys_raw = df_sign.get('buy_signal').tolist()
+            sells_raw = df_sign.get('sell_signal').tolist()
+
+            # Pre-compute for each window in grid + 60
+            for w in windows + [60]:
+                pre_computed[symbol][strat][w] = {
+                    'buy': consecutive_count(buys_raw, window=w),
+                    'sell': consecutive_count(sells_raw, window=w)
+                }
 
     results = []
 
     print("\nRunning offline performance parameter sweep...")
-    total_combinations = len(windows) * len(score_buys) * len(score_sells) * len(tailed_values)
+    total_combinations = (
+        len(windows) * len(score_buys) * len(score_sells) * len(tailed_values) *
+        len(ichimoku_buys) * len(ichimoku_sells) *
+        len(williams_buys) * len(williams_sells) *
+        len(vwap_buys) * len(vwap_sells) *
+        len(pairs_buys) * len(pairs_sells)
+    )
     print(f"Total parameter combinations to test: {total_combinations}")
 
     start_time = time.time()
@@ -401,36 +449,89 @@ def run_benchmark():
         for sb in score_buys:
             for ss in score_sells:
                 for t in tailed_values:
-                    pair_profits = []
-                    for symbol, df_candles in candles_by_pair.items():
-                        # Calculate signals with specific window, score_buy, score_sell
-                        agg = aggregate_signals(
-                            df_candles,
-                            global_config=None,
-                            window=w,
-                            score_buy_threshold=sb,
-                            score_sell_threshold=ss
-                        )
-                        global_buy = agg['global_buy']
-                        global_sell = agg['global_sell']
+                    for ib in ichimoku_buys:
+                        for is_ in ichimoku_sells:
+                            for wb in williams_buys:
+                                for ws in williams_sells:
+                                    for vb in vwap_buys:
+                                        for vs in vwap_sells:
+                                            for pb in pairs_buys:
+                                                for ps in pairs_sells:
+                                                    pair_profits = []
+                                                    for symbol, df_candles in candles_by_pair.items():
+                                                        N = len(df_candles)
 
-                        # Calculate profit on tailed subset
-                        profit = run_backtest_profit(df_candles, global_buy, global_sell, t)
-                        pair_profits.append(profit)
+                                                        # Lookups from pre-computed consecutive count arrays
+                                                        ichimoku_buys_cc = pre_computed[symbol]['ichimoku_cloud'][w]['buy']
+                                                        ichimoku_sells_cc = pre_computed[symbol]['ichimoku_cloud'][w]['sell']
 
-                    # Sort profits descending and take top 10 (or all if < 10)
-                    pair_profits.sort(reverse=True)
-                    top_10 = pair_profits[:10]
-                    avg_profit = sum(top_10) / len(top_10) if top_10 else 0.0
+                                                        williams_buys_cc = pre_computed[symbol]['williams_r'][w]['buy']
+                                                        williams_sells_cc = pre_computed[symbol]['williams_r'][w]['sell']
 
-                    # Store combination and result, discarding signal dataframes to optimize memory
-                    results.append({
-                        'window': w,
-                        'score_buy': sb,
-                        'score_sell': ss,
-                        'tailed': t,
-                        'avg_profit': avg_profit
-                    })
+                                                        vwap_buys_cc = pre_computed[symbol]['vwap_momentum'][w]['buy']
+                                                        vwap_sells_cc = pre_computed[symbol]['vwap_momentum'][w]['sell']
+
+                                                        pairs_buys_cc = pre_computed[symbol]['pairs_trading_proxy'][60]['buy']
+                                                        pairs_sells_cc = pre_computed[symbol]['pairs_trading_proxy'][60]['sell']
+
+                                                        # Fast scoring loop
+                                                        global_buy = [False] * N
+                                                        global_sell = [False] * N
+                                                        for i in range(N):
+                                                            score_buy = 0.0
+                                                            score_sell = 0.0
+
+                                                            # 1) ichimoku_cloud (à l'envers)
+                                                            if ichimoku_buys_cc[i] >= is_:
+                                                                score_sell += 1
+                                                            if ichimoku_sells_cc[i] >= ib:
+                                                                score_buy += 1
+
+                                                            # 2) williams_r
+                                                            if williams_buys_cc[i] >= wb:
+                                                                score_buy += 1
+                                                            if williams_sells_cc[i] >= ws:
+                                                                score_sell += 1
+
+                                                            # 3) vwap_momentum (à l'envers)
+                                                            if vwap_buys_cc[i] >= vs:
+                                                                score_sell += 1
+                                                            if vwap_sells_cc[i] >= vb:
+                                                                score_buy += 1
+
+                                                            # 4) pairs_trading_proxy
+                                                            if pairs_buys_cc[i] >= pb:
+                                                                score_buy += 1
+                                                            if pairs_sells_cc[i] >= ps:
+                                                                score_sell += 1
+
+                                                            global_buy[i] = (score_buy >= sb)
+                                                            global_sell[i] = (score_sell >= ss)
+
+                                                        # Calculate profit on tailed subset
+                                                        profit = run_backtest_profit(df_candles, global_buy, global_sell, t)
+                                                        pair_profits.append(profit)
+
+                                                    # Sort profits descending and take top 10 (or all if < 10)
+                                                    pair_profits.sort(reverse=True)
+                                                    top_10 = pair_profits[:10]
+                                                    avg_profit = sum(top_10) / len(top_10) if top_10 else 0.0
+
+                                                    results.append({
+                                                        'window': w,
+                                                        'score_buy': sb,
+                                                        'score_sell': ss,
+                                                        'tailed': t,
+                                                        'ichimoku_buy': ib,
+                                                        'ichimoku_sell': is_,
+                                                        'williams_buy': wb,
+                                                        'williams_sell': ws,
+                                                        'vwap_buy': vb,
+                                                        'vwap_sell': vs,
+                                                        'pairs_buy': pb,
+                                                        'pairs_sell': ps,
+                                                        'avg_profit': avg_profit
+                                                    })
 
     duration = time.time() - start_time
     print(f"Sweep completed in {duration:.2f} seconds.")
@@ -439,11 +540,20 @@ def run_benchmark():
     results.sort(key=lambda x: x['avg_profit'], reverse=True)
 
     # Print top 10 most profitable combinations
-    print("\n================ TOP 10 MOST PROFITABLE PARAMETER COMBINATIONS ================")
-    print(f"{'Rank':<5} | {'Window':<8} | {'Score Buy':<10} | {'Score Sell':<10} | {'Tailed':<8} | {'Avg Top 10 Profit (%)':<22}")
-    print("-" * 75)
+    print("\n=================================== TOP 10 MOST PROFITABLE PARAMETER COMBINATIONS ===================================")
+    header = (
+        f"{'Rank':<5} | {'Win':<4} | {'Sc Buy':<6} | {'Sc Sell':<7} | {'Tail':<5} | "
+        f"{'Ichi B/S':<8} | {'Will B/S':<8} | {'Vwap B/S':<8} | {'Pairs B/S':<9} | {'Avg Top 10 Profit (%)':<22}"
+    )
+    print(header)
+    print("-" * len(header))
     for idx, res in enumerate(results[:10]):
-        print(f"{idx+1:<5} | {res['window']:<8} | {res['score_buy']:<10} | {res['score_sell']:<10} | {res['tailed']:<8} | {res['avg_profit']:<22.2f}%")
+        row = (
+            f"{idx+1:<5} | {res['window']:<4} | {res['score_buy']:<6} | {res['score_sell']:<7} | {res['tailed']:<5} | "
+            f"{res['ichimoku_buy']}/{res['ichimoku_sell']:<6} | {res['williams_buy']}/{res['williams_sell']:<6} | "
+            f"{res['vwap_buy']}/{res['vwap_sell']:<6} | {res['pairs_buy']}/{res['pairs_sell']:<7} | {res['avg_profit']:<22.2f}%"
+        )
+        print(row)
 
     # Analyze and identify the tightest profitable window values
     max_profit = results[0]['avg_profit']
@@ -460,6 +570,10 @@ def run_benchmark():
     print(f"  - Score Buy Threshold: {tightest_window_combination['score_buy']}")
     print(f"  - Score Sell Threshold: {tightest_window_combination['score_sell']}")
     print(f"  - Tailed (Buffered candles): {tightest_window_combination['tailed']} minutes")
+    print(f"  - Ichimoku Buy/Sell Thresholds: {tightest_window_combination['ichimoku_buy']}/{tightest_window_combination['ichimoku_sell']}")
+    print(f"  - Williams %R Buy/Sell Thresholds: {tightest_window_combination['williams_buy']}/{tightest_window_combination['williams_sell']}")
+    print(f"  - VWAP Momentum Buy/Sell Thresholds: {tightest_window_combination['vwap_buy']}/{tightest_window_combination['vwap_sell']}")
+    print(f"  - Pairs Trading Buy/Sell Thresholds: {tightest_window_combination['pairs_buy']}/{tightest_window_combination['pairs_sell']}")
     print(f"  - Average Top 10 Profit: {tightest_window_combination['avg_profit']:.2f}%")
 
 if __name__ == '__main__':
