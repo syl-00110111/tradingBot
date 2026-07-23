@@ -689,7 +689,9 @@ if __name__ == '__main__':
                                 # calculate desired amount that equals package at the current price
                                 if price > 0:
                                     desired_amount = min_amount * (110/100)
-                                    amount = round ( desired_amount, int(-math.log10( amount_precision ) ) )
+                                    decimals = int(-math.log10(amount_precision))
+                                    epsilon = 10 ** (-decimals - 1)
+                                    amount = round(desired_amount - epsilon, decimals)
                                 else:
                                     amount = 0
                                 # final amount check
