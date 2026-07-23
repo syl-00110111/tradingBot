@@ -647,7 +647,6 @@ if __name__ == '__main__':
                                 order_book = {'asks':[], 'bids':[]}
                             base_price = ref_price if ref_price is not None else (order_book.get('asks')[0][0] if order_book.get('asks') else last_close)
                             price = round ( base_price * buy_multiplier, int(-math.log10( price_precision ) ) )
-                            package = round ( price * min_amount, int(-math.log10( price_precision ) ) )
                             # read quote balance robustly
                             _b = _balance.get('free').get(quote)
                             if _b is not None:
@@ -659,9 +658,8 @@ if __name__ == '__main__':
                             else:
                                 # calculate desired amount that equals package at the current price
                                 if price > 0:
-                                    desired_amount = min_amount * 2.0002
-                                    max_affordable = quote_free / package / 8.0008 # tier-hardcoded
-                                    amount = round ( min(desired_amount, max_affordable) * (10/9), int(-math.log10( amount_precision ) ) )
+                                    desired_amount = min_amount * (110/100)
+                                    amount = round ( desired_amount, int(-math.log10( amount_precision ) ) )
                                 else:
                                     amount = 0
                                 # final amount check
@@ -761,8 +759,8 @@ if __name__ == '__main__':
                             if expiry and now_ts < int(expiry):
                                 # sell everything if paused
                                 amount = round ( base_free, int(-math.log10( amount_precision ) ) )
-                            else: # tier hardcoded
-                                amount = round ( base_free * (8 / 9), int(-math.log10( amount_precision ) ) )
+                            else: # sell everything TODO TEST
+                                amount = round ( base_free, int(-math.log10( amount_precision ) ) )
                             if amount <= min_amount:
                                 console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
                             else:
