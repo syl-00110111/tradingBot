@@ -66,7 +66,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
 
     miniCount = 600
     # monnaies d'usage pour considérer les paires à leur quote asset
-    baseAssets = ["USD", "EUR"]
+    baseAssets = ["USD", "EUR", "BTC"]
 
     # trading state (position tracking for profit calc)
     def add_pending_order(order):

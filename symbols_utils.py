@@ -74,9 +74,9 @@ def computeSymbols(
     if source_assets is None:
         source_assets = []
     if forbid_assets is None:
-        forbid_assets = ['USDT']
+        forbid_assets = ['USDT', 'XMR']
     if base_assets is None:
-        base_assets = ["USD", "EUR"]
+        base_assets = ["USD", "EUR", "BTC"]
 
     __symbols = []
     # balance existante
@@ -136,6 +136,9 @@ def computeSymbols(
             if _v.get('trades_count', 0) >= mini_count:
                 # tri du volume à part
                 _g['id'].append(_v.get('id'))
+                
+        # console.print(f"source_assets: {source_assets}")
+        # console.print(f"_g: {_g}")
 
         # construire deux listes distinctes : prioriser les paires à vendre (base dans source_assets), puis les paires volume
         sell_candidates = []
@@ -150,21 +153,13 @@ def computeSymbols(
                 _m[1].get('precision', {}).get('price'),
                 _m[1].get('precision', {}).get('amount')
             ]
+            # console.print(f"market: {_a}")
             # si pas interdit dans notre zone
             if (_m[1].get('base') not in forbid_assets) and (_m[1].get('quote') not in forbid_assets):
                 # paire présente dans les volumes importants et quote dans monnaies d'usage
-                if (_m[1].get('id') in _g.get('id')) and (_m[1].get('quote') in base_assets):
-                    # si la base est dans la balance -> priorité vente
-                    if (_m[1].get('base') in source_assets) and (str(_a[0]).upper() not in existing_symbols):
-                        sell_candidates.append(_a)
-                        existing_symbols.add(str(_a[0]).upper())
-                        msg_add = f"balance add: {_m[1].get('symbol')}"
-                        if console:
-                            console.print(msg_add)
-                        else:
-                            print(msg_add)
+                if (_m[1].get('quote') in base_assets):
                     # sinon, c'est une paire volume
-                    elif str(_a[0]).upper() not in existing_symbols:
+                    if (_m[1].get('id') in _g.get('id')):
                         volume_candidates.append(_a)
                         existing_symbols.add(str(_a[0]).upper())
                         msg_add2 = f"volume add: {_a[0]}"
@@ -172,6 +167,15 @@ def computeSymbols(
                             console.print(msg_add2)
                         else:
                             print(msg_add2)
+                    # si la base est dans la balance -> priorité vente
+                    elif (_m[1].get('base') in source_assets):
+                        sell_candidates.append(_a)
+                        existing_symbols.add(str(_a[0]).upper())
+                        msg_add = f"balance add: {_m[1].get('symbol')}"
+                        if console:
+                            console.print(msg_add)
+                        else:
+                            print(msg_add)
 
         # combiner en respectant max_num_pairs : priorité aux ventes
         combined = []
