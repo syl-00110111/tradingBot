@@ -76,9 +76,9 @@ def consecutive_count(series, window=None):
 
 
 def aggregate_signals(df_candles, global_config=None, strats=None, window=20, score_buy_threshold=2, score_sell_threshold=2,
-                      ichimoku_buy_threshold=4, ichimoku_sell_threshold=4,
+                      ichimoku_buy_threshold=3, ichimoku_sell_threshold=4,
                       williams_buy_threshold=2, williams_sell_threshold=2,
-                      vwap_buy_threshold=6, vwap_sell_threshold=6,
+                      vwap_buy_threshold=5, vwap_sell_threshold=5,
                       pairs_buy_threshold=2, pairs_sell_threshold=2,
                       signal_frames=None):
     """
