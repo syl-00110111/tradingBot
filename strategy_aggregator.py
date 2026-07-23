@@ -75,7 +75,7 @@ def consecutive_count(series, window=None):
     return out
 
 
-def aggregate_signals(df_candles, global_config=None, strats=None, window=60, score_buy_threshold=4, score_sell_threshold=4):
+def aggregate_signals(df_candles, global_config=None, strats=None, window=20, score_buy_threshold=2, score_sell_threshold=2):
     """
     Calcule les signaux agrégés à partir des stratégies listées dans `strats`.
     Retourne un dict contenant: N, signal_frames, score_buy, score_sell, global_buy, global_sell
