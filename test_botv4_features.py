@@ -128,16 +128,16 @@ class TestBotV4Features(unittest.TestCase):
         ]
 
         # Prepare dummy df_candles
-        # Close is 44000.0, target is 45000.0, which has very high probability to hit if we mock it or use realistic volatility.
-        # Let's mock MonteCarloEngine's estimate_hit_probability to return high probability (0.8)
+        # Close is 44000.0, target is 45000.0.
+        # Let's mock MonteCarloEngine's estimate_hit_probability to return high probability (0.95)
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.8
-            # Under config we have sufficient_probability = 0.15 (the default)
-            botv4.config = {'monte_carlo': {'sufficient_probability': 0.15}}
+            mock_hit_prob.return_value = 0.95
+            # Under config we have sufficient_probability = 0.91 (the default)
+            botv4.config = {'monte_carlo': {'sufficient_probability': 0.91}}
 
             botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 43000.0, "buy", None, 44000.0)
 
-            # Since execution probability (0.8) >= threshold (0.15), order should NOT be cancelled
+            # Since execution probability (0.95) >= threshold (0.91), order should NOT be cancelled
             mock_exchange.cancel_order.assert_not_called()
 
     def test_cleanup_open_orders_prob_insufficient(self):
@@ -148,15 +148,44 @@ class TestBotV4Features(unittest.TestCase):
             {'id': '123', 'side': 'sell', 'price': 45000.0, 'symbol': 'BTC/USD'}
         ]
 
-        # Let's mock MonteCarloEngine's estimate_hit_probability to return low probability (0.05)
+        # Let's mock MonteCarloEngine's estimate_hit_probability to return low probability (0.8)
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.05
-            botv4.config = {'monte_carlo': {'sufficient_probability': 0.15}}
+            mock_hit_prob.return_value = 0.8
+            botv4.config = {'monte_carlo': {'sufficient_probability': 0.91}}
 
             botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 43000.0, "buy", None, 44000.0)
 
-            # Since execution probability (0.05) < threshold (0.15) and side changed (sell vs buy), it should be cancelled!
+            # Since execution probability (0.8) < threshold (0.91) and side changed (sell vs buy), it should be cancelled!
             mock_exchange.cancel_order.assert_called_once_with('123', 'BTC/USD')
+
+    def test_should_place_order_buy_sufficient(self):
+        # Prepare dummy df_candles
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.95  # > 0.91
+            should_place, prob = botv4.should_place_order("BTC/USD", "buy", 43000.0, 44000.0, None)
+            self.assertTrue(should_place)
+            self.assertEqual(prob, 0.95)
+
+    def test_should_place_order_buy_insufficient(self):
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.85  # <= 0.91
+            should_place, prob = botv4.should_place_order("BTC/USD", "buy", 43000.0, 44000.0, None)
+            self.assertFalse(should_place)
+            self.assertEqual(prob, 0.85)
+
+    def test_should_place_order_sell_sufficient(self):
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.92  # > 0.91
+            should_place, prob = botv4.should_place_order("BTC/USD", "sell", 45000.0, 44000.0, None)
+            self.assertTrue(should_place)
+            self.assertEqual(prob, 0.92)
+
+    def test_should_place_order_sell_insufficient(self):
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.91  # not > 0.91 (i.e. <= 0.91)
+            should_place, prob = botv4.should_place_order("BTC/USD", "sell", 45000.0, 44000.0, None)
+            self.assertFalse(should_place)
+            self.assertEqual(prob, 0.91)
 
     def test_cleanup_open_orders_same_side(self):
         mock_exchange = MagicMock()
