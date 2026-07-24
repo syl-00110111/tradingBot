@@ -9,7 +9,7 @@ sourceAssets = []
 balance = None
 miniCount = 400
 baseAssets = ["USD", "EUR", "BTC"]
-forbidAssets = ['USDT', 'XMR']
+forbidAssets = ['AKE', 'USDT', 'XMR']
 availablePairs = []
 
 def loadExchange():

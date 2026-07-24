@@ -50,7 +50,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     balanceFetched = False
     marketsFetched = False
     sourceAssets = []
-    forbidAssets = ['USDT', 'XMR']
+    forbidAssets = ['AKE', 'USDT', 'XMR']
     previousPairs = []
     availablePairs = []
     maxNumPairs = 100
@@ -760,16 +760,16 @@ if __name__ == '__main__':
                                             expiry_ts = int(time.time()) + (366 * 24 * 3600)
                                         elif ('insufficient funds' in err) or ('minimum' in err and 'not met' in err) or ('invalid arguments' in err and 'volume' in err) or ('must be greater than minimum' in err):
                                             expiry_ts = int(time.time()) + (4 * 3600)
-                                            pausedForBuy[symbol] = expiry_ts
+                                        pausedForBuy[symbol] = expiry_ts
+                                        try:
                                             try:
-                                                try:
-                                                    safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
-                                                except Exception:
-                                                    with open(PAUSE_FILE, 'w') as f:
-                                                        json.dump(pausedForBuy, f)
-                                            except Exception as ex:
-                                                console.print(f"Failed to persist pausedForBuy: {ex}")
-                                            console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to error: {e}")
+                                                safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                                            except Exception:
+                                                with open(PAUSE_FILE, 'w') as f:
+                                                    json.dump(pausedForBuy, f)
+                                        except Exception as ex:
+                                            console.print(f"Failed to persist pausedForBuy: {ex}")
+                                        console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to error: {e}")
 
                     # decide sell
                     if global_sell[latest_idx]:
