@@ -64,7 +64,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     last_pending_fetch = 0
     PENDING_DUMP_FILE = 'pending_orders_dump.json'
 
-    miniCount = 600
+    miniCount = 400
     # monnaies d'usage pour considérer les paires à leur quote asset
     baseAssets = ["USD", "EUR", "BTC"]
 
@@ -153,12 +153,12 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                     console.print(f"[{symbol}] Error computing volatility for Monte Carlo: {ve}")
 
             from monte_carlo2 import MonteCarloEngine
-            mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
+            mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
 
             # Get the probability threshold from config
-            threshold = 0.91
+            threshold = 1.01
             if config and isinstance(config, dict):
-                threshold = config.get('monte_carlo', {}).get('sufficient_probability', 0.91)
+                threshold = config.get('monte_carlo', {}).get('sufficient_probability', 1.01)
 
             for o in open_orders:
                 oid = o.get('id') or o.get('orderId')
@@ -314,7 +314,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     def should_place_order(symbol, side, price, last_close, df_candles, console=None):
         """
         Estimates the hit probability of an order prior to placing it.
-        Returns (should_place, prob) where should_place is True if prob > 0.91, and False otherwise.
+        Returns (should_place, prob) where should_place is True if prob > 1.01, and False otherwise.
         """
         volatility = 0.0
         drift = 0.0
@@ -330,7 +330,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                     console.print(f"[{symbol}] Error computing volatility for Monte Carlo: {ve}")
 
         from monte_carlo2 import MonteCarloEngine
-        mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
+        mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
         mode = "below" if side.lower() == "buy" else "above"
         prob = mc_engine.estimate_hit_probability(
             current_price=last_close,
@@ -339,7 +339,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             drift=drift,
             mode=mode
         )
-        return (prob > 0.91), prob
+        return (prob > 1.01), prob
 
     # load config (merge default and optional override)
     config = {}
@@ -617,7 +617,7 @@ if __name__ == '__main__':
                                 console.print(f"[{symbol}] Error computing volatility for Monte Carlo: {ve}")
 
                         from monte_carlo2 import MonteCarloEngine
-                        mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=100)
+                        mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
 
                         target_buy_price = round(ref_price * buy_multiplier, int(-math.log10(price_precision)))
                         target_sell_price = round(ref_price * sell_multiplier, int(-math.log10(price_precision)))
@@ -700,7 +700,7 @@ if __name__ == '__main__':
                                     try:
                                         should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
                                         if not should_place:
-                                            console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.91")
+                                            console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 1.01")
                                         else:
                                             cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close)
                                             console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
@@ -808,7 +808,7 @@ if __name__ == '__main__':
                                     else:
                                         should_place, prob = should_place_order(symbol, 'sell', price, last_close, df_candles, console)
                                         if not should_place:
-                                            console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 0.91")
+                                            console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 1.01")
                                         else:
                                             cleanup_open_orders(exchange, symbol, price, 'sell', df_candles, last_close)
                                             console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
@@ -874,7 +874,7 @@ if __name__ == '__main__':
                         # update balance
                         _balance = market_utils.fetch_balance(exchange, console=console)
                         # batch symbole au hasard - choisir correctement quand _markets est un dict
-                        for _ in range(15):
+                        for _ in range(36):
                             market_sample = random.choice(list(_markets.values()))
                             symbolChoose = market_sample.get('symbol')
                             console.print(f"Chose to update symbol: {symbolChoose}")
