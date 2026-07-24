@@ -29,8 +29,8 @@ def updateTradingCount(symbol: str, exchange: Any, console: Optional[Any] = None
                 _since_int = now_minus_4h
             else:
                 _since_int = int(_since)
-            # if now < since by 4 hours
-            if (_since_int >= now_minus_4h) or _vol.get('trades_count') == 1000:
+            # if now > since by 4 hours
+            if (_since_int <= now_minus_4h) or _vol.get('trades_count') == 1000:
                 rate_limit_ms = getattr(exchange, 'rateLimit', 1000) or 1000
                 time.sleep(rate_limit_ms / 1000)
                 trades = exchange.fetch_trades(symbol, now_minus_4h)

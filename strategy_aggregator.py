@@ -117,55 +117,55 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
     # vwap_momentum crêtes à l'envers
 
     # 1) ichimoku_cloud
-    pt = signal_frames.get('ichimoku_cloud')
-    if pt is not None and not pt.empty:
-        # à l'envers
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
-        for i in range(N):
-            if buys[i] >= ichimoku_sell_threshold:
-                score_sell[i] += 1
-            if sells[i] >= ichimoku_buy_threshold:
-                score_buy[i] += 1
+    #pt = signal_frames.get('ichimoku_cloud')
+    #if pt is not None and not pt.empty:
+    #    # à l'envers
+    #    sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+    #    buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+    #    for i in range(N):
+    #        if buys[i] >= ichimoku_sell_threshold:
+    #            score_sell[i] += 1
+    #        if sells[i] >= ichimoku_buy_threshold:
+    #            score_buy[i] += 1
 
     # 2) williams_r
-    pt = signal_frames.get('williams_r')
-    if pt is not None and not pt.empty:
-        # à l'endroit
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
-        for i in range(N):
-            if buys[i] >= williams_buy_threshold:
-                score_buy[i] += 1
-            if sells[i] >= williams_sell_threshold:
-                score_sell[i] += 1
+    #pt = signal_frames.get('williams_r')
+    #if pt is not None and not pt.empty:
+    #    # à l'endroit
+    #    sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+    #    buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+    #    for i in range(N):
+    #        if buys[i] >= williams_buy_threshold:
+    #            score_buy[i] += 1
+    #        if sells[i] >= williams_sell_threshold:
+    #            score_sell[i] += 1
 
     # 3) vwap_momentum
-    pt = signal_frames.get('vwap_momentum')
-    if pt is not None and not pt.empty:
-        # à l'envers
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
-        for i in range(N):
-            if buys[i] >= vwap_sell_threshold:
-                score_sell[i] += 1
-            if sells[i] >= vwap_buy_threshold:
-                score_buy[i] += 1
+    #pt = signal_frames.get('vwap_momentum')
+    #if pt is not None and not pt.empty:
+    #    # à l'envers
+    #    buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+    #    sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=window)
+    #    for i in range(N):
+    #        if buys[i] >= vwap_sell_threshold:
+    #            score_sell[i] += 1
+    #        if sells[i] >= vwap_buy_threshold:
+    #            score_buy[i] += 1
 
     # 4) pairs_trading_proxy
     pt = signal_frames.get('pairs_trading_proxy')
     if pt is not None and not pt.empty:
         # à l'endroit
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=60)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=1)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=1)
         for i in range(N):
             if buys[i] >= pairs_buy_threshold:
                 score_buy[i] += 1
             if sells[i] >= pairs_sell_threshold:
                 score_sell[i] += 1
 
-    global_buy = [s >= score_buy_threshold for s in score_buy]
-    global_sell = [s >= score_sell_threshold for s in score_sell]
+    global_buy = [s >= 1 for s in score_buy]
+    global_sell = [s >= 1 for s in score_sell]
 
     # print(f"DEBUG sell= {global_sell}")
 
