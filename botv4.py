@@ -428,6 +428,14 @@ with console.status("Bot init. Please wait some time, or expect a random error i
 
 # boucle principale du bot
 if __name__ == '__main__':
+    # Check for temporary (.tmp) files indicating an interrupted write
+    import os
+    import sys
+    tmp_files = [f for f in os.listdir('.') if f.endswith('.tmp')]
+    if tmp_files:
+        console.print(f"[bold red]Error: Temporary files found: {', '.join(tmp_files)}. This indicates an interrupted write operation, which means a backup (.bak) file is better. Please restore the backup and remove the tmp files before restarting. Exiting.[/bold red]")
+        sys.exit(1)
+
     while True:
         try:
             # init end
@@ -879,10 +887,30 @@ if __name__ == '__main__':
                             symbolChoose = market_sample.get('symbol')
                             console.print(f"Chose to update symbol: {symbolChoose}")
                             _count = symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console)
-                            if _count >= miniCount and symbolChoose not in availablePairs:
-                                availablePairs.append(symbolChoose)
-                                console.print(f"Appended {symbolChoose} to tracked pairs.")
-                            elif _count < miniCount and symbolChoose in availablePairs:
+                            # check if symbolChoose is in availablePairs (as a list/tuple or string)
+                            pair_index = -1
+                            for idx, pair in enumerate(availablePairs):
+                                if isinstance(pair, (list, tuple)) and len(pair) > 0 and pair[0] == symbolChoose:
+                                    pair_index = idx
+                                    break
+                                elif isinstance(pair, str) and pair == symbolChoose:
+                                    pair_index = idx
+                                    break
+
+                            if _count >= miniCount and pair_index == -1:
+                                _a = [
+                                    market_sample.get('symbol'),
+                                    market_sample.get('id'),
+                                    market_sample.get('base'),
+                                    market_sample.get('quote'),
+                                    market_sample.get('limits', {}).get('amount', {}).get('min'),
+                                    market_sample.get('precision', {}).get('price'),
+                                    market_sample.get('precision', {}).get('amount')
+                                ]
+                                availablePairs.append(_a)
+                                console.print(f"Appended {_a} to tracked pairs.")
+                            elif _count < miniCount and pair_index != -1:
+                                availablePairs.pop(pair_index)
                                 expiry_ts = int(time.time()) + (4 * 3600)
                                 pausedForBuy[symbolChoose] = expiry_ts
                                 try:
@@ -893,7 +921,7 @@ if __name__ == '__main__':
                                             json.dump(pausedForBuy, f)
                                 except Exception as ex:
                                     console.print(f"Failed to persist pausedForBuy: {ex}")
-                                console.print(f"Paused buys for {symbolChoose} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum.")
+                                console.print(f"Paused buys for {symbolChoose} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum. Removed from availablePairs.")
                         last_pending_fetch = now_ts
                         console.print(f"[yellow]Periodic task: fetching open orders at {datetime.fromtimestamp(now_ts)}[/yellow]")
                         recent = []

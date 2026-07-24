@@ -161,31 +161,31 @@ class TestBotV4Features(unittest.TestCase):
     def test_should_place_order_buy_sufficient(self):
         # Prepare dummy df_candles
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.95  # > 0.91
+            mock_hit_prob.return_value = 0.995  # > 0.99
             should_place, prob = botv4.should_place_order("BTC/USD", "buy", 43000.0, 44000.0, None)
             self.assertTrue(should_place)
-            self.assertEqual(prob, 0.95)
+            self.assertEqual(prob, 0.995)
 
     def test_should_place_order_buy_insufficient(self):
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.85  # <= 0.91
+            mock_hit_prob.return_value = 0.98  # <= 0.99
             should_place, prob = botv4.should_place_order("BTC/USD", "buy", 43000.0, 44000.0, None)
             self.assertFalse(should_place)
-            self.assertEqual(prob, 0.85)
+            self.assertEqual(prob, 0.98)
 
     def test_should_place_order_sell_sufficient(self):
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.92  # > 0.91
+            mock_hit_prob.return_value = 0.995  # > 0.99
             should_place, prob = botv4.should_place_order("BTC/USD", "sell", 45000.0, 44000.0, None)
             self.assertTrue(should_place)
-            self.assertEqual(prob, 0.92)
+            self.assertEqual(prob, 0.995)
 
     def test_should_place_order_sell_insufficient(self):
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.91  # not > 0.91 (i.e. <= 0.91)
+            mock_hit_prob.return_value = 0.99  # not > 0.99 (i.e. <= 0.99)
             should_place, prob = botv4.should_place_order("BTC/USD", "sell", 45000.0, 44000.0, None)
             self.assertFalse(should_place)
-            self.assertEqual(prob, 0.91)
+            self.assertEqual(prob, 0.99)
 
     def test_cleanup_open_orders_same_side(self):
         mock_exchange = MagicMock()
