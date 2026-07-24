@@ -53,7 +53,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     forbidAssets = ['USDT', 'XMR']
     previousPairs = []
     availablePairs = []
-    maxNumPairs = 50
+    maxNumPairs = 100
 
     # ccxt markets keyword is used
     _markets = []

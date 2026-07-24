@@ -65,8 +65,8 @@ def computeSymbols(
     source_assets: Optional[List[str]] = None,
     forbid_assets: Optional[List[str]] = None,
     base_assets: Optional[List[str]] = None,
-    max_num_pairs: int = 50,
-    mini_count: int = 600,
+    max_num_pairs: int = 100,
+    mini_count: int = 400,
     markets_file: str = 'markets.json',
     volumes_file: str = 'volumes_trades_data.json',
     console: Optional[Any] = None
