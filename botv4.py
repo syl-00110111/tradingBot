@@ -156,9 +156,9 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
 
             # Get the probability threshold from config
-            threshold = 1.01
+            threshold = 0.99
             if config and isinstance(config, dict):
-                threshold = config.get('monte_carlo', {}).get('sufficient_probability', 1.01)
+                threshold = config.get('monte_carlo', {}).get('sufficient_probability', 0.99)
 
             for o in open_orders:
                 oid = o.get('id') or o.get('orderId')
@@ -314,7 +314,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     def should_place_order(symbol, side, price, last_close, df_candles, console=None):
         """
         Estimates the hit probability of an order prior to placing it.
-        Returns (should_place, prob) where should_place is True if prob > 1.01, and False otherwise.
+        Returns (should_place, prob) where should_place is True if prob > 0.99, and False otherwise.
         """
         volatility = 0.0
         drift = 0.0
@@ -339,7 +339,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             drift=drift,
             mode=mode
         )
-        return (prob > 1.01), prob
+        return (prob > 0.99), prob
 
     # load config (merge default and optional override)
     config = {}
@@ -700,7 +700,7 @@ if __name__ == '__main__':
                                     try:
                                         should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
                                         if not should_place:
-                                            console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 1.01")
+                                            console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.99")
                                         else:
                                             cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close)
                                             console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
@@ -808,7 +808,7 @@ if __name__ == '__main__':
                                     else:
                                         should_place, prob = should_place_order(symbol, 'sell', price, last_close, df_candles, console)
                                         if not should_place:
-                                            console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 1.01")
+                                            console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 0.99")
                                         else:
                                             cleanup_open_orders(exchange, symbol, price, 'sell', df_candles, last_close)
                                             console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
