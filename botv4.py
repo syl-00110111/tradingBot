@@ -690,7 +690,7 @@ if __name__ == '__main__':
                                 if price > 0:
                                     desired_amount = min_amount * (110/100)
                                     decimals = int(-math.log10(amount_precision))
-                                    amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
+                                    amount = math.floor(quote_free * (10 ** decimals)) / (10 ** decimals)
                                 else:
                                     amount = 0
                                 # final amount check
