@@ -775,8 +775,8 @@ if __name__ == '__main__':
                         expiry = pausedForBuy.get(symbol)
                         if expiry and now_ts < int(expiry):
                             console.print(f"Buy for {symbol} is paused until {datetime.fromtimestamp(int(expiry))}")
-                        elif count_buyings_for_base_asset(base) >= 2:
-                            console.print(f"[{symbol}] Skipping BUY order: Already reached the limit of 2 buyings for base asset {base}.")
+                        elif count_buyings_for_base_asset(base) >= 4:
+                            console.print(f"[{symbol}] Skipping BUY order: Already reached the limit of 4 buyings for base asset {base}.")
                         else:
                             # cleanup expired pause entry
                             if expiry and now_ts >= int(expiry):
@@ -845,17 +845,17 @@ if __name__ == '__main__':
                                                                 pass
                                                     if not rate_found:
                                                         if p_quote == 'EUR' and quote == 'USD':
-                                                            conversion_rate = 1.08
+                                                            conversion_rate = 1.13
                                                         elif p_quote == 'USD' and quote == 'EUR':
-                                                            conversion_rate = 1.0 / 1.08
+                                                            conversion_rate = 1.0 / 1.13
                                                         elif p_quote == 'BTC' and quote == 'USD':
-                                                            conversion_rate = 90000.0
+                                                            conversion_rate = 64000.0
                                                         elif p_quote == 'USD' and quote == 'BTC':
-                                                            conversion_rate = 1.0 / 90000.0
+                                                            conversion_rate = 1.0 / 64000.0
                                                         elif p_quote == 'BTC' and quote == 'EUR':
-                                                            conversion_rate = 83000.0
+                                                            conversion_rate = 56000.0
                                                         elif p_quote == 'EUR' and quote == 'BTC':
-                                                            conversion_rate = 1.0 / 83000.0
+                                                            conversion_rate = 1.0 / 56000.0
 
                                                 other_quote_free_converted = other_quote_free * conversion_rate
                                                 if other_quote_free_converted > quote_free:
