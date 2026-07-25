@@ -174,7 +174,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 side_lower = side.lower()
                 o_price_float = float(o_price)
 
-                # Check execution probability based on price convergence (Requirement 3 is no longer valid)
+                # Check execution probability based on price convergence
                 mode = "below" if o_side_lower == "buy" else "above"
                 prob = mc_engine.estimate_hit_probability(
                     current_price=last_close,
