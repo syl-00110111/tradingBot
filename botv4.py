@@ -193,16 +193,18 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 if hasattr(exchange, 'has') and isinstance(exchange.has, dict):
                     has_edit_order = exchange.has.get('editOrder', False)
 
-                if not side_changed and has_edit_order and new_amount is not None:
-                    try:
-                        console.print(f"[{symbol}] Attempting to edit existing order {oid} to price={new_price} amount={new_amount}...")
-                        time.sleep(exchange.rateLimit / 1000)
-                        res = exchange.edit_order(oid, symbol, 'limit', side_lower, new_amount, new_price)
-                        console.print(f"[{symbol}] Order {oid} successfully edited: {res}")
-                        edited_order = res
-                        break  # Only edit one order
-                    except Exception as e:
-                        console.print(f"[{symbol}] edit_order failed for {oid}: {e}. Falling back to cancel and replace.")
+                if not side_changed and has_edit_order:
+                    edit_amount = new_amount if (new_amount is not None and new_amount > 0) else float(o.get('amount', 0))
+                    if edit_amount > 0:
+                        try:
+                            console.print(f"[{symbol}] Attempting to edit existing order {oid} to price={new_price} amount={edit_amount}...")
+                            time.sleep(exchange.rateLimit / 1000)
+                            res = exchange.edit_order(oid, symbol, 'limit', side_lower, edit_amount, new_price)
+                            console.print(f"[{symbol}] Order {oid} successfully edited: {res}")
+                            edited_order = res
+                            break  # Only edit one order
+                        except Exception as e:
+                            console.print(f"[{symbol}] edit_order failed for {oid}: {e}. Falling back to cancel and replace.")
 
                 # If the probability is insufficient, cancel it
                 if insufficient_prob:
@@ -698,15 +700,7 @@ if __name__ == '__main__':
                                 order_book = {'asks':[], 'bids':[]}
                             base_price = ref_price if ref_price is not None else (order_book.get('asks')[0][0] if order_book.get('asks') else last_close)
                             price = round ( base_price * buy_multiplier, int(-math.log10( price_precision ) ) )
-                            # read quote balance robustly
-                            _b = _balance.get('free').get(quote)
-                            if _b is not None:
-                                quote_free = float(_b)
-                            else:
-                                quote_free = 0
-                            if quote_free <= 0:
-                                console.print(f"No quote balance available for {symbol} to BUY")
-                            else:
+                            if True:
                                 # calculate desired amount that equals package at the current price
                                 if price > 0:
                                     desired_amount = min_amount * (110/100)
@@ -729,11 +723,21 @@ if __name__ == '__main__':
                                                 add_pending_order(order)
                                                 console.print(f"BUY order successfully updated via edit_order: {order}")
                                             else:
-                                                console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
-                                                order = exchange.create_limit_buy_order(symbol, amount, price)
-                                                # persist pending order to file
-                                                add_pending_order(order)
-                                                console.print(f"BUY order passed: {order}")
+                                                # We need to place a NEW limit buy order.
+                                                # Fetch fresh balance and check if we have enough quote balance.
+                                                _balance = market_utils.fetch_balance(exchange, console=console)
+                                                _b = _balance.get('free').get(quote)
+                                                quote_free = float(_b) if _b is not None else 0.0
+                                                if quote_free <= 0:
+                                                    console.print(f"No quote balance available for {symbol} to BUY ({quote_free} <= 0)")
+                                                    # Raise exception to skip other steps and enter the outer try-except handler
+                                                    raise ValueError(f"Insufficient quote balance ({quote_free} <= 0)")
+                                                else:
+                                                    console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
+                                                    order = exchange.create_limit_buy_order(symbol, amount, price)
+                                                    # persist pending order to file
+                                                    add_pending_order(order)
+                                                    console.print(f"BUY order passed: {order}")
                                             # Record purchase to ensure that SELL events can check profitability later
                                             record_purchase(symbol, amount, price)
                                             # update balance
@@ -799,14 +803,7 @@ if __name__ == '__main__':
 
                     # decide sell
                     if global_sell[latest_idx]:
-                        _b = _balance.get('free').get(base)
-                        if _b is not None:
-                            base_free = float(_b)
-                        else:
-                            base_free = 0
-                        if base_free <= 0:
-                            console.print(f"No base balance available for {symbol} to SELL")
-                        else:
+                        if True:
                             try:
                                 order_book = exchange.fetch_order_book(symbol)
                             except Exception as e:
@@ -818,14 +815,12 @@ if __name__ == '__main__':
                             now_ts = int(time.time())
                             expiry = pausedForBuy.get(symbol)
                             decimals = int(-math.log10(amount_precision))
-                            if expiry and now_ts < int(expiry):
-                                # sell everything if paused
-                                amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
-                            else: # sell everything TODO TEST
-                                amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
-                            if amount <= min_amount:
-                                console.print(f"Calculated sell amount of {amount} below minimum required of {min_amount} for {symbol}")
-                            else:
+
+                            _b = _balance.get('free').get(base)
+                            base_free = float(_b) if _b is not None else 0.0
+                            amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
+
+                            if True:
                                 try:
                                     # 2/ Record purchases to ensure that SELL events are ignored if they are unprofitable.
                                     profitable, details_str = is_sell_profitable(symbol, price, amount)
@@ -842,11 +837,22 @@ if __name__ == '__main__':
                                                 add_pending_order(order)
                                                 console.print(f"SELL order successfully updated via edit_order: {order}")
                                             else:
-                                                console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
-                                                order = exchange.create_limit_sell_order(symbol, amount, price)
-                                                # persist pending order to file
-                                                add_pending_order(order)
-                                                console.print(f"SELL order passed: {order}")
+                                                # We need to place a NEW limit sell order.
+                                                # Fetch fresh balance and check if we have enough base balance.
+                                                _balance = market_utils.fetch_balance(exchange, console=console)
+                                                _b = _balance.get('free').get(base)
+                                                base_free = float(_b) if _b is not None else 0.0
+                                                amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
+
+                                                if amount <= min_amount:
+                                                    console.print(f"Calculated sell amount of {amount} is below minimum required of {min_amount} for {symbol}. Cannot place new SELL order.")
+                                                    raise ValueError(f"Insufficient base balance ({amount} <= {min_amount})")
+                                                else:
+                                                    console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
+                                                    order = exchange.create_limit_sell_order(symbol, amount, price)
+                                                    # persist pending order to file
+                                                    add_pending_order(order)
+                                                    console.print(f"SELL order passed: {order}")
                                             # Deduct sell_amount from recorded purchases
                                             remove_recorded_purchases(symbol, amount)
                                             # update balance
