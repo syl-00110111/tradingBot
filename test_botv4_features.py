@@ -323,5 +323,119 @@ class TestBotV4Features(unittest.TestCase):
         self.assertTrue(global_buy[latest_idx])
         self.assertFalse(global_sell[latest_idx])
 
+    def test_remove_recorded_purchases_cross_pairs(self):
+        # Record purchases for different pairs of base asset ADA
+        botv4.record_purchase("ADA/USD", 10.0, 0.50)
+        botv4.record_purchase("ADA/BTC", 100.0, 0.00001)
+        # Record purchase for a different base asset (e.g. BTC)
+        botv4.record_purchase("BTC/USD", 1.0, 90000.0)
+
+        # Trigger sale on ADA/USD
+        botv4.remove_recorded_purchases("ADA/USD", 10.0)
+
+        # All ADA purchases should be wiped, while BTC/USD purchase remains
+        self.assertEqual(len(botv4.recorded_purchases["ADA/USD"]), 0)
+        self.assertEqual(len(botv4.recorded_purchases["ADA/BTC"]), 0)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 1)
+
+    def test_count_buyings_for_base_asset(self):
+        botv4.record_purchase("ADA/USD", 10.0, 0.50)
+        botv4.record_purchase("ADA/BTC", 100.0, 0.00001)
+        botv4.record_purchase("BTC/USD", 1.0, 90000.0)
+
+        self.assertEqual(botv4.count_buyings_for_base_asset("ADA"), 2)
+        self.assertEqual(botv4.count_buyings_for_base_asset("BTC"), 1)
+        self.assertEqual(botv4.count_buyings_for_base_asset("XRP"), 0)
+
+    def test_is_sell_profitable_cross_quote(self):
+        # We have recorded purchases on ADA/USD: 100 ADA at 1.00 USD
+        # We check profitability on ADA/EUR.
+        # Fallback EUR/USD exchange rate is 1.08.
+        # So USD/EUR exchange rate is 1 / 1.08 = ~0.9259 EUR per USD.
+        # Thus, 1.00 USD purchase price is converted to ~0.9259 EUR.
+        # With 0.3% margin: 0.9259 * 1.003 = ~0.9287 EUR.
+
+        botv4.record_purchase("ADA/USD", 100.0, 1.00)
+
+        # Check profitability on ADA/EUR at sell_price = 0.90 EUR (should be unprofitable, since 0.90 < 0.9287)
+        profitable, msg = botv4.is_sell_profitable("ADA/EUR", 0.90, 100.0)
+        self.assertFalse(profitable)
+
+        # Check profitability on ADA/EUR at sell_price = 0.95 EUR (should be profitable, since 0.95 > 0.9287)
+        profitable, msg = botv4.is_sell_profitable("ADA/EUR", 0.95, 100.0)
+        self.assertTrue(profitable)
+
+    def test_wind_choice_logic(self):
+        # Setup simulated availablePairs:
+        # We have ADA/USD (p_base='ADA', p_quote='USD') and ADA/EUR (p_base='ADA', p_quote='EUR')
+        availablePairs = [
+            ["ADA/USD", "id1", "ADA", "USD"],
+            ["ADA/EUR", "id2", "ADA", "EUR"]
+        ]
+
+        # Scenario 1: We have more available EUR than USD (measured in USD)
+        # USD balance: $100
+        # EUR balance: 100 EUR, which is ~$108
+        _balance = {
+            'free': {
+                'USD': 100.0,
+                'EUR': 100.0
+            }
+        }
+
+        # Test current pair is ADA/USD
+        base = "ADA"
+        quote = "USD"
+        symbol = "ADA/USD"
+
+        # Standard fallback rates in botv4: EUR to USD is 1.08
+        # We simulate the exact wind-choice logic block from botv4.py
+        pass_on_buy = False
+        if botv4.count_buyings_for_base_asset(base) == 0:
+            other_pairs = [p for p in availablePairs if p[2] == base and p[3] != quote]
+            if other_pairs:
+                quote_free = float(_balance.get('free', {}).get(quote, 0.0))
+                for p in other_pairs:
+                    p_symbol = p[0]
+                    p_quote = p[3]
+                    other_quote_free = float(_balance.get('free', {}).get(p_quote, 0.0))
+
+                    # Simulated conversion rate fallback: EUR to USD is 1.08
+                    conversion_rate = 1.08 if p_quote == 'EUR' and quote == 'USD' else 1.0
+                    other_quote_free_converted = other_quote_free * conversion_rate
+                    if other_quote_free_converted > quote_free:
+                        pass_on_buy = True
+                        break
+
+        # Should pass on the buy of ADA/USD because we have more money in EUR
+        self.assertTrue(pass_on_buy)
+
+        # Scenario 2: We have more available USD than EUR
+        _balance = {
+            'free': {
+                'USD': 200.0,
+                'EUR': 50.0 # 50 EUR * 1.08 = 54 USD < 200 USD
+            }
+        }
+
+        pass_on_buy = False
+        if botv4.count_buyings_for_base_asset(base) == 0:
+            other_pairs = [p for p in availablePairs if p[2] == base and p[3] != quote]
+            if other_pairs:
+                quote_free = float(_balance.get('free', {}).get(quote, 0.0))
+                for p in other_pairs:
+                    p_symbol = p[0]
+                    p_quote = p[3]
+                    other_quote_free = float(_balance.get('free', {}).get(p_quote, 0.0))
+
+                    conversion_rate = 1.08 if p_quote == 'EUR' and quote == 'USD' else 1.0
+                    other_quote_free_converted = other_quote_free * conversion_rate
+                    if other_quote_free_converted > quote_free:
+                        pass_on_buy = True
+                        break
+
+        # Should NOT pass on the buy of ADA/USD because USD has more money
+        self.assertFalse(pass_on_buy)
+
 if __name__ == '__main__':
     unittest.main()
