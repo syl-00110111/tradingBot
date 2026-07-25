@@ -347,6 +347,24 @@ class TestBotV4Features(unittest.TestCase):
         self.assertEqual(botv4.count_buyings_for_base_asset("BTC"), 1)
         self.assertEqual(botv4.count_buyings_for_base_asset("XRP"), 0)
 
+    def test_is_sell_profitable_cross_quote(self):
+        # We have recorded purchases on ADA/USD: 100 ADA at 1.00 USD
+        # We check profitability on ADA/EUR.
+        # Fallback EUR/USD exchange rate is 1.08.
+        # So USD/EUR exchange rate is 1 / 1.08 = ~0.9259 EUR per USD.
+        # Thus, 1.00 USD purchase price is converted to ~0.9259 EUR.
+        # With 0.3% margin: 0.9259 * 1.003 = ~0.9287 EUR.
+
+        botv4.record_purchase("ADA/USD", 100.0, 1.00)
+
+        # Check profitability on ADA/EUR at sell_price = 0.90 EUR (should be unprofitable, since 0.90 < 0.9287)
+        profitable, msg = botv4.is_sell_profitable("ADA/EUR", 0.90, 100.0)
+        self.assertFalse(profitable)
+
+        # Check profitability on ADA/EUR at sell_price = 0.95 EUR (should be profitable, since 0.95 > 0.9287)
+        profitable, msg = botv4.is_sell_profitable("ADA/EUR", 0.95, 100.0)
+        self.assertTrue(profitable)
+
     def test_wind_choice_logic(self):
         # Setup simulated availablePairs:
         # We have ADA/USD (p_base='ADA', p_quote='USD') and ADA/EUR (p_base='ADA', p_quote='EUR')

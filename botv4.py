@@ -278,28 +278,85 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             console.print(f"[{symbol}] Failed to record purchase: {e}")
 
     def is_sell_profitable(symbol, sell_price, sell_amount):
-        """Check if selling sell_amount at sell_price is profitable against recorded purchases.
-        We match the sell_amount against the oldest recorded purchases (FIFO) or average price.
+        """Check if selling sell_amount at sell_price is profitable against recorded purchases across all pairs sharing the same base asset.
         If there are no recorded purchases, we default to True to allow the sell.
         Returns (is_profitable, details_str).
         """
         try:
-            purchases = recorded_purchases.get(symbol, [])
-            if not purchases:
-                return True, "No recorded purchases found for symbol, allowing sell by default."
+            base_asset = symbol.split('/')[0] if '/' in symbol else symbol
+            current_quote = symbol.split('/')[1] if '/' in symbol else ''
 
-            # Calculate the weighted average price of our remaining recorded purchases
-            total_amount = sum(float(p['amount']) for p in purchases)
+            # Aggregate all recorded purchases for any pair sharing the same base asset
+            all_purchases = []
+            for s, purchases in recorded_purchases.items():
+                s_base = s.split('/')[0] if '/' in s else s
+                if s_base == base_asset:
+                    s_quote = s.split('/')[1] if '/' in s else ''
+                    for p in purchases:
+                        all_purchases.append((s_quote, p))
+
+            if not all_purchases:
+                return True, f"No recorded purchases found for base asset {base_asset}, allowing sell by default."
+
+            # Calculate the weighted average price of our remaining recorded purchases, converting each to current_quote
+            total_amount = 0.0
+            weighted_sum = 0.0
+
+            for p_quote, p in all_purchases:
+                amount = float(p['amount'])
+                price_in_p_quote = float(p['price'])
+
+                # Convert price from p_quote to current_quote
+                conversion_rate = 1.0
+                if p_quote != current_quote and p_quote and current_quote:
+                    symbol1 = f"{p_quote}/{current_quote}"
+                    symbol2 = f"{current_quote}/{p_quote}"
+                    rate_found = False
+                    if isinstance(_markets, dict):
+                        if symbol1 in _markets:
+                            try:
+                                ticker = exchange.fetch_ticker(symbol1)
+                                conversion_rate = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                rate_found = True
+                            except Exception:
+                                pass
+                        if not rate_found and symbol2 in _markets:
+                            try:
+                                ticker = exchange.fetch_ticker(symbol2)
+                                price = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                if price > 0:
+                                    conversion_rate = 1.0 / price
+                                    rate_found = True
+                            except Exception:
+                                pass
+                    if not rate_found:
+                        # Fallbacks
+                        if p_quote == 'EUR' and current_quote == 'USD':
+                            conversion_rate = 1.08
+                        elif p_quote == 'USD' and current_quote == 'EUR':
+                            conversion_rate = 1.0 / 1.08
+                        elif p_quote == 'BTC' and current_quote == 'USD':
+                            conversion_rate = 90000.0
+                        elif p_quote == 'USD' and current_quote == 'BTC':
+                            conversion_rate = 1.0 / 90000.0
+                        elif p_quote == 'BTC' and current_quote == 'EUR':
+                            conversion_rate = 83000.0
+                        elif p_quote == 'EUR' and current_quote == 'BTC':
+                            conversion_rate = 1.0 / 83000.0
+
+                converted_price = price_in_p_quote * conversion_rate
+                total_amount += amount
+                weighted_sum += amount * converted_price
+
             if total_amount <= 0:
                 return True, "No remaining recorded purchase amount, allowing sell by default."
 
-            weighted_sum = sum(float(p['amount']) * float(p['price']) for p in purchases)
             avg_purchase_price = weighted_sum / total_amount
 
             # A sell is profitable if sell_price > avg_purchase_price with a 0.3% margin added (sell_price > avg_purchase_price * 1.003)
             target_price = avg_purchase_price * 1.003
             profitable = float(sell_price) > target_price
-            details = f"Sell Price: {sell_price:.8f} vs Avg Purchase Price with 0.3% margin: {target_price:.8f} (Raw Avg: {avg_purchase_price:.8f}, Remaining Amount: {total_amount:.6f})"
+            details = f"Sell Price: {sell_price:.8f} vs Avg Purchase Price (converted to {current_quote}) with 0.3% margin: {target_price:.8f} (Raw Avg: {avg_purchase_price:.8f}, Remaining Amount: {total_amount:.6f})"
             return profitable, details
         except Exception as e:
             console.print(f"[{symbol}] Exception in is_sell_profitable check: {e}")
