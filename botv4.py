@@ -210,6 +210,8 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                                 time.sleep(exchange.rateLimit / 1000)
                                 res = exchange.edit_order(oid, symbol, 'limit', side_lower, edit_amount, new_price)
                                 console.print(f"[{symbol}] Order {oid} successfully edited: {res}")
+                                if side_lower == 'buy':
+                                    remove_edited_buy_order_purchase(symbol, old_amount, o_price_float)
                                 edited_order = res
                                 break  # Only edit one order (it must be for the second order only that we launch this procedure)
                             except Exception as e:
@@ -304,37 +306,46 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             return True, f"Error in profitability check: {e}. Allowing sell by default."
 
     def remove_recorded_purchases(symbol, sell_amount):
-        """Deduct sell_amount from our recorded purchases (FIFO manner) after a successful SELL."""
+        """Delete all entries of buys from recorded purchases after a successful SELL."""
         try:
-            purchases = recorded_purchases.get(symbol, [])
-            if not purchases:
-                return
-
-            remaining_to_deduct = float(sell_amount)
-            new_purchases = []
-            for p in purchases:
-                if remaining_to_deduct <= 0:
-                    new_purchases.append(p)
-                    continue
-
-                p_amount = float(p['amount'])
-                if p_amount <= remaining_to_deduct:
-                    remaining_to_deduct -= p_amount
-                    # This purchase is fully matched/exhausted, so we don't append it to new_purchases
-                else:
-                    p['amount'] = p_amount - remaining_to_deduct
-                    remaining_to_deduct = 0.0
-                    new_purchases.append(p)
-
-            recorded_purchases[symbol] = new_purchases
+            if symbol in recorded_purchases:
+                recorded_purchases[symbol] = []
             try:
                 safe_json.atomic_write_json(PURCHASES_FILE, recorded_purchases, backup=True, indent=2)
             except Exception:
                 with open(PURCHASES_FILE, 'w') as f:
                     json.dump(recorded_purchases, f, indent=2)
-            console.print(f"[{symbol}] Deducted {sell_amount} from recorded purchases. Remaining recorded lots: {len(new_purchases)}")
+            console.print(f"[{symbol}] Deleted all buy entries from recorded purchases because a sale has been made.")
         except Exception as e:
             console.print(f"[{symbol}] Failed to update recorded purchases after sell: {e}")
+
+    def remove_edited_buy_order_purchase(symbol, previous_amount, previous_price):
+        """Remove a recorded purchase matching the previous buy order's amount and price after it was edited."""
+        try:
+            purchases = recorded_purchases.get(symbol, [])
+            if not purchases:
+                console.print(f"[{symbol}] Warning: No recorded purchases found to remove for edited buy order.")
+                return
+
+            found = False
+            for i, p in enumerate(purchases):
+                if float(p['amount']) == float(previous_amount) and float(p['price']) == float(previous_price):
+                    purchases.pop(i)
+                    found = True
+                    break
+
+            if found:
+                recorded_purchases[symbol] = purchases
+                try:
+                    safe_json.atomic_write_json(PURCHASES_FILE, recorded_purchases, backup=True, indent=2)
+                except Exception:
+                    with open(PURCHASES_FILE, 'w') as f:
+                        json.dump(recorded_purchases, f, indent=2)
+                console.print(f"[{symbol}] Deleted previous buy order purchase from recorded purchases: price={previous_price}, amount={previous_amount}")
+            else:
+                console.print(f"[{symbol}] Warning: No matching recorded purchase found for edited buy order with price={previous_price}, amount={previous_amount}")
+        except Exception as e:
+            console.print(f"[{symbol}] Failed to update recorded purchases after buy order edit: {e}")
 
     def should_place_order(symbol, side, price, last_close, df_candles, console=None):
         """
@@ -689,6 +700,8 @@ if __name__ == '__main__':
                         expiry = pausedForBuy.get(symbol)
                         if expiry and now_ts < int(expiry):
                             console.print(f"Buy for {symbol} is paused until {datetime.fromtimestamp(int(expiry))}")
+                        elif len(recorded_purchases.get(symbol, [])) >= 2:
+                            console.print(f"[{symbol}] Skipping BUY order: Already reached the limit of 2 buyings per pair.")
                         else:
                             # cleanup expired pause entry
                             if expiry and now_ts >= int(expiry):

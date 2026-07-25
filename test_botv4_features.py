@@ -104,20 +104,66 @@ class TestBotV4Features(unittest.TestCase):
         self.assertTrue(profitable)
 
         # Deduct some amount (1.5 BTC)
-        # Oldest purchase of 1.0 at 40000 is removed. Next of 1.0 at 42000 is reduced to 0.5.
+        # Under new requirements, any successful sale clears all recorded purchases for that symbol
         botv4.remove_recorded_purchases("BTC/USD", 1.5)
-        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 1)
-        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["amount"], 0.5)
-        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["price"], 42000.0)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 0)
 
-        # Now the average price is 42000.0.
-        # Selling at 41500 should now be unprofitable.
+        # Selling when empty defaults to True
         profitable, msg = botv4.is_sell_profitable("BTC/USD", 41500.0, 0.5)
-        self.assertFalse(profitable)
-
-        # Selling at 43000 should be profitable.
-        profitable, msg = botv4.is_sell_profitable("BTC/USD", 43000.0, 0.5)
         self.assertTrue(profitable)
+
+    def test_remove_edited_buy_order_purchase(self):
+        # Record three purchases
+        botv4.record_purchase("BTC/USD", 1.0, 40000.0)
+        botv4.record_purchase("BTC/USD", 1.5, 42000.0)
+        botv4.record_purchase("BTC/USD", 1.0, 40000.0)
+
+        # Remove the one with 1.5 amount and 42000.0 price
+        botv4.remove_edited_buy_order_purchase("BTC/USD", 1.5, 42000.0)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 2)
+        # Verify remaining purchases
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["amount"], 1.0)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["price"], 40000.0)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][1]["amount"], 1.0)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][1]["price"], 40000.0)
+
+        # Remove only one if there are duplicates
+        botv4.remove_edited_buy_order_purchase("BTC/USD", 1.0, 40000.0)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 1)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["amount"], 1.0)
+        self.assertEqual(botv4.recorded_purchases["BTC/USD"][0]["price"], 40000.0)
+
+        # No match prints a warning and does not raise exception
+        botv4.remove_edited_buy_order_purchase("BTC/USD", 9.9, 999.9)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 1)
+
+    def test_cleanup_open_orders_edit_removes_old_purchase(self):
+        mock_exchange = MagicMock()
+        mock_exchange.rateLimit = 1000
+        mock_exchange.has = {'editOrder': True}
+        # Mock previous order on same side (buy vs buy)
+        mock_exchange.fetch_open_orders.return_value = [
+            {'id': '123', 'side': 'buy', 'price': 42000.0, 'amount': 1.5, 'symbol': 'BTC/USD'}
+        ]
+        mock_exchange.edit_order.return_value = {'id': '123', 'price': 43000.0, 'amount': 1.5}
+
+        # Setup recorded purchases
+        botv4.record_purchase("BTC/USD", 1.5, 42000.0)
+        self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 1)
+
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.95
+            botv4.config = {'monte_carlo': {'sufficient_probability': 0.91}}
+
+            res = botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 43000.0, "buy", None, 44000.0, 1.5)
+
+            # edit_order should have been called successfully
+            mock_exchange.edit_order.assert_called_once_with('123', 'BTC/USD', 'limit', 'buy', 1.5, 43000.0)
+            mock_exchange.cancel_order.assert_not_called()
+            self.assertIsNotNone(res)
+
+            # The old purchase should have been removed!
+            self.assertEqual(len(botv4.recorded_purchases["BTC/USD"]), 0)
 
     def test_cleanup_open_orders_prob_sufficient(self):
         mock_exchange = MagicMock()
