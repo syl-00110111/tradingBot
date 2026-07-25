@@ -111,7 +111,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             console.print(f"dump_pending_orders failed (file read): {e}")
             return None
 
-    def cleanup_open_orders(exchange, symbol, new_price, side, df_candles, last_close, new_amount=None):
+    def cleanup_open_orders(exchange, symbol, new_price, side, df_candles, last_close, new_amount=None): # TODO rename?
         """Fetches open orders for the symbol and either edits or cancels them.
         Returns the edited order dict if edit_order is used successfully, otherwise returns None.
         """
@@ -211,7 +211,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                                 res = exchange.edit_order(oid, symbol, 'limit', side_lower, edit_amount, new_price)
                                 console.print(f"[{symbol}] Order {oid} successfully edited: {res}")
                                 edited_order = res
-                                break  # Only edit one order
+                                break  # Only edit one order (it must be for the second order only that we launch this procedure)
                             except Exception as e:
                                 console.print(f"[{symbol}] edit_order failed for {oid}: {e}. Falling back to cancel and replace.")
 
