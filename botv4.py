@@ -910,18 +910,38 @@ if __name__ == '__main__':
                                 availablePairs.append(_a)
                                 console.print(f"Appended {_a} to tracked pairs.")
                             elif _count < miniCount and pair_index != -1:
-                                availablePairs.pop(pair_index)
-                                expiry_ts = int(time.time()) + (4 * 3600)
-                                pausedForBuy[symbolChoose] = expiry_ts
+                                # Only remove/pause if the pair is not found in _balance (i.e. is dust or missing)
+                                base = market_sample.get('base')
+                                min_amount_val = market_sample.get('limits', {}).get('amount', {}).get('min')
                                 try:
+                                    min_amount = float(min_amount_val) if min_amount_val is not None else 0.0
+                                except (ValueError, TypeError):
+                                    min_amount = 0.0
+
+                                base_balance = 0.0
+                                if _balance and isinstance(_balance, dict):
+                                    free_bal = _balance.get('free') or {}
+                                    total_bal = _balance.get('total') or {}
                                     try:
-                                        safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
-                                    except Exception:
-                                        with open(PAUSE_FILE, 'w') as f:
-                                            json.dump(pausedForBuy, f)
-                                except Exception as ex:
-                                    console.print(f"Failed to persist pausedForBuy: {ex}")
-                                console.print(f"Paused buys for {symbolChoose} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum. Removed from availablePairs.")
+                                        base_balance = float(free_bal.get(base, 0.0) or total_bal.get(base, 0.0) or 0.0)
+                                    except (ValueError, TypeError):
+                                        base_balance = 0.0
+
+                                if base_balance < min_amount:
+                                    availablePairs.pop(pair_index)
+                                    expiry_ts = int(time.time()) + (4 * 3600)
+                                    pausedForBuy[symbolChoose] = expiry_ts
+                                    try:
+                                        try:
+                                            safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                                        except Exception:
+                                            with open(PAUSE_FILE, 'w') as f:
+                                                json.dump(pausedForBuy, f)
+                                    except Exception as ex:
+                                        console.print(f"Failed to persist pausedForBuy: {ex}")
+                                    console.print(f"Paused buys for {symbolChoose} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum and balance being dust or missing ({base_balance} < {min_amount}). Removed from availablePairs.")
+                                else:
+                                    console.print(f"Retained {symbolChoose} in tracked pairs despite low trading count because non-dust balance exists ({base_balance} >= {min_amount}).")
                         last_pending_fetch = now_ts
                         console.print(f"[yellow]Periodic task: fetching open orders at {datetime.fromtimestamp(now_ts)}[/yellow]")
                         recent = []
