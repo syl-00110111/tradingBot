@@ -201,8 +201,8 @@ class TestBotV4Features(unittest.TestCase):
 
             botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 46000.0, "sell", None, 44000.0)
 
-            # Side did not change (both sell), so order should NOT be cancelled even with low probability
-            mock_exchange.cancel_order.assert_not_called()
+            # Order should be cancelled because probability (0.01) is no longer sufficient (< 0.15)
+            mock_exchange.cancel_order.assert_called_once_with('123', 'BTC/USD')
 
     def test_simultaneous_signals_prioritization(self):
         # We want to test the prioritisation of concurrent BUY and SELL signals
