@@ -750,8 +750,6 @@ if __name__ == '__main__':
                                                     console.print(f"BUY order passed: {order}")
                                             # Record purchase to ensure that SELL events can check profitability later
                                             record_purchase(symbol, amount, price)
-                                            # update balance
-                                            _balance = market_utils.fetch_balance(exchange, console=console)
                                             # plot a small chart with the BUY marker
                                             try:
                                                 plt_ascii.clf()
@@ -865,8 +863,6 @@ if __name__ == '__main__':
                                                     console.print(f"SELL order passed: {order}")
                                             # Deduct sell_amount from recorded purchases
                                             remove_recorded_purchases(symbol, amount)
-                                            # update balance
-                                            _balance = market_utils.fetch_balance(exchange, console=console)
                                             # plot SELL
                                             try:
                                                 plt_ascii.clf()
