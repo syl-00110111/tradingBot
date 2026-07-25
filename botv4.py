@@ -174,38 +174,32 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 side_lower = side.lower()
                 o_price_float = float(o_price)
 
-                # Requirement 3: "only proceed with the cancellation if the side has changed and that probability is no longer sufficient."
-                side_changed = (o_side_lower != side_lower)
+                # Check execution probability based on price convergence (Requirement 3 is no longer valid)
+                mode = "below" if o_side_lower == "buy" else "above"
+                prob = mc_engine.estimate_hit_probability(
+                    current_price=last_close,
+                    target_price=o_price_float,
+                    volatility=volatility,
+                    drift=drift,
+                    mode=mode
+                )
+                insufficient_prob = (prob < threshold)
 
-                if side_changed:
-                    # Check execution probability based on price convergence
-                    mode = "below" if o_side_lower == "buy" else "above"
-                    prob = mc_engine.estimate_hit_probability(
-                        current_price=last_close,
-                        target_price=o_price_float,
-                        volatility=volatility,
-                        drift=drift,
-                        mode=mode
-                    )
-                    insufficient_prob = (prob < threshold)
+                console.print(f"[{symbol}] Found previous open order {oid} ({o_side} at {o_price}). Execution probability: {prob:.4f} (threshold: {threshold})")
 
-                    console.print(f"[{symbol}] Found previous open order {oid} ({o_side} at {o_price}). New order side is {side}. Side changed: {side_changed}. Execution probability: {prob:.4f} (threshold: {threshold})")
-
-                    if insufficient_prob:
-                        console.print(f"[{symbol}] Cancelling order {oid}: Side changed and execution probability ({prob:.4f}) is no longer sufficient (< {threshold})")
+                if insufficient_prob:
+                    console.print(f"[{symbol}] Cancelling order {oid}: Execution probability ({prob:.4f}) is no longer sufficient (< {threshold})")
+                    try:
+                        time.sleep(exchange.rateLimit / 1000)
                         try:
-                            time.sleep(exchange.rateLimit / 1000)
-                            try:
-                                exchange.cancel_order(oid, symbol)
-                            except TypeError:
-                                exchange.cancel_order(oid)
-                            console.print(f"[{symbol}] Order {oid} successfully cancelled.")
-                        except Exception as e:
-                            console.print(f"[{symbol}] Failed to cancel order {oid}: {e}")
-                    else:
-                        console.print(f"[{symbol}] Keeping order {oid} as execution probability ({prob:.4f}) is still sufficient (>= {threshold})")
+                            exchange.cancel_order(oid, symbol)
+                        except TypeError:
+                            exchange.cancel_order(oid)
+                        console.print(f"[{symbol}] Order {oid} successfully cancelled.")
+                    except Exception as e:
+                        console.print(f"[{symbol}] Failed to cancel order {oid}: {e}")
                 else:
-                    console.print(f"[{symbol}] Keeping order {oid} since side has not changed ({o_side_lower} == {side_lower})")
+                    console.print(f"[{symbol}] Keeping order {oid} as execution probability ({prob:.4f}) is still sufficient (>= {threshold})")
 
         except Exception as e:
             console.print(f"[{symbol}] Exception in cleanup_open_orders: {e}")
@@ -873,11 +867,11 @@ if __name__ == '__main__':
 
                     time.sleep(1.0)
 
-                # Periodic background tasks: dump pending orders every 30 minutes,
+                # Periodic background tasks: dump pending orders every 42 minutes,
                 # check candle coherence, and compute profit for recent SELL orders.
                 try:
                     now_ts = time.time()
-                    if now_ts - last_pending_fetch >= 30 * 60:
+                    if now_ts - last_pending_fetch >= 42 * 60:
                         _markets = loadMarkets(exchange, "markets.json")
                         # update balance
                         _balance = market_utils.fetch_balance(exchange, console=console)
@@ -885,6 +879,11 @@ if __name__ == '__main__':
                         for _ in range(36):
                             market_sample = random.choice(list(_markets.values()))
                             symbolChoose = market_sample.get('symbol')
+                            base_asset = market_sample.get('base')
+                            quote_asset = market_sample.get('quote')
+                            if symbolChoose in forbidAssets or base_asset in forbidAssets or quote_asset in forbidAssets:
+                                console.print(f"Skipping forbidden symbol: {symbolChoose}")
+                                continue
                             console.print(f"Chose to update symbol: {symbolChoose}")
                             _count = symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console)
                             # check if symbolChoose is in availablePairs (as a list/tuple or string)
