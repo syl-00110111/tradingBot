@@ -204,6 +204,28 @@ class TestBotV4Features(unittest.TestCase):
             # Order should be cancelled because probability (0.01) is no longer sufficient (< 0.15)
             mock_exchange.cancel_order.assert_called_once_with('123', 'BTC/USD')
 
+    def test_cleanup_open_orders_edit_success(self):
+        mock_exchange = MagicMock()
+        mock_exchange.rateLimit = 1000
+        mock_exchange.has = {'editOrder': True}
+        # Mock previous order on same side (buy vs buy)
+        mock_exchange.fetch_open_orders.return_value = [
+            {'id': '123', 'side': 'buy', 'price': 42000.0, 'symbol': 'BTC/USD'}
+        ]
+        mock_exchange.edit_order.return_value = {'id': '123', 'price': 43000.0, 'amount': 1.5}
+
+        with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
+            mock_hit_prob.return_value = 0.95
+            botv4.config = {'monte_carlo': {'sufficient_probability': 0.91}}
+
+            res = botv4.cleanup_open_orders(mock_exchange, "BTC/USD", 43000.0, "buy", None, 44000.0, 1.5)
+
+            # edit_order should have been called successfully
+            mock_exchange.edit_order.assert_called_once_with('123', 'BTC/USD', 'limit', 'buy', 1.5, 43000.0)
+            mock_exchange.cancel_order.assert_not_called()
+            self.assertIsNotNone(res)
+            self.assertEqual(res['price'], 43000.0)
+
     def test_simultaneous_signals_prioritization(self):
         # We want to test the prioritisation of concurrent BUY and SELL signals
         # We can extract the prioritization logic into a simple helper or simulate it

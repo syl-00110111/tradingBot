@@ -111,14 +111,12 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             console.print(f"dump_pending_orders failed (file read): {e}")
             return None
 
-    def cleanup_open_orders(exchange, symbol, new_price, side, df_candles, last_close):
-        """Fetches open orders for the symbol and cancels a previous order set to be replaced
-        by the new order, ONLY if:
-        1. The side has changed (old order side != new order side)
-        2. The execution probability of the old order based on price convergence (via Monte Carlo) is no longer sufficient.
+    def cleanup_open_orders(exchange, symbol, new_price, side, df_candles, last_close, new_amount=None):
+        """Fetches open orders for the symbol and either edits or cancels them.
+        Returns the edited order dict if edit_order is used successfully, otherwise returns None.
         """
         try:
-            console.print(f"[{symbol}] Running open orders check before placing new order (side {side}) at price {new_price}...")
+            console.print(f"[{symbol}] Running open orders check before placing/editing order (side {side}) at price {new_price}...")
             time.sleep(exchange.rateLimit / 1000)
 
             open_orders = []
@@ -133,11 +131,11 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                         open_orders = [o for o in all_open if o.get('symbol') == symbol]
                 except Exception as ex:
                     console.print(f"[{symbol}] Fallback fetch_open_orders failed: {ex}")
-                    return
+                    return None
 
             if not open_orders:
                 console.print(f"[{symbol}] No open orders found.")
-                return
+                return None
 
             # Compute volatility & drift for Monte Carlo from df_candles
             volatility = 0.0
@@ -160,6 +158,8 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             if config and isinstance(config, dict):
                 threshold = config.get('monte_carlo', {}).get('sufficient_probability', 0.99)
 
+            edited_order = None
+
             for o in open_orders:
                 oid = o.get('id') or o.get('orderId')
                 if not oid:
@@ -174,7 +174,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 side_lower = side.lower()
                 o_price_float = float(o_price)
 
-                # Check execution probability based on price convergence (Requirement 3 is no longer valid)
+                # Check execution probability based on price convergence
                 mode = "below" if o_side_lower == "buy" else "above"
                 prob = mc_engine.estimate_hit_probability(
                     current_price=last_close,
@@ -187,6 +187,24 @@ with console.status("Bot init. Please wait some time, or expect a random error i
 
                 console.print(f"[{symbol}] Found previous open order {oid} ({o_side} at {o_price}). Execution probability: {prob:.4f} (threshold: {threshold})")
 
+                # Check if we can edit this order
+                side_changed = (o_side_lower != side_lower)
+                has_edit_order = False
+                if hasattr(exchange, 'has') and isinstance(exchange.has, dict):
+                    has_edit_order = exchange.has.get('editOrder', False)
+
+                if not side_changed and has_edit_order and new_amount is not None:
+                    try:
+                        console.print(f"[{symbol}] Attempting to edit existing order {oid} to price={new_price} amount={new_amount}...")
+                        time.sleep(exchange.rateLimit / 1000)
+                        res = exchange.edit_order(oid, symbol, 'limit', side_lower, new_amount, new_price)
+                        console.print(f"[{symbol}] Order {oid} successfully edited: {res}")
+                        edited_order = res
+                        break  # Only edit one order
+                    except Exception as e:
+                        console.print(f"[{symbol}] edit_order failed for {oid}: {e}. Falling back to cancel and replace.")
+
+                # If the probability is insufficient, cancel it
                 if insufficient_prob:
                     console.print(f"[{symbol}] Cancelling order {oid}: Execution probability ({prob:.4f}) is no longer sufficient (< {threshold})")
                     try:
@@ -198,11 +216,12 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                         console.print(f"[{symbol}] Order {oid} successfully cancelled.")
                     except Exception as e:
                         console.print(f"[{symbol}] Failed to cancel order {oid}: {e}")
-                else:
-                    console.print(f"[{symbol}] Keeping order {oid} as execution probability ({prob:.4f}) is still sufficient (>= {threshold})")
+
+            return edited_order
 
         except Exception as e:
             console.print(f"[{symbol}] Exception in cleanup_open_orders: {e}")
+            return None
 
 
     # mapping symbol -> expiry_timestamp for paused buys (persisted to disk)
@@ -704,12 +723,17 @@ if __name__ == '__main__':
                                         if not should_place:
                                             console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.99")
                                         else:
-                                            cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close)
-                                            console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
-                                            order = exchange.create_limit_buy_order(symbol, amount, price)
-                                            # persist pending order to file
-                                            add_pending_order(order)
-                                            console.print(f"BUY order passed: {order}")
+                                            edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
+                                            if edited_order:
+                                                order = edited_order
+                                                add_pending_order(order)
+                                                console.print(f"BUY order successfully updated via edit_order: {order}")
+                                            else:
+                                                console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
+                                                order = exchange.create_limit_buy_order(symbol, amount, price)
+                                                # persist pending order to file
+                                                add_pending_order(order)
+                                                console.print(f"BUY order passed: {order}")
                                             # Record purchase to ensure that SELL events can check profitability later
                                             record_purchase(symbol, amount, price)
                                             # update balance
@@ -812,12 +836,17 @@ if __name__ == '__main__':
                                         if not should_place:
                                             console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 0.99")
                                         else:
-                                            cleanup_open_orders(exchange, symbol, price, 'sell', df_candles, last_close)
-                                            console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
-                                            order = exchange.create_limit_sell_order(symbol, amount, price)
-                                            # persist pending order to file
-                                            add_pending_order(order)
-                                            console.print(f"SELL order passed: {order}")
+                                            edited_order = cleanup_open_orders(exchange, symbol, price, 'sell', df_candles, last_close, amount)
+                                            if edited_order:
+                                                order = edited_order
+                                                add_pending_order(order)
+                                                console.print(f"SELL order successfully updated via edit_order: {order}")
+                                            else:
+                                                console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
+                                                order = exchange.create_limit_sell_order(symbol, amount, price)
+                                                # persist pending order to file
+                                                add_pending_order(order)
+                                                console.print(f"SELL order passed: {order}")
                                             # Deduct sell_amount from recorded purchases
                                             remove_recorded_purchases(symbol, amount)
                                             # update balance
