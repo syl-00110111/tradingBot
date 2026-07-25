@@ -195,16 +195,25 @@ with console.status("Bot init. Please wait some time, or expect a random error i
 
                 if not side_changed and has_edit_order:
                     edit_amount = new_amount if (new_amount is not None and new_amount > 0) else float(o.get('amount', 0))
+                    old_amount = float(o.get('amount', 0))
+                    price_changed = (abs(new_price - o_price_float) > 1e-9)
+                    amount_changed = (abs(edit_amount - old_amount) > 1e-9)
+
                     if edit_amount > 0:
-                        try:
-                            console.print(f"[{symbol}] Attempting to edit existing order {oid} to price={new_price} amount={edit_amount}...")
-                            time.sleep(exchange.rateLimit / 1000)
-                            res = exchange.edit_order(oid, symbol, 'limit', side_lower, edit_amount, new_price)
-                            console.print(f"[{symbol}] Order {oid} successfully edited: {res}")
-                            edited_order = res
-                            break  # Only edit one order
-                        except Exception as e:
-                            console.print(f"[{symbol}] edit_order failed for {oid}: {e}. Falling back to cancel and replace.")
+                        if not price_changed and not amount_changed:
+                            console.print(f"[{symbol}] Existing order {oid} is already at price={new_price} and amount={edit_amount}. No edit needed.")
+                            edited_order = o
+                            break
+                        else:
+                            try:
+                                console.print(f"[{symbol}] Attempting to edit existing order {oid} (price change: {price_changed}, amount change: {amount_changed}) to price={new_price} amount={edit_amount}...")
+                                time.sleep(exchange.rateLimit / 1000)
+                                res = exchange.edit_order(oid, symbol, 'limit', side_lower, edit_amount, new_price)
+                                console.print(f"[{symbol}] Order {oid} successfully edited: {res}")
+                                edited_order = res
+                                break  # Only edit one order
+                            except Exception as e:
+                                console.print(f"[{symbol}] edit_order failed for {oid}: {e}. Falling back to cancel and replace.")
 
                 # If the probability is insufficient, cancel it
                 if insufficient_prob:
@@ -285,9 +294,10 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             weighted_sum = sum(float(p['amount']) * float(p['price']) for p in purchases)
             avg_purchase_price = weighted_sum / total_amount
 
-            # A sell is profitable if sell_price > avg_purchase_price
-            profitable = float(sell_price) > avg_purchase_price
-            details = f"Sell Price: {sell_price:.8f} vs Avg Purchase Price: {avg_purchase_price:.8f} (Remaining Amount: {total_amount:.6f})"
+            # A sell is profitable if sell_price > avg_purchase_price with a 0.3% margin added (sell_price > avg_purchase_price * 1.003)
+            target_price = avg_purchase_price * 1.003
+            profitable = float(sell_price) > target_price
+            details = f"Sell Price: {sell_price:.8f} vs Avg Purchase Price with 0.3% margin: {target_price:.8f} (Raw Avg: {avg_purchase_price:.8f}, Remaining Amount: {total_amount:.6f})"
             return profitable, details
         except Exception as e:
             console.print(f"[{symbol}] Exception in is_sell_profitable check: {e}")
