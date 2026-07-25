@@ -306,16 +306,21 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             return True, f"Error in profitability check: {e}. Allowing sell by default."
 
     def remove_recorded_purchases(symbol, sell_amount):
-        """Delete all entries of buys from recorded purchases after a successful SELL."""
+        """Delete all entries of buys from recorded purchases for the given base asset after a successful SELL."""
         try:
-            if symbol in recorded_purchases:
-                recorded_purchases[symbol] = []
+            base_asset = symbol.split('/')[0] if '/' in symbol else symbol
+            wiped_symbols = []
+            for s in list(recorded_purchases.keys()):
+                s_base = s.split('/')[0] if '/' in s else s
+                if s_base == base_asset:
+                    recorded_purchases[s] = []
+                    wiped_symbols.append(s)
             try:
                 safe_json.atomic_write_json(PURCHASES_FILE, recorded_purchases, backup=True, indent=2)
             except Exception:
                 with open(PURCHASES_FILE, 'w') as f:
                     json.dump(recorded_purchases, f, indent=2)
-            console.print(f"[{symbol}] Deleted all buy entries from recorded purchases because a sale has been made.")
+            console.print(f"[{symbol}] Deleted all buy entries from recorded purchases for base asset {base_asset} ({', '.join(wiped_symbols)}) because a sale has been made.")
         except Exception as e:
             console.print(f"[{symbol}] Failed to update recorded purchases after sell: {e}")
 
@@ -346,6 +351,19 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 console.print(f"[{symbol}] Warning: No matching recorded purchase found for edited buy order with price={previous_price}, amount={previous_amount}")
         except Exception as e:
             console.print(f"[{symbol}] Failed to update recorded purchases after buy order edit: {e}")
+
+    def count_buyings_for_base_asset(base_asset):
+        """Count the number of recorded purchase entries across all symbols sharing the given base asset."""
+        count = 0
+        try:
+            for s, purchases in recorded_purchases.items():
+                if '/' in s:
+                    s_base = s.split('/')[0]
+                    if s_base == base_asset:
+                        count += len(purchases)
+        except Exception as e:
+            console.print(f"Failed to count buyings for base asset {base_asset}: {e}")
+        return count
 
     def should_place_order(symbol, side, price, last_close, df_candles, console=None):
         """
@@ -700,8 +718,8 @@ if __name__ == '__main__':
                         expiry = pausedForBuy.get(symbol)
                         if expiry and now_ts < int(expiry):
                             console.print(f"Buy for {symbol} is paused until {datetime.fromtimestamp(int(expiry))}")
-                        elif len(recorded_purchases.get(symbol, [])) >= 2:
-                            console.print(f"[{symbol}] Skipping BUY order: Already reached the limit of 2 buyings per pair.")
+                        elif count_buyings_for_base_asset(base) >= 2:
+                            console.print(f"[{symbol}] Skipping BUY order: Already reached the limit of 2 buyings for base asset {base}.")
                         else:
                             # cleanup expired pause entry
                             if expiry and now_ts >= int(expiry):
@@ -735,92 +753,148 @@ if __name__ == '__main__':
                                 if amount <= min_amount:
                                     console.print(f"Calculated buy amount ({amount}) is below minimum amount of {min_amount} for {symbol}")
                                 else:
-                                    try:
-                                        should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
-                                        if not should_place:
-                                            console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.99")
-                                        else:
-                                            edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
-                                            if edited_order:
-                                                order = edited_order
-                                                add_pending_order(order)
-                                                console.print(f"BUY order successfully updated via edit_order: {order}")
-                                            else:
-                                                # We need to place a NEW limit buy order.
-                                                # Fetch fresh balance and check if we have enough quote balance.
-                                                _balance = market_utils.fetch_balance(exchange, console=console)
-                                                _b = _balance.get('free').get(quote)
-                                                quote_free = float(_b) if _b is not None else 0.0
-                                                if quote_free <= 0:
-                                                    console.print(f"No quote balance available for {symbol} to BUY ({quote_free} <= 0)")
-                                                    # Raise exception to skip other steps and enter the outer try-except handler
-                                                    raise ValueError(f"Insufficient quote balance ({quote_free} <= 0)")
-                                                else:
-                                                    console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
-                                                    order = exchange.create_limit_buy_order(symbol, amount, price)
-                                                    # persist pending order to file
-                                                    add_pending_order(order)
-                                                    console.print(f"BUY order passed: {order}")
-                                            # Record purchase to ensure that SELL events can check profitability later
-                                            record_purchase(symbol, amount, price)
-                                            # plot a small chart with the BUY marker
-                                            try:
-                                                plt_ascii.clf()
-                                                plt_ascii.theme('dark')
-                                                plt_ascii.subplots(1, 1)
-                                                # prepare data
-                                                timestamps = df_candles['timestamp'].astype(int).tolist()
-                                                dates = [datetime.fromtimestamp(int(ts)/1000).strftime('%d/%m %H:%M') for ts in timestamps]
-                                                opens = df_candles['open'].astype(float).tolist()
-                                                highs = df_candles['high'].astype(float).tolist()
-                                                lows = df_candles['low'].astype(float).tolist()
-                                                closes = df_candles['close'].astype(float).tolist()
-                                                volumes = df_candles['volume'].astype(float).tolist()
-                                                data = {"Open": opens, "High": highs, "Low": lows, "Close": closes}
-                                                x = list(range(len(dates)))
-                                                # 1 plot containing both: the candlesticks on top, volume bars below
-                                                plt_ascii.title(f"{symbol} - BUY")
-                                                plt_ascii.subplot(1, 1)
-                                                plt_ascii.candlestick(x, data)
-                                                # draw volumes on the same subplot as short vertical lines anchored below the candles
-                                                max_volume = max(volumes) if volumes else 1
-                                                min_price = min(lows) if lows else 0
-                                                max_price = max(highs) if highs else 1
-                                                price_range = max_price - min_price if max_price != min_price else max_price
-                                                # base position below the lowest low, and a height factor for volumes
-                                                base = min_price - price_range * 0.02
-                                                height_factor = price_range * 0.64
-                                                # draw vertical dots for each volume data
-                                                for i, v in enumerate(volumes):
-                                                    h = (v / max_volume) * height_factor if max_volume else 0
-                                                    plt_ascii.plot([i, i], [base, base + h], color='yellow')
-                                                plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='x', color='green')
-                                                # set x ticks as human-readable dates on bottom plot
-                                                step = max(1, len(dates) // 8)
-                                                x_ticks = x[::step]
-                                                x_labels = [dates[i] for i in x_ticks]
-                                                plt_ascii.xticks(x_ticks, x_labels)
-                                                plt_ascii.show()
-                                            except Exception as e:
-                                                console.print(f"Plot failed for BUY {symbol}: {e}")
-                                    except Exception as e:
-                                        console.print(f"Buy order failed for {symbol}: {e}")
-                                        # detect specific errors and pause buys for 2 hours for this symbol
-                                        err = str(e).lower()
-                                        if ('invalid permissions' in err):
-                                            expiry_ts = int(time.time()) + (366 * 24 * 3600)
-                                        elif ('insufficient funds' in err) or ('minimum' in err and 'not met' in err) or ('invalid arguments' in err and 'volume' in err) or ('must be greater than minimum' in err):
-                                            expiry_ts = int(time.time()) + (4 * 3600)
-                                        pausedForBuy[symbol] = expiry_ts
+                                    # Wind-choice check for first BUY signal of base asset
+                                    pass_on_buy = False
+                                    if count_buyings_for_base_asset(base) == 0:
+                                        other_pairs = [p for p in availablePairs if p[2] == base and p[3] != quote]
+                                        if other_pairs:
+                                            quote_free = float(_balance.get('free', {}).get(quote, 0.0)) if _balance else 0.0
+                                            for p in other_pairs:
+                                                p_symbol = p[0]
+                                                p_quote = p[3]
+                                                other_quote_free = float(_balance.get('free', {}).get(p_quote, 0.0)) if _balance else 0.0
+
+                                                conversion_rate = 1.0
+                                                if p_quote != quote:
+                                                    symbol1 = f"{p_quote}/{quote}"
+                                                    symbol2 = f"{quote}/{p_quote}"
+                                                    rate_found = False
+                                                    if isinstance(_markets, dict):
+                                                        if symbol1 in _markets:
+                                                            try:
+                                                                ticker = exchange.fetch_ticker(symbol1)
+                                                                conversion_rate = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                                                rate_found = True
+                                                            except Exception:
+                                                                pass
+                                                        if not rate_found and symbol2 in _markets:
+                                                            try:
+                                                                ticker = exchange.fetch_ticker(symbol2)
+                                                                price = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                                                if price > 0:
+                                                                    conversion_rate = 1.0 / price
+                                                                    rate_found = True
+                                                            except Exception:
+                                                                pass
+                                                    if not rate_found:
+                                                        if p_quote == 'EUR' and quote == 'USD':
+                                                            conversion_rate = 1.08
+                                                        elif p_quote == 'USD' and quote == 'EUR':
+                                                            conversion_rate = 1.0 / 1.08
+                                                        elif p_quote == 'BTC' and quote == 'USD':
+                                                            conversion_rate = 90000.0
+                                                        elif p_quote == 'USD' and quote == 'BTC':
+                                                            conversion_rate = 1.0 / 90000.0
+                                                        elif p_quote == 'BTC' and quote == 'EUR':
+                                                            conversion_rate = 83000.0
+                                                        elif p_quote == 'EUR' and quote == 'BTC':
+                                                            conversion_rate = 1.0 / 83000.0
+
+                                                other_quote_free_converted = other_quote_free * conversion_rate
+                                                if other_quote_free_converted > quote_free:
+                                                    console.print(f"[{symbol}] Wind-choice: Passing on buy because {p_symbol} has more available money ({other_quote_free_converted:.2f} {quote} equivalent vs {quote_free:.2f} {quote}).")
+                                                    pass_on_buy = True
+                                                    break
+
+                                    if pass_on_buy:
+                                        pass
+                                    else:
                                         try:
+                                            should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
+                                            if not should_place:
+                                                console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.99")
+                                            else:
+                                                edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
+                                                if edited_order:
+                                                    order = edited_order
+                                                    add_pending_order(order)
+                                                    console.print(f"BUY order successfully updated via edit_order: {order}")
+                                                else:
+                                                    # We need to place a NEW limit buy order.
+                                                    # Fetch fresh balance and check if we have enough quote balance.
+                                                    _balance = market_utils.fetch_balance(exchange, console=console)
+                                                    _b = _balance.get('free').get(quote)
+                                                    quote_free = float(_b) if _b is not None else 0.0
+                                                    if quote_free <= 0:
+                                                        console.print(f"No quote balance available for {symbol} to BUY ({quote_free} <= 0)")
+                                                        # Raise exception to skip other steps and enter the outer try-except handler
+                                                        raise ValueError(f"Insufficient quote balance ({quote_free} <= 0)")
+                                                    else:
+                                                        console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
+                                                        order = exchange.create_limit_buy_order(symbol, amount, price)
+                                                        # persist pending order to file
+                                                        add_pending_order(order)
+                                                        console.print(f"BUY order passed: {order}")
+                                                # Record purchase to ensure that SELL events can check profitability later
+                                                record_purchase(symbol, amount, price)
+                                                # plot a small chart with the BUY marker
+                                                try:
+                                                    plt_ascii.clf()
+                                                    plt_ascii.theme('dark')
+                                                    plt_ascii.subplots(1, 1)
+                                                    # prepare data
+                                                    timestamps = df_candles['timestamp'].astype(int).tolist()
+                                                    dates = [datetime.fromtimestamp(int(ts)/1000).strftime('%d/%m %H:%M') for ts in timestamps]
+                                                    opens = df_candles['open'].astype(float).tolist()
+                                                    highs = df_candles['high'].astype(float).tolist()
+                                                    lows = df_candles['low'].astype(float).tolist()
+                                                    closes = df_candles['close'].astype(float).tolist()
+                                                    volumes = df_candles['volume'].astype(float).tolist()
+                                                    data = {"Open": opens, "High": highs, "Low": lows, "Close": closes}
+                                                    x = list(range(len(dates)))
+                                                    # 1 plot containing both: the candlesticks on top, volume bars below
+                                                    plt_ascii.title(f"{symbol} - BUY")
+                                                    plt_ascii.subplot(1, 1)
+                                                    plt_ascii.candlestick(x, data)
+                                                    # draw volumes on the same subplot as short vertical lines anchored below the candles
+                                                    max_volume = max(volumes) if volumes else 1
+                                                    min_price = min(lows) if lows else 0
+                                                    max_price = max(highs) if highs else 1
+                                                    price_range = max_price - min_price if max_price != min_price else max_price
+                                                    # base position below the lowest low, and a height factor for volumes
+                                                    base = min_price - price_range * 0.02
+                                                    height_factor = price_range * 0.64
+                                                    # draw vertical dots for each volume data
+                                                    for i, v in enumerate(volumes):
+                                                        h = (v / max_volume) * height_factor if max_volume else 0
+                                                        plt_ascii.plot([i, i], [base, base + h], color='yellow')
+                                                    plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='x', color='green')
+                                                    # set x ticks as human-readable dates on bottom plot
+                                                    step = max(1, len(dates) // 8)
+                                                    x_ticks = x[::step]
+                                                    x_labels = [dates[i] for i in x_ticks]
+                                                    plt_ascii.xticks(x_ticks, x_labels)
+                                                    plt_ascii.show()
+                                                except Exception as e:
+                                                    console.print(f"Plot failed for BUY {symbol}: {e}")
+                                        except Exception as e:
+                                            console.print(f"Buy order failed for {symbol}: {e}")
+                                            # detect specific errors and pause buys for 2 hours for this symbol
+                                            err = str(e).lower()
+                                            if ('invalid permissions' in err):
+                                                expiry_ts = int(time.time()) + (366 * 24 * 3600)
+                                            elif ('insufficient funds' in err) or ('minimum' in err and 'not met' in err) or ('invalid arguments' in err and 'volume' in err) or ('must be greater than minimum' in err):
+                                                expiry_ts = int(time.time()) + (4 * 3600)
+                                            pausedForBuy[symbol] = expiry_ts
                                             try:
-                                                safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
-                                            except Exception:
-                                                with open(PAUSE_FILE, 'w') as f:
-                                                    json.dump(pausedForBuy, f)
-                                        except Exception as ex:
-                                            console.print(f"Failed to persist pausedForBuy: {ex}")
-                                        console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to error: {e}")
+                                                try:
+                                                    safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                                                except Exception:
+                                                    with open(PAUSE_FILE, 'w') as f:
+                                                        json.dump(pausedForBuy, f)
+                                            except Exception as ex:
+                                                console.print(f"Failed to persist pausedForBuy: {ex}")
+                                            console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to error: {e}")
 
                     # decide sell
                     if global_sell[latest_idx]:
