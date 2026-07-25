@@ -315,7 +315,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             except Exception:
                 with open(PURCHASES_FILE, 'w') as f:
                     json.dump(recorded_purchases, f, indent=2)
-            console.print(f"[{symbol}] Deleted all buy entries from recorded purchases because a sale has been made.")
+            # console.print(f"[{symbol}] Deleted all buy entries from recorded purchases because a sale has been made.")
         except Exception as e:
             console.print(f"[{symbol}] Failed to update recorded purchases after sell: {e}")
 
