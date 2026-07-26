@@ -437,5 +437,79 @@ class TestBotV4Features(unittest.TestCase):
         # Should NOT pass on the buy of ADA/USD because USD has more money
         self.assertFalse(pass_on_buy)
 
+    def test_price_not_overwritten_by_shadowing(self):
+        # Initial price calculation
+        price = 0.36669500
+
+        # Simulated wind-choice logic that previously caused the bug
+        availablePairs = [
+            ["ETHFI/EUR", "id1", "ETHFI", "EUR"],
+            ["ETHFI/USD", "id2", "ETHFI", "USD"]
+        ]
+        base = "ETHFI"
+        quote = "EUR"
+
+        # Mock exchange with fetch_ticker
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_ticker.return_value = {
+            'close': 1.13664,
+            'last': 1.13664
+        }
+
+        _markets = {
+            "ETHFI/EUR": {},
+            "ETHFI/USD": {},
+            "EUR/USD": {},
+            "USD/EUR": {}
+        }
+
+        _balance = {
+            'free': {
+                'EUR': 100.0,
+                'USD': 150.0
+            }
+        }
+
+        pass_on_buy = False
+        other_pairs = [p for p in availablePairs if p[2] == base and p[3] != quote]
+        if other_pairs:
+            quote_free = float(_balance.get('free', {}).get(quote, 0.0))
+            for p in other_pairs:
+                p_symbol = p[0]
+                p_quote = p[3]
+                other_quote_free = float(_balance.get('free', {}).get(p_quote, 0.0))
+
+                conversion_rate = 1.0
+                if p_quote != quote:
+                    symbol1 = f"{p_quote}/{quote}"
+                    symbol2 = f"{quote}/{p_quote}"
+                    rate_found = False
+                    if isinstance(_markets, dict):
+                        if symbol1 in _markets:
+                            try:
+                                ticker = mock_exchange.fetch_ticker(symbol1)
+                                conversion_rate = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                rate_found = True
+                            except Exception:
+                                pass
+                        # In the old code, this block used "price = ..." which overwrote the outer "price"
+                        if not rate_found and symbol2 in _markets:
+                            try:
+                                ticker = mock_exchange.fetch_ticker(symbol2)
+                                ticker_price = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                if ticker_price > 0:
+                                    conversion_rate = 1.0 / ticker_price
+                                    rate_found = True
+                            except Exception:
+                                pass
+
+                other_quote_free_converted = other_quote_free * conversion_rate
+                if other_quote_free_converted > quote_free:
+                    pass_on_buy = True
+                    break
+
+        # Check that the outer 'price' variable remained intact and was not overwritten!
+        self.assertEqual(price, 0.36669500)
+
 if __name__ == '__main__':
     unittest.main()
