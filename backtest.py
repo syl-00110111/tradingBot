@@ -17,6 +17,56 @@ import ccxt
 import pandas as pd
 import safe_json
 
+def calibrate_window_by_non_repetition(df_candles, target_active=480, epsilon=1e-5):
+    """
+    Calibre automatiquement la taille de la fenêtre temporelle pour s'assurer
+    que l'on dispose de target_active chandelles non-répétitives (c'est-à-dire
+    non quasi-identiques à leur prédécesseur).
+    """
+    if df_candles is None or df_candles.empty:
+        return 0
+    N = len(df_candles)
+    if N <= 1:
+        return N
+
+    active_count = 0
+    scanned_count = 0
+
+    # Parcourir à l'envers depuis la dernière bougie
+    for i in range(N - 1, 0, -1):
+        scanned_count += 1
+        c1 = df_candles.iloc[i]
+        c2 = df_candles.iloc[i - 1]
+
+        is_rep = False
+        try:
+            p1, p2 = float(c1['close']), float(c2['close'])
+            o1, o2 = float(c1['open']), float(c2['open'])
+            h1, h2 = float(c1['high']), float(c2['high'])
+            l1, l2 = float(c1['low']), float(c2['low'])
+
+            diff_c = abs(p1 - p2) / max(p1, p2, 1e-9)
+            diff_o = abs(o1 - o2) / max(o1, o2, 1e-9)
+            diff_h = abs(h1 - h2) / max(h1, h2, 1e-9)
+            diff_l = abs(l1 - l2) / max(l1, l2, 1e-9)
+
+            if diff_c <= epsilon and diff_o <= epsilon and diff_h <= epsilon and diff_l <= epsilon:
+                is_rep = True
+        except Exception:
+            pass
+
+        if not is_rep:
+            active_count += 1
+
+        if active_count >= target_active:
+            break
+
+    # La taille de la fenêtre correspond à scanned_count + 1 (pour inclure la bougie i-1 de la dernière comparaison)
+    window_size = scanned_count + 1
+    window_size = min(window_size, N)
+    window_size = max(window_size, target_active)
+    return window_size
+
 def fetch_ohlcv_data(_id, symbol):
     # console.print(f"Fetching OHLCV data for {symbol}...")
     dataFile = 'ohlcv_data_'+ _id + '_1m' + '.json'
@@ -37,15 +87,20 @@ def fetch_ohlcv_data(_id, symbol):
 
 candles_per_pair = {}
 df_candles = None
+full_df_candles = None
+calibrated_size = 0
 
 def main(symbol: str, _id: str):
     import torch
     # Hardware Acceleration Detection
     device = None
     try:
-        candles_per_pair[symbol] = fetch_ohlcv_data(_id, symbol)
+        full_df_candles = fetch_ohlcv_data(_id, symbol)
     except Exception as e:
         console.print(f"Failed to fetch OHLCV for {symbol}: {e}")
+    # Calibrer automatiquement le temps sur la non-répétition de chandelles
+    calibrated_size = calibrate_window_by_non_repetition(full_df_candles, target_active=480)
+    candles_per_pair[symbol] = full_df_candles.tail(calibrated_size) if full_df_candles is not None else None
     df_candles = candles_per_pair.get(symbol)
 
     if torch.cuda.is_available():
@@ -135,8 +190,8 @@ def main(symbol: str, _id: str):
     import pandas
     import plotext as plt
 
-    # Charger les bougies une seule fois (TODO TEST variance temporelle 240 minutes)
-    new_candles_df = pandas.DataFrame(df_candles.tail(240), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    # Charger les bougies une seule fois
+    new_candles_df = pandas.DataFrame((df_candles if df_candles is not None else None), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
     from datetime import datetime
 
@@ -188,7 +243,7 @@ def main(symbol: str, _id: str):
         plt.theme('dark')
         plt.title(str(strat))
         plt.xlabel('Date')
-        plt.ylabel('Prix (EUR)')
+        plt.ylabel('Price')
 
         data = {"Open": opens, "High": highs, "Low": lows, "Close": closes}
         x = list(range(len(dates)))

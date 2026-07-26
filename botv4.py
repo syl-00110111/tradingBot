@@ -7,8 +7,6 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     import asyncio
     import logging
     import time
-    import pandas as pd
-    import pandas_ta as ta
     import re
     import json
     import time
@@ -24,7 +22,6 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     import threading
     import queue
     from collections import deque
-    import pandas as pd
     import torch
     import concurrent.futures
     import plotext as plt_ascii
@@ -671,15 +668,15 @@ if __name__ == '__main__':
                                 PAUSE_FILE=PAUSE_FILE,
                                 console=console
                             )
-                            # Calibrer automatiquement le temps sur la non-répétition de chandelles
-                            calibrated_size = calibrate_window_by_non_repetition(full_df_candles, target_active=480)
-                            # console.print(f"[{symbol}] Dynamically calibrated window size to {calibrated_size} based on non-repetition of quasi-identical candles")
-                            candles_per_pair[symbol] = full_df_candles.tail(calibrated_size) if full_df_candles is not None else None
                             try:
                                 # vérifier la cohérence des chandelles immédiatement après le fetch
                                 market_utils.check_candles_consistency(symbol, console=console)
                             except Exception as e:
                                 console.print(f"check_candles_consistency failed for {symbol}: {e}")
+                            # Calibrer automatiquement le temps sur la non-répétition de chandelles
+                            calibrated_size = calibrate_window_by_non_repetition(full_df_candles, target_active=480)
+                            # console.print(f"[{symbol}] Dynamically calibrated window size to {calibrated_size} based on non-repetition of quasi-identical candles")
+                            candles_per_pair[symbol] = full_df_candles.tail(calibrated_size) if full_df_candles is not None else None
                         except Exception as e:
                             console.print(f"Failed to fetch OHLCV for {symbol}: {e}")
                     df_candles = candles_per_pair.get(symbol)
