@@ -332,17 +332,17 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                     if not rate_found:
                         # Fallbacks
                         if p_quote == 'EUR' and current_quote == 'USD':
-                            conversion_rate = 1.08
+                            conversion_rate = 1.13
                         elif p_quote == 'USD' and current_quote == 'EUR':
-                            conversion_rate = 1.0 / 1.08
+                            conversion_rate = 1.0 / 1.13
                         elif p_quote == 'BTC' and current_quote == 'USD':
-                            conversion_rate = 90000.0
+                            conversion_rate = 64000.0
                         elif p_quote == 'USD' and current_quote == 'BTC':
-                            conversion_rate = 1.0 / 90000.0
+                            conversion_rate = 1.0 / 64000.0
                         elif p_quote == 'BTC' and current_quote == 'EUR':
-                            conversion_rate = 83000.0
+                            conversion_rate = 56000.0
                         elif p_quote == 'EUR' and current_quote == 'BTC':
-                            conversion_rate = 1.0 / 83000.0
+                            conversion_rate = 1.0 / 56000.0
 
                 converted_price = price_in_p_quote * conversion_rate
                 total_amount += amount
@@ -441,7 +441,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                     console.print(f"[{symbol}] Error computing volatility for Monte Carlo: {ve}")
 
         from monte_carlo2 import MonteCarloEngine
-        mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
+        mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=480)
         mode = "below" if side.lower() == "buy" else "above"
         prob = mc_engine.estimate_hit_probability(
             current_price=last_close,
