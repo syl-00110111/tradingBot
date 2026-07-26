@@ -452,7 +452,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
         )
         return (prob > 0.99), prob
 
-    def calibrate_window_by_non_repetition(df_candles, target_active=480, epsilon=1e-5):
+    def calibrate_window_by_non_repetition(df_candles, target_active=17280, epsilon=1e-5):
         """
         Calibre automatiquement la taille de la fenêtre temporelle pour s'assurer
         que l'on dispose de target_active chandelles non-répétitives (c'est-à-dire
@@ -671,7 +671,7 @@ if __name__ == '__main__':
                                 console=console
                             )
                             # Calibrer automatiquement le temps sur la non-répétition de chandelles
-                            calibrated_size = calibrate_window_by_non_repetition(full_df_candles, target_active=480)
+                            calibrated_size = calibrate_window_by_non_repetition(full_df_candles, target_active=17280)
                             console.print(f"[{symbol}] Dynamically calibrated window size to {calibrated_size} based on non-repetition of quasi-identical candles")
                             candles_per_pair[symbol] = full_df_candles.tail(calibrated_size) if full_df_candles is not None else None
                             try:

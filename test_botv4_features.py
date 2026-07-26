@@ -565,6 +565,9 @@ class TestBotV4Features(unittest.TestCase):
         single_df = MockDataFrame([[1.0, 1.1, 0.9, 1.0, 100]], columns=['open', 'high', 'low', 'close', 'volume'])
         self.assertEqual(botv4.calibrate_window_by_non_repetition(single_df), 1)
 
+        # Check with default target_active (17280)
+        self.assertEqual(botv4.calibrate_window_by_non_repetition(df), 17280)
+
     def test_buy_requires_at_least_17280_candles(self):
         # We simulate the check `full_df_candles is None or len(full_df_candles) < 17280` in the BUY block.
         # Case 1: insufficient candles
