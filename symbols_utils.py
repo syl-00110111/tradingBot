@@ -74,7 +74,7 @@ def computeSymbols(
     if source_assets is None:
         source_assets = []
     if forbid_assets is None:
-        forbid_assets = ['AKE', 'USDT', 'WEMIX', 'XMR']
+        forbid_assets = ['AKE', 'ALLO', 'USDT', 'WEMIX', 'XMR']
     if base_assets is None:
         base_assets = ["USD", "EUR", "BTC"]
 

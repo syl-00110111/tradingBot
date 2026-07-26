@@ -50,7 +50,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     balanceFetched = False
     marketsFetched = False
     sourceAssets = []
-    forbidAssets = ['AKE', 'USDT', 'WEMIX', 'XMR']
+    forbidAssets = ['AKE', 'ALLO', 'USDT', 'WEMIX', 'XMR']
     previousPairs = []
     availablePairs = []
     maxNumPairs = 100
