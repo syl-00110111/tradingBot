@@ -323,9 +323,9 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                         if not rate_found and symbol2 in _markets:
                             try:
                                 ticker = exchange.fetch_ticker(symbol2)
-                                price = float(ticker.get('close') or ticker.get('last') or 0.0)
-                                if price > 0:
-                                    conversion_rate = 1.0 / price
+                                ticker_price = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                if ticker_price > 0:
+                                    conversion_rate = 1.0 / ticker_price
                                     rate_found = True
                             except Exception:
                                 pass
@@ -837,9 +837,9 @@ if __name__ == '__main__':
                                                         if not rate_found and symbol2 in _markets:
                                                             try:
                                                                 ticker = exchange.fetch_ticker(symbol2)
-                                                                price = float(ticker.get('close') or ticker.get('last') or 0.0)
-                                                                if price > 0:
-                                                                    conversion_rate = 1.0 / price
+                                                                ticker_price = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                                                if ticker_price > 0:
+                                                                    conversion_rate = 1.0 / ticker_price
                                                                     rate_found = True
                                                             except Exception:
                                                                 pass
