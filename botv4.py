@@ -452,6 +452,56 @@ with console.status("Bot init. Please wait some time, or expect a random error i
         )
         return (prob > 0.99), prob
 
+    def calibrate_window_by_non_repetition(df_candles, target_active=480, epsilon=1e-5):
+        """
+        Calibre automatiquement la taille de la fenêtre temporelle pour s'assurer
+        que l'on dispose de target_active chandelles non-répétitives (c'est-à-dire
+        non quasi-identiques à leur prédécesseur).
+        """
+        if df_candles is None or df_candles.empty:
+            return 0
+        N = len(df_candles)
+        if N <= 1:
+            return N
+
+        active_count = 0
+        scanned_count = 0
+
+        # Parcourir à l'envers depuis la dernière bougie
+        for i in range(N - 1, 0, -1):
+            scanned_count += 1
+            c1 = df_candles.iloc[i]
+            c2 = df_candles.iloc[i - 1]
+
+            is_rep = False
+            try:
+                p1, p2 = float(c1['close']), float(c2['close'])
+                o1, o2 = float(c1['open']), float(c2['open'])
+                h1, h2 = float(c1['high']), float(c2['high'])
+                l1, l2 = float(c1['low']), float(c2['low'])
+
+                diff_c = abs(p1 - p2) / max(p1, p2, 1e-9)
+                diff_o = abs(o1 - o2) / max(o1, o2, 1e-9)
+                diff_h = abs(h1 - h2) / max(h1, h2, 1e-9)
+                diff_l = abs(l1 - l2) / max(l1, l2, 1e-9)
+
+                if diff_c <= epsilon and diff_o <= epsilon and diff_h <= epsilon and diff_l <= epsilon:
+                    is_rep = True
+            except Exception:
+                pass
+
+            if not is_rep:
+                active_count += 1
+
+            if active_count >= target_active:
+                break
+
+        # La taille de la fenêtre correspond à scanned_count + 1 (pour inclure la bougie i-1 de la dernière comparaison)
+        window_size = scanned_count + 1
+        window_size = min(window_size, N)
+        window_size = max(window_size, target_active)
+        return window_size
+
     # load config (merge default and optional override)
     config = {}
     try:
@@ -609,16 +659,21 @@ if __name__ == '__main__':
                     min_amount = availablePair[4]
                     price_precision = availablePair[5]
                     amount_precision = availablePair[6]
+                    full_df_candles = None
                     if exchange.has.get('fetchOHLCV'):
                         try:
-                            candles_per_pair[symbol] = market_utils.fetch_ohlcv_data(
+                            full_df_candles = market_utils.fetch_ohlcv_data(
                                 exchange=exchange,
                                 _id=_id,
                                 symbol=symbol,
                                 pausedForBuy=pausedForBuy,
                                 PAUSE_FILE=PAUSE_FILE,
                                 console=console
-                            ).tail(480)  # (TODO TEST variance temporelle 480 minutes)
+                            )
+                            # Calibrer automatiquement le temps sur la non-répétition de chandelles
+                            calibrated_size = calibrate_window_by_non_repetition(full_df_candles, target_active=480)
+                            console.print(f"[{symbol}] Dynamically calibrated window size to {calibrated_size} based on non-repetition of quasi-identical candles")
+                            candles_per_pair[symbol] = full_df_candles.tail(calibrated_size) if full_df_candles is not None else None
                             try:
                                 # vérifier la cohérence des chandelles immédiatement après le fetch
                                 market_utils.check_candles_consistency(symbol, console=console)
@@ -775,6 +830,8 @@ if __name__ == '__main__':
                         expiry = pausedForBuy.get(symbol)
                         if expiry and now_ts < int(expiry):
                             console.print(f"Buy for {symbol} is paused until {datetime.fromtimestamp(int(expiry))}")
+                        elif full_df_candles is None or len(full_df_candles) < 17280:
+                            console.print(f"[{symbol}] Skipping BUY order: need at least 17280 candles de 1 minute (has {0 if full_df_candles is None else len(full_df_candles)})")
                         elif count_buyings_for_base_asset(base) >= 4:
                             console.print(f"[{symbol}] Skipping BUY order: Already reached the limit of 4 buyings for base asset {base}.")
                         else:

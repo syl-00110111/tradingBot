@@ -7,16 +7,31 @@ from unittest.mock import MagicMock, patch
 
 # Mock dependencies to prevent errors during import in sandbox without pandas/ccxt/numpy/torch
 mock_pandas = MagicMock()
+class MockILoc:
+    def __init__(self, df):
+        self.df = df
+    def __getitem__(self, idx):
+        row_data = self.df.data[idx]
+        if isinstance(row_data, dict):
+            return row_data
+        return dict(zip(self.df.columns, row_data))
+
 class MockDataFrame:
     def __init__(self, data=None, columns=None):
         if data is None:
             data = []
         self.data = data
         self.columns = columns
+    @property
     def empty(self):
         return len(self.data) == 0
     def tail(self, n):
         return MockDataFrame(self.data[-n:], self.columns)
+    @property
+    def iloc(self):
+        return MockILoc(self)
+    def __len__(self):
+        return len(self.data)
 mock_pandas.DataFrame = MockDataFrame
 sys.modules['pandas'] = mock_pandas
 
@@ -510,6 +525,57 @@ class TestBotV4Features(unittest.TestCase):
 
         # Check that the outer 'price' variable remained intact and was not overwritten!
         self.assertEqual(price, 0.36669500)
+
+    def test_calibrate_window_by_non_repetition(self):
+        # Create a mock DataFrame representing candles.
+        candles_data = [
+            [1.0, 1.1, 0.9, 1.0, 100], # 0
+            [1.0, 1.1, 0.9, 1.0, 100], # 1 (identical to 0, repetition)
+            [1.01, 1.11, 0.91, 1.01, 100], # 2 (active)
+            [1.01, 1.11, 0.91, 1.01, 100], # 3 (identical to 2, repetition)
+            [1.02, 1.12, 0.92, 1.02, 100], # 4 (active)
+            [1.03, 1.13, 0.93, 1.03, 100], # 5 (active)
+            [1.03, 1.13, 0.93, 1.03, 100], # 6 (identical to 5, repetition)
+            [1.04, 1.14, 0.94, 1.04, 100], # 7 (active)
+            [1.05, 1.15, 0.95, 1.05, 100], # 8 (active)
+            [1.06, 1.16, 0.96, 1.06, 100]  # 9 (active)
+        ]
+        df = MockDataFrame(candles_data, columns=['open', 'high', 'low', 'close', 'volume'])
+
+        # We scan backwards from index 9.
+        # Comparisons:
+        # (9, 8) -> 1.06 vs 1.05 -> active. active_count = 1
+        # (8, 7) -> 1.05 vs 1.04 -> active. active_count = 2
+        # (7, 6) -> 1.04 vs 1.03 -> active. active_count = 3
+        # (6, 5) -> 1.03 vs 1.03 -> repetition. active_count = 3
+        # (5, 4) -> 1.03 vs 1.02 -> active. active_count = 4
+        # (4, 3) -> 1.02 vs 1.01 -> active. active_count = 5
+
+        # If target_active=5, we break at (4, 3) comparison.
+        # scanned_count = 6 comparisons.
+        # window_size = scanned_count + 1 = 7.
+        size = botv4.calibrate_window_by_non_repetition(df, target_active=5, epsilon=1e-5)
+        self.assertEqual(size, 7)
+
+        # Check safety/fallback for empty dataframe
+        empty_df = MockDataFrame([], columns=['open', 'high', 'low', 'close', 'volume'])
+        self.assertEqual(botv4.calibrate_window_by_non_repetition(empty_df), 0)
+
+        # Check single candle
+        single_df = MockDataFrame([[1.0, 1.1, 0.9, 1.0, 100]], columns=['open', 'high', 'low', 'close', 'volume'])
+        self.assertEqual(botv4.calibrate_window_by_non_repetition(single_df), 1)
+
+    def test_buy_requires_at_least_17280_candles(self):
+        # We simulate the check `full_df_candles is None or len(full_df_candles) < 17280` in the BUY block.
+        # Case 1: insufficient candles
+        candles_data_short = [[1.0, 1.1, 0.9, 1.0, 100]] * 17279
+        df_short = MockDataFrame(candles_data_short, columns=['open', 'high', 'low', 'close', 'volume'])
+        self.assertTrue(df_short is None or len(df_short) < 17280)
+
+        # Case 2: sufficient candles
+        candles_data_long = [[1.0, 1.1, 0.9, 1.0, 100]] * 17280
+        df_long = MockDataFrame(candles_data_long, columns=['open', 'high', 'low', 'close', 'volume'])
+        self.assertFalse(df_long is None or len(df_long) < 17280)
 
 if __name__ == '__main__':
     unittest.main()
