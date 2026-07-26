@@ -5,7 +5,7 @@ import plotext as plt
 from rich.console import Console
 console = Console()
 
-from backtest import fetch_ohlcv_data
+from backtest import fetch_ohlcv_data, calibrate_window_by_non_repetition
 from strategy_aggregator import aggregate_signals, load_config
 
 
@@ -15,7 +15,15 @@ def main(symbol: str, _id: str):
     # use sanitized id for filename
     if _id is None:
         _id = symbol.replace('/', '')
-    df_candles = fetch_ohlcv_data(_id, symbol)
+    candles_per_pair = {}
+    df_candles = None
+    full_df_candles = None
+    calibrated_size = 0
+    full_df_candles = fetch_ohlcv_data(_id, symbol)
+    # Calibrer automatiquement le temps sur la non-répétition de chandelles
+    calibrated_size = calibrate_window_by_non_repetition(full_df_candles, target_active=480)
+    candles_per_pair[symbol] = full_df_candles.tail(calibrated_size) if full_df_candles is not None else None
+    df_candles = candles_per_pair.get(symbol)
     if df_candles is None or len(df_candles) == 0:
         console.print(f"[red]No candle data for {symbol}[/red]")
         return
