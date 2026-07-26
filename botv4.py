@@ -981,7 +981,7 @@ if __name__ == '__main__':
                                                     for i, v in enumerate(volumes):
                                                         h = (v / max_volume) * height_factor if max_volume else 0
                                                         plt_ascii.plot([i, i], [base, base + h], color='yellow')
-                                                    plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='x', color='green')
+                                                    plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='o', color='red')
                                                     # set x ticks as human-readable dates on bottom plot
                                                     step = max(1, len(dates) // 8)
                                                     x_ticks = x[::step]
@@ -1094,7 +1094,7 @@ if __name__ == '__main__':
                                                 for i, v in enumerate(volumes):
                                                     h = (v / max_volume) * height_factor if max_volume else 0
                                                     plt_ascii.plot([i, i], [base, base + h], color='yellow')
-                                                plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='o', color='red')
+                                                plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='x', color='green')
                                                 # set x ticks as human-readable dates on bottom plot
                                                 step = max(1, len(dates) // 8)
                                                 x_ticks = x[::step]
