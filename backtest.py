@@ -191,7 +191,7 @@ def main(symbol: str, _id: str):
     import plotext as plt
 
     # Charger les bougies une seule fois
-    new_candles_df = pandas.DataFrame((df_candles if df_candles is not None else None), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    new_candles_df = pandas.DataFrame((df_candles), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
     from datetime import datetime
 
@@ -256,14 +256,14 @@ def main(symbol: str, _id: str):
             price_range = 0
 
         for (pos, price) in sells:
-            plt.scatter([pos], [price], marker='o', color='red')
-            offset = price - (price_range * 0.0002 if price_range else 0)
-            plt.text('SELL', pos, offset, color='red')
+            plt.scatter([pos], [price], marker='x', color='green')
+            #offset = price - (price_range * 0.0002 if price_range else 0)
+            #plt.text('SELL', pos, offset, color='red')
 
         for (pos, price) in buys:
-            plt.scatter([pos], [price], marker='x', color='green')
-            offset = price + (price_range * 0.0002 if price_range else 0)
-            plt.text('BUY', pos, offset, color='green')
+            plt.scatter([pos], [price], marker='o', color='red')
+            #offset = price + (price_range * 0.0002 if price_range else 0)
+            #plt.text('BUY', pos, offset, color='green')
 
         # Définir des labels d'axe X échantillonnés pour lisibilité
         step = max(1, len(dates) // 8)
