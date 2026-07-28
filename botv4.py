@@ -19,6 +19,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     import random
     import math
     import numpy as np
+    import pandas as pd
     import pandas_ta as ta
     import threading
     import queue
