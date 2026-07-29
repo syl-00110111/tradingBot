@@ -79,7 +79,7 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
                       ichimoku_buy_threshold=2, ichimoku_sell_threshold=3,
                       williams_buy_threshold=1, williams_sell_threshold=1,
                       vwap_buy_threshold=5, vwap_sell_threshold=5,
-                      pairs_buy_threshold=1, pairs_sell_threshold=1,
+                      pairs_buy_threshold=2, pairs_sell_threshold=2,
                       signal_frames=None):
     """
     Calcule les signaux agrégés à partir des stratégies listées dans `strats`.
@@ -156,8 +156,8 @@ def aggregate_signals(df_candles, global_config=None, strats=None, window=20, sc
     pt = signal_frames.get('pairs_trading_proxy')
     if pt is not None and not pt.empty:
         # à l'endroit
-        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=1)
-        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=1)
+        sells = consecutive_count(pt.get('sell_signal', pd.Series([False] * N)).fillna(False).tolist(), window=2)
+        buys = consecutive_count(pt.get('buy_signal', pd.Series([False] * N)).fillna(False).tolist(), window=2)
         for i in range(N):
             if buys[i] >= pairs_buy_threshold:
                 score_buy[i] += 1

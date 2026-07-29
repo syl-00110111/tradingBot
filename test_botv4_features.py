@@ -350,15 +350,15 @@ class TestBotV4Features(unittest.TestCase):
     def test_is_sell_profitable_cross_quote(self):
         # We have recorded purchases on ADA/USD: 100 ADA at 1.00 USD
         # We check profitability on ADA/EUR.
-        # Fallback EUR/USD exchange rate is 1.08.
-        # So USD/EUR exchange rate is 1 / 1.08 = ~0.9259 EUR per USD.
-        # Thus, 1.00 USD purchase price is converted to ~0.9259 EUR.
-        # With 0.3% margin: 0.9259 * 1.003 = ~0.9287 EUR.
+        # Fallback EUR/USD exchange rate is 1.13 (from botv4.py).
+        # So USD/EUR exchange rate is 1 / 1.13 = ~0.885 EUR per USD.
+        # Thus, 1.00 USD purchase price is converted to ~0.885 EUR.
+        # With 0.3% margin: 0.885 * 1.003 = ~0.8876 EUR.
 
         botv4.record_purchase("ADA/USD", 100.0, 1.00)
 
-        # Check profitability on ADA/EUR at sell_price = 0.90 EUR (should be unprofitable, since 0.90 < 0.9287)
-        profitable, msg = botv4.is_sell_profitable("ADA/EUR", 0.90, 100.0)
+        # Check profitability on ADA/EUR at sell_price = 0.85 EUR (should be unprofitable, since 0.85 < 0.8876)
+        profitable, msg = botv4.is_sell_profitable("ADA/EUR", 0.85, 100.0)
         self.assertFalse(profitable)
 
         # Check profitability on ADA/EUR at sell_price = 0.95 EUR (should be profitable, since 0.95 > 0.9287)
@@ -510,6 +510,65 @@ class TestBotV4Features(unittest.TestCase):
 
         # Check that the outer 'price' variable remained intact and was not overwritten!
         self.assertEqual(price, 0.36669500)
+
+    def test_aggregate_signals_second_round(self):
+        # We can un-mock sys.modules temporarily to run with real dependencies!
+        import sys
+        real_modules = {}
+        for mod in ['pandas', 'pandas_ta', 'numpy', 'torch', 'ccxt']:
+            if mod in sys.modules:
+                real_modules[mod] = sys.modules[mod]
+                del sys.modules[mod]
+
+        try:
+            # Import real modules now
+            import pandas as pd
+            import strategy_aggregator
+
+            # Let's mock indicators2.get_signals to return a predefined series of buy/sell signals
+            # for pairs_trading_proxy:
+            # Round 1: False, Round 2: True (1st round of signal), Round 3: True (2nd round of signal), Round 4: False
+            # Round 5: True (1st round of signal), Round 6: False
+            buy_signals =  [False, True, True, False, True, False]
+            sell_signals = [False, False, True, True, False, False]
+
+            df_candles = pd.DataFrame({
+                'timestamp': [1000, 2000, 3000, 4000, 5000, 6000],
+                'open': [1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+                'high': [1.1, 1.2, 1.3, 1.4, 1.5, 1.6],
+                'low': [0.9, 1.0, 1.1, 1.2, 1.3, 1.4],
+                'close': [1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+                'volume': [100, 110, 120, 130, 140, 150]
+            })
+
+            df_sign = pd.DataFrame({
+                'buy_signal': buy_signals,
+                'sell_signal': sell_signals
+            }, index=df_candles.index)
+
+            with patch('indicators2.get_signals') as mock_get_signals:
+                mock_get_signals.return_value = df_sign
+
+                # Call aggregate_signals
+                res = strategy_aggregator.aggregate_signals(df_candles)
+
+                # Check results
+                # buy_signals =  [False, True, True, False, True, False]
+                # Consecutive counts for buys with window=2: [0, 1, 2, 1, 1, 1]
+                # Under pairs_buy_threshold = 2, we expect global_buy to be True only at index 2 (Round 3)!
+                expected_buy = [False, False, True, False, False, False]
+                self.assertEqual(res['global_buy'], expected_buy)
+
+                # sell_signals = [False, False, True, True, False, False]
+                # Consecutive counts for sells with window=2: [0, 0, 1, 2, 1, 0]
+                # Under pairs_sell_threshold = 2, we expect global_sell to be True only at index 3 (Round 4)!
+                expected_sell = [False, False, False, True, False, False]
+                self.assertEqual(res['global_sell'], expected_sell)
+
+        finally:
+            # Restore mocked modules
+            for mod, val in real_modules.items():
+                sys.modules[mod] = val
 
 if __name__ == '__main__':
     unittest.main()
