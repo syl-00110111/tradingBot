@@ -145,6 +145,96 @@ class TestRefactoredUtils(unittest.TestCase):
         self.assertIn("BTC/USD", symbols_names)
         self.assertIn("ETH/USD", symbols_names)
 
+    def test_compute_symbols_prior_purchases_total_balance(self):
+        # We test that assets with positive 'total' balance are added to source_assets even if free is 0
+        markets_data = {
+            "LTC/USD": {
+                "symbol": "LTC/USD",
+                "id": "LTCUSD",
+                "base": "LTC",
+                "quote": "USD",
+                "limits": {"amount": {"min": 0.01}},
+                "precision": {"price": 0.01, "amount": 0.01}
+            }
+        }
+        volumes_data = [
+            {"symbol": "LTC/USD", "id": "LTCUSD", "trades_count": 600, "timestamp": 1600000000}
+        ]
+
+        with open(self.test_markets_file, "w") as f:
+            json.dump(markets_data, f)
+        with open(self.test_volumes_file, "w") as f:
+            json.dump(volumes_data, f)
+
+        # LTC is only in total balance (prior purchase locked/used)
+        balance = {
+            'free': {'USD': 100.0, 'LTC': 0.0},
+            'total': {'LTC': 5.0}
+        }
+
+        source_assets = []
+        symbols = symbols_utils.computeSymbols(
+            balance=balance,
+            previousPairs=None,
+            source_assets=source_assets,
+            forbid_assets=['USDT'],
+            base_assets=['USD'],
+            max_num_pairs=5,
+            mini_count=100,
+            markets_file=self.test_markets_file,
+            volumes_file=self.test_volumes_file
+        )
+
+        # LTC should be in source_assets
+        self.assertIn("LTC", source_assets)
+
+    def test_compute_symbols_dynamic_base_assets(self):
+        # We test that an asset present in the balance (like CHF) is dynamically added to base_assets,
+        # allowing pairs like BTC/CHF to be considered even if not in the default base_assets list.
+        markets_data = {
+            "BTC/CHF": {
+                "symbol": "BTC/CHF",
+                "id": "BTCCHF",
+                "base": "BTC",
+                "quote": "CHF",
+                "limits": {"amount": {"min": 0.001}},
+                "precision": {"price": 0.01, "amount": 0.0001}
+            }
+        }
+        volumes_data = [
+            {"symbol": "BTC/CHF", "id": "BTCCHF", "trades_count": 600, "timestamp": 1600000000}
+        ]
+
+        with open(self.test_markets_file, "w") as f:
+            json.dump(markets_data, f)
+        with open(self.test_volumes_file, "w") as f:
+            json.dump(volumes_data, f)
+
+        # User has CHF balance, making CHF a dynamically active quote asset
+        balance = {
+            'free': {'CHF': 150.0}
+        }
+
+        base_assets = ['USD', 'EUR'] # default list without CHF or BTC
+
+        symbols = symbols_utils.computeSymbols(
+            balance=balance,
+            previousPairs=None,
+            source_assets=[],
+            forbid_assets=['USDT'],
+            base_assets=base_assets,
+            max_num_pairs=5,
+            mini_count=100,
+            markets_file=self.test_markets_file,
+            volumes_file=self.test_volumes_file
+        )
+
+        # CHF should have been dynamically added to base_assets
+        self.assertIn("CHF", base_assets)
+        # BTC/CHF should have been processed as volume candidate because its quote (CHF) is now in base_assets
+        self.assertEqual(len(symbols), 1)
+        self.assertEqual(symbols[0][0], "BTC/CHF")
+
 
 if __name__ == "__main__":
     unittest.main()
