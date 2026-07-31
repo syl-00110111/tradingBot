@@ -76,7 +76,7 @@ def computeSymbols(
     if forbid_assets is None:
         forbid_assets = ['AKE', 'ALLO', 'USDT', 'WEMIX', 'XMR']
     if base_assets is None:
-        base_assets = ["USD", "EUR", "BTC"]
+        base_assets = ["USD", "EUR", "BTC", "CHF", "GBP", "USDC"]
 
     __symbols = []
     # balance existante
@@ -87,35 +87,39 @@ def computeSymbols(
             console.print(msg_err)
         else:
             print(msg_err)
-    elif 'free' not in balance:
-        msg_err = "[ERROR] La clé 'free' est manquante dans 'balance'."
-        if console:
-            console.print(msg_err)
-        else:
-            print(msg_err)
     else:
-        free_balances = balance.get('free')
-        if not isinstance(free_balances, dict):
-            msg_err = "[ERROR] La clé 'free' ne contient pas un dictionnaire valide."
+        # extraction des actifs possédés (free ou total > 0)
+        # pour la prise en compte d'achats effectués préalablement au lancement du bot
+        has_any_balance_key = False
+        for b_key in ['free', 'total']:
+            b_dict = balance.get(b_key)
+            if isinstance(b_dict, dict):
+                has_any_balance_key = True
+                for asset, amount in b_dict.items():
+                    try:
+                        amount_float = float(amount)
+                        if amount_float > 0:
+                            if asset not in source_assets:
+                                source_assets.append(asset)
+                    except (ValueError, TypeError) as e:
+                        msg_warn = f"[WARNING] Impossible de convertir le montant pour l'actif '{asset}' : {e}"
+                        if console:
+                            console.print(msg_warn)
+                        else:
+                            print(msg_warn)
+
+        if not has_any_balance_key:
+            msg_err = "[ERROR] Les clés 'free' ou 'total' sont manquantes ou invalides dans 'balance'."
             if console:
                 console.print(msg_err)
             else:
                 print(msg_err)
-        else:
-            for asset, amount in free_balances.items():
-                try:
-                    # Convertir le montant en float
-                    amount_float = float(amount)
-                    # Ajouter l'actif à la liste si le montant est supérieur à 0
-                    if amount_float > 0:
-                        if asset not in source_assets:
-                            source_assets.append(asset)
-                except (ValueError, TypeError) as e:
-                    msg_warn = f"[WARNING] Impossible de convertir le montant pour l'actif '{asset}' : {e}"
-                    if console:
-                        console.print(msg_warn)
-                    else:
-                        print(msg_warn)
+
+        # Dynamically expand base_assets to include any asset with a non-zero balance (free or total > 0)
+        # except forbidden ones, so that those assets are considered as valid quote assets as well.
+        for asset in source_assets:
+            if asset not in forbid_assets and asset not in base_assets:
+                base_assets.append(asset)
     try:
         with open(markets_file, 'r') as f:
             _markets = json.load(f)
