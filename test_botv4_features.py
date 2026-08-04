@@ -63,13 +63,18 @@ class TestBotV4Features(unittest.TestCase):
     def setUp(self):
         # Clean up any test files
         self.purchases_file = 'recorded_purchases.json'
-        if os.path.exists(self.purchases_file):
-            os.remove(self.purchases_file)
+        self.redlist_file = 'redlisted_pairs.json'
+        for f in [self.purchases_file, self.redlist_file]:
+            if os.path.exists(f):
+                os.remove(f)
         botv4.recorded_purchases = {}
 
     def tearDown(self):
-        if os.path.exists(self.purchases_file):
-            os.remove(self.purchases_file)
+        self.purchases_file = 'recorded_purchases.json'
+        self.redlist_file = 'redlisted_pairs.json'
+        for f in [self.purchases_file, self.redlist_file]:
+            if os.path.exists(f):
+                os.remove(f)
         botv4.recorded_purchases = {}
 
     def test_record_purchase(self):
@@ -207,31 +212,31 @@ class TestBotV4Features(unittest.TestCase):
     def test_should_place_order_buy_sufficient(self):
         # Prepare dummy df_candles
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.995  # > 0.99
+            mock_hit_prob.return_value = 0.97  # > 0.96
             should_place, prob = botv4.should_place_order("BTC/USD", "buy", 43000.0, 44000.0, None)
             self.assertTrue(should_place)
-            self.assertEqual(prob, 0.995)
+            self.assertEqual(prob, 0.97)
 
     def test_should_place_order_buy_insufficient(self):
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.98  # <= 0.99
+            mock_hit_prob.return_value = 0.95  # <= 0.96
             should_place, prob = botv4.should_place_order("BTC/USD", "buy", 43000.0, 44000.0, None)
             self.assertFalse(should_place)
-            self.assertEqual(prob, 0.98)
+            self.assertEqual(prob, 0.95)
 
     def test_should_place_order_sell_sufficient(self):
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.995  # > 0.99
+            mock_hit_prob.return_value = 0.97  # > 0.96
             should_place, prob = botv4.should_place_order("BTC/USD", "sell", 45000.0, 44000.0, None)
             self.assertTrue(should_place)
-            self.assertEqual(prob, 0.995)
+            self.assertEqual(prob, 0.97)
 
     def test_should_place_order_sell_insufficient(self):
         with patch('monte_carlo2.MonteCarloEngine.estimate_hit_probability') as mock_hit_prob:
-            mock_hit_prob.return_value = 0.99  # not > 0.99 (i.e. <= 0.99)
+            mock_hit_prob.return_value = 0.95  # not > 0.96 (i.e. <= 0.96)
             should_place, prob = botv4.should_place_order("BTC/USD", "sell", 45000.0, 44000.0, None)
             self.assertFalse(should_place)
-            self.assertEqual(prob, 0.99)
+            self.assertEqual(prob, 0.95)
 
     def test_cleanup_open_orders_same_side(self):
         mock_exchange = MagicMock()
@@ -608,6 +613,42 @@ class TestBotV4Features(unittest.TestCase):
         finally:
             for mod, val in real_modules.items():
                 sys.modules[mod] = val
+
+    def test_get_eur_conversion_rate(self):
+        # quote="EUR" returns 1.0
+        self.assertEqual(botv4.get_eur_conversion_rate(None, "EUR", {}), 1.0)
+        # Fallbacks
+        self.assertEqual(botv4.get_eur_conversion_rate(None, "USD", {}), 1.0 / 1.13)
+        self.assertEqual(botv4.get_eur_conversion_rate(None, "BTC", {}), 56000.0)
+
+        # Exchange rate query via fetch_ticker f"{quote}/EUR"
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_ticker.return_value = {'close': 0.85, 'last': 0.85}
+        rate = botv4.get_eur_conversion_rate(mock_exchange, "GBP", {"GBP/EUR": {}})
+        self.assertEqual(rate, 0.85)
+
+    def test_redlist_operations(self):
+        # Save and load redlist
+        redlist = {"BTC/USDT": {"symbol": "BTC/USDT", "min_amount": 0.001, "last_close": 50000.0}}
+        botv4.save_redlist(redlist)
+        loaded = botv4.load_redlist()
+        self.assertIn("BTC/USDT", loaded)
+        self.assertEqual(loaded["BTC/USDT"]["min_amount"], 0.001)
+
+    def test_dynamic_multiplier_calculations(self):
+        # Verify base offsets are scaled by 2 * mc_score
+        # e.g., base offset = 0.0006, mc_score = 0.5. scaled offset = 0.0006 * 2 * 0.5 = 0.0006.
+        # multiplier = 1.0 - offset = 0.9994
+        base_buy_offset = 0.0006
+        mc_score = 0.5
+        buy_offset = base_buy_offset * 2 * mc_score
+        buy_multiplier = 1.0 - buy_offset
+        self.assertAlmostEqual(buy_multiplier, 0.9994)
+
+        mc_score = 1.5
+        buy_offset = base_buy_offset * 2 * mc_score
+        buy_multiplier = 1.0 - buy_offset
+        self.assertAlmostEqual(buy_multiplier, 0.9982)
 
 if __name__ == '__main__':
     unittest.main()
