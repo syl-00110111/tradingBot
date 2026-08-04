@@ -570,5 +570,44 @@ class TestBotV4Features(unittest.TestCase):
             for mod, val in real_modules.items():
                 sys.modules[mod] = val
 
+    def test_esports_usd_crest_high_buy_cancellation(self):
+        # Unmock pandas to use real pandas dataframes and math
+        import sys
+        real_modules = {}
+        for mod in ['pandas', 'numpy']:
+            if mod in sys.modules:
+                real_modules[mod] = sys.modules[mod]
+                del sys.modules[mod]
+
+        try:
+            import pandas as pd
+            import numpy as np
+
+            # Create a dataframe where last price is on a crest high for ESPORTS/USD
+            df_candles = pd.DataFrame({
+                'close': [10.0] * 99 + [15.0]
+            })
+            # SMA_840_len = 50400. Since len(df_candles) = 100 < 50400,
+            # SMA_840 will fallback to df_candles['close'].mean() = (990 + 15) / 100 = 10.05
+            # last_close is 15.0, which is > 10.05 (crest high!)
+
+            mock_exchange = MagicMock()
+            mock_exchange.rateLimit = 1000
+            # Mock open orders to have a BUY order
+            mock_exchange.fetch_open_orders.return_value = [
+                {'id': 'order_esports_1', 'side': 'buy', 'price': 14.0, 'amount': 1.0, 'symbol': 'ESPORTS/USD'}
+            ]
+
+            # Running cleanup_open_orders on buy side should cancel the buy order because of the crest high
+            res = botv4.cleanup_open_orders(mock_exchange, "ESPORTS/USD", 14.0, "buy", df_candles, 15.0, 1.0)
+
+            # Assert that the order was cancelled
+            mock_exchange.cancel_order.assert_called_once_with('order_esports_1', 'ESPORTS/USD')
+            self.assertIsNone(res)
+
+        finally:
+            for mod, val in real_modules.items():
+                sys.modules[mod] = val
+
 if __name__ == '__main__':
     unittest.main()

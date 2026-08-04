@@ -157,6 +157,15 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             if config and isinstance(config, dict):
                 threshold = config.get('monte_carlo', {}).get('sufficient_probability', 0.99)
 
+            # Calculate 5-week SMA (SMA_840) to check for crest high on BUY orders
+            sma_840 = None
+            if df_candles is not None and len(df_candles) > 0:
+                sma_840_len = 840 * 60
+                if len(df_candles) >= sma_840_len:
+                    sma_840 = float(df_candles['close'].tail(sma_840_len).mean())
+                else:
+                    sma_840 = float(df_candles['close'].mean())
+
             edited_order = None
 
             for o in open_orders:
@@ -172,6 +181,20 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 o_side_lower = o_side.lower()
                 side_lower = side.lower()
                 o_price_float = float(o_price)
+
+                # Cancel BUY order if we are on a crest high (current close or target/order price > sma_840)
+                if o_side_lower == 'buy' and sma_840 is not None and (last_close > sma_840 or o_price_float > sma_840):
+                    console.print(f"[{symbol}] Cancelling open BUY order {oid}: Price is on a crest high (last close {last_close:.8f}, order price {o_price_float:.8f}) and 5-week SMA {sma_840:.8f} is not reached.")
+                    try:
+                        time.sleep(exchange.rateLimit / 1000)
+                        try:
+                            exchange.cancel_order(oid, symbol)
+                        except TypeError:
+                            exchange.cancel_order(oid)
+                        console.print(f"[{symbol}] Order {oid} successfully cancelled.")
+                    except Exception as e:
+                        console.print(f"[{symbol}] Failed to cancel order {oid}: {e}")
+                    continue
 
                 # Check execution probability based on price convergence
                 mode = "below" if o_side_lower == "buy" else "above"
@@ -728,14 +751,14 @@ if __name__ == '__main__':
                         console.print(f"[{symbol}] Prix de référence calculé sur les chandelles stockées: {ref_price:.8f}")
 
                     # 2/ prise en compte tendance Bullish / Bearish
-                    _cal = calibrated_size // 50
-                    if len(df_candles) >= _cal:
-                        sma_50 = float(df_candles['close'].tail(_cal).mean())
+                    sma_840_len = 840 * 60
+                    if len(df_candles) >= sma_840_len:
+                        sma_840 = float(df_candles['close'].tail(sma_840_len).mean())
                     else:
-                        sma_50 = float(df_candles['close'].mean())
-                    is_bullish = last_close > sma_50
+                        sma_840 = float(df_candles['close'].mean())
+                    is_bullish = last_close > sma_840
                     trend_str = 'Bullish' if is_bullish else 'Bearish'
-                    console.print(f"[{symbol}] Tendance détectée: {trend_str} (Last Close: {last_close:.8f} vs SMA 50: {sma_50:.8f})")
+                    console.print(f"[{symbol}] Tendance détectée: {trend_str} (Last Close: {last_close:.8f} vs SMA 840: {sma_840:.8f})")
 
                     # 3/ détection trend following / mean reversion
                     regime_str = 'Mean Reversion'
@@ -925,11 +948,17 @@ if __name__ == '__main__':
                                         pass
                                     else:
                                         try:
-                                            should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
-                                            if not should_place:
-                                                console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.99")
+                                            # Check if we are on a crest high where the 5-week average (SMA_840) is not reached
+                                            if last_close > sma_840 or price > sma_840:
+                                                console.print(f"[{symbol}] Skipping/Cancelling BUY order: Price is on a crest high (last close {last_close:.8f}, limit price {price:.8f}) and 5-week SMA {sma_840:.8f} is not reached.")
+                                                # Call cleanup_open_orders to cancel any existing open buy orders
+                                                cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
                                             else:
-                                                edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
+                                                should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
+                                                if not should_place:
+                                                    console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.99")
+                                                else:
+                                                    edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
                                                 if edited_order:
                                                     order = edited_order
                                                     add_pending_order(order)
