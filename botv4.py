@@ -153,9 +153,9 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             mc_engine = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
 
             # Get the probability threshold from config
-            threshold = 0.99
+            threshold = 0.96
             if config and isinstance(config, dict):
-                threshold = config.get('monte_carlo', {}).get('sufficient_probability', 0.99)
+                threshold = config.get('monte_carlo', {}).get('sufficient_probability', 0.96)
 
             # Calculate 5-week SMA (SMA_840) to check for crest high on BUY orders
             sma_840 = None
@@ -444,10 +444,61 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             console.print(f"Failed to count buyings for base asset {base_asset}: {e}")
         return count
 
+    REDLIST_FILE = 'redlisted_pairs.json'
+
+    def load_redlist():
+        if os.path.exists(REDLIST_FILE):
+            try:
+                with open(REDLIST_FILE, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def save_redlist(redlist):
+        try:
+            safe_json.atomic_write_json(REDLIST_FILE, redlist, backup=True, indent=2)
+        except Exception:
+            with open(REDLIST_FILE, 'w') as f:
+                json.dump(redlist, f, indent=2)
+
+    def get_eur_conversion_rate(exchange, quote, markets):
+        if quote == 'EUR':
+            return 1.0
+        symbol1 = f"{quote}/EUR"
+        symbol2 = f"EUR/{quote}"
+        if isinstance(markets, dict):
+            if symbol1 in markets:
+                try:
+                    ticker = exchange.fetch_ticker(symbol1)
+                    return float(ticker.get('close') or ticker.get('last') or 0.0)
+                except Exception:
+                    pass
+            if symbol2 in markets:
+                try:
+                    ticker = exchange.fetch_ticker(symbol2)
+                    ticker_price = float(ticker.get('close') or ticker.get('last') or 0.0)
+                    if ticker_price > 0:
+                        return 1.0 / ticker_price
+                except Exception:
+                    pass
+        # Fallback values
+        if quote == 'USD':
+            return 1.0 / 1.13
+        elif quote == 'BTC':
+            return 56000.0
+        elif quote == 'CHF':
+            return 1.0
+        elif quote == 'GBP':
+            return 1.2
+        elif quote == 'USDC':
+            return 1.0 / 1.13
+        return 1.0
+
     def should_place_order(symbol, side, price, last_close, df_candles, console=None):
         """
         Estimates the hit probability of an order prior to placing it.
-        Returns (should_place, prob) where should_place is True if prob > 0.99, and False otherwise.
+        Returns (should_place, prob) where should_place is True if prob > 0.96, and False otherwise.
         """
         volatility = 0.0
         drift = 0.0
@@ -472,7 +523,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             drift=drift,
             mode=mode
         )
-        return (prob > 0.99), prob
+        return (prob > 0.96), prob
 
     # load config (merge default and optional override)
     config = {}
@@ -654,6 +705,8 @@ if __name__ == '__main__':
                     mini_count=miniCount,
                     console=console
                 )
+                redlist = load_redlist()
+                availablePairs = [p for p in availablePairs if p[0] not in redlist]
                 marketsFetched = True
 
             # taux
@@ -708,6 +761,24 @@ if __name__ == '__main__':
                     # check
                     if df_candles is None or df_candles.empty:
                         continue
+
+                    # Check redlisting condition based on last_close
+                    last_close = float(df_candles.iloc[-1]['close']) if df_candles is not None and not df_candles.empty else 0.0
+                    if last_close > 0:
+                        rate = get_eur_conversion_rate(exchange, quote, _markets)
+                        market_min_expense_eur = float(min_amount) * last_close * rate
+                        if market_min_expense_eur > 12.23:
+                            console.print(f"[{symbol}] Redlisting pair: market minimum transaction cost ({market_min_expense_eur:.2f} EUR) exceeds 12.23 EUR (min_amount: {min_amount}, last_close: {last_close}, rate: {rate}).")
+                            redlist = load_redlist()
+                            redlist[symbol] = {
+                                "symbol": symbol,
+                                "min_amount": float(min_amount),
+                                "last_close": last_close
+                            }
+                            save_redlist(redlist)
+                            availablePairs = [p for p in availablePairs if p[0] != symbol]
+                            continue
+
                     N = len(df_candles)
                     # compute per-strategy signals
                     signal_frames = {}
@@ -775,28 +846,34 @@ if __name__ == '__main__':
                         console.print(f"[{symbol}] Échec du calcul de l'ADX, régime par défaut: {regime_str}: {e}")
 
                     # Ajustement des seuils de déclenchement
-                    # c'était 6-6
-                    buy_multiplier = 0.9994
-                    sell_multiplier = 1.0006
+                    # Base offsets:
+                    base_buy_offset = 0.0006
+                    base_sell_offset = 0.0006
 
                     if regime_str == 'Trend Following':
                         if is_bullish:
-                            # c'était 3-10
-                            buy_multiplier = 0.9997
-                            sell_multiplier = 1.0010
+                            base_buy_offset = 0.0003
+                            base_sell_offset = 0.0010
                         else:
-                            # c'était 10-3
-                            buy_multiplier = 0.9990
-                            sell_multiplier = 1.0003
+                            base_buy_offset = 0.0010
+                            base_sell_offset = 0.0003
                     else:  # Mean Reversion
                         if is_bullish:
-                            # c'était 6-6
-                            buy_multiplier = 0.9994
-                            sell_multiplier = 1.0006
+                            base_buy_offset = 0.0006
+                            base_sell_offset = 0.0006
                         else:
-                            # c'était 5-5
-                            buy_multiplier = 0.9995
-                            sell_multiplier = 1.0005
+                            base_buy_offset = 0.0005
+                            base_sell_offset = 0.0005
+
+                    from monte_carlo2 import MonteCarloEngine
+                    mc_engine_m = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
+                    mc_score = mc_engine_m.validate_strategy(df_candles)
+
+                    buy_offset = base_buy_offset * 2 * mc_score
+                    sell_offset = base_sell_offset * 2 * mc_score
+
+                    buy_multiplier = 1.0 - buy_offset
+                    sell_multiplier = 1.0 + sell_offset
 
                     # If both buy and sell signals are present at the same time, prioritize the one most likely to occur.
                     if global_buy[latest_idx] and global_sell[latest_idx]:
@@ -882,14 +959,25 @@ if __name__ == '__main__':
                             if True:
                                 # calculate desired amount that equals package at the current price
                                 if price > 0:
-                                    desired_amount = min_amount * (110/100)
+                                    rate = get_eur_conversion_rate(exchange, quote, _markets)
+                                    min_amount_to_use = max(min_amount, 5.07 / (price * rate))
+                                    max_amount_limit = 12.23 / (price * rate)
+                                    desired_amount = min_amount_to_use * 1.1
+                                    if desired_amount > max_amount_limit:
+                                        desired_amount = max_amount_limit
+
                                     decimals = int(-math.log10(amount_precision))
                                     amount = math.floor(desired_amount * (10 ** decimals)) / (10 ** decimals)
+                                    if amount < min_amount_to_use:
+                                        amount = math.ceil(min_amount_to_use * (10 ** decimals)) / (10 ** decimals)
+                                    if amount > max_amount_limit:
+                                        amount = math.floor(max_amount_limit * (10 ** decimals)) / (10 ** decimals)
                                 else:
                                     amount = 0
+                                    min_amount_to_use = min_amount
                                 # final amount check
-                                if amount <= min_amount:
-                                    console.print(f"Calculated buy amount ({amount}) is below minimum amount of {min_amount} for {symbol}")
+                                if amount < min_amount_to_use:
+                                    console.print(f"Calculated buy amount ({amount}) is below minimum amount of {min_amount_to_use} for {symbol}")
                                 else:
                                     # Wind-choice check for first BUY signal of base asset
                                     pass_on_buy = False
@@ -956,7 +1044,7 @@ if __name__ == '__main__':
                                             else:
                                                 should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
                                                 if not should_place:
-                                                    console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.99")
+                                                    console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.96")
                                                 else:
                                                     edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
                                                 if edited_order:
@@ -1055,9 +1143,15 @@ if __name__ == '__main__':
                             expiry = pausedForBuy.get(symbol)
                             decimals = int(-math.log10(amount_precision))
 
+                            # calculate min/max amount for sell based on transaction cost
+                            rate = get_eur_conversion_rate(exchange, quote, _markets)
+                            min_amount_to_use = max(min_amount, 5.07 / (price * rate)) if price > 0 else min_amount
+                            max_amount_limit = 12.23 / (price * rate) if price > 0 else 0.0
+
                             _b = _balance.get('free').get(base)
                             base_free = float(_b) if _b is not None else 0.0
-                            amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
+                            desired_amount = min(base_free, max_amount_limit)
+                            amount = math.floor(desired_amount * (10 ** decimals)) / (10 ** decimals)
 
                             if True:
                                 try:
@@ -1068,7 +1162,7 @@ if __name__ == '__main__':
                                     else:
                                         should_place, prob = should_place_order(symbol, 'sell', price, last_close, df_candles, console)
                                         if not should_place:
-                                            console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 0.99")
+                                            console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 0.96")
                                         else:
                                             edited_order = cleanup_open_orders(exchange, symbol, price, 'sell', df_candles, last_close, amount)
                                             if edited_order:
@@ -1081,11 +1175,12 @@ if __name__ == '__main__':
                                                 _balance = market_utils.fetch_balance(exchange, console=console)
                                                 _b = _balance.get('free').get(base)
                                                 base_free = float(_b) if _b is not None else 0.0
-                                                amount = math.floor(base_free * (10 ** decimals)) / (10 ** decimals)
+                                                desired_amount = min(base_free, max_amount_limit)
+                                                amount = math.floor(desired_amount * (10 ** decimals)) / (10 ** decimals)
 
-                                                if amount <= min_amount:
-                                                    console.print(f"Calculated sell amount of {amount} is below minimum required of {min_amount} for {symbol}. Cannot place new SELL order.")
-                                                    raise ValueError(f"Insufficient base balance ({amount} <= {min_amount})")
+                                                if amount < min_amount_to_use:
+                                                    console.print(f"Calculated sell amount of {amount} is below minimum required of {min_amount_to_use} for {symbol}. Cannot place new SELL order.")
+                                                    raise ValueError(f"Insufficient base balance ({amount} <= {min_amount_to_use})")
                                                 else:
                                                     console.print(f"Placing LIMIT SELL {symbol} amount={amount} price={price}")
                                                     order = exchange.create_limit_sell_order(symbol, amount, price)
@@ -1147,6 +1242,55 @@ if __name__ == '__main__':
                         _markets = loadMarkets(exchange, "markets.json")
                         # update balance
                         _balance = market_utils.fetch_balance(exchange, console=console)
+
+                        # Re-evaluate redlisted pairs if market min_amount was adjusted
+                        redlist = load_redlist()
+                        if redlist:
+                            console.print("[yellow]Checking redlisted pairs during 42-minute maintenance batch...[/yellow]")
+                            for symbol, info in list(redlist.items()):
+                                market_sample = None
+                                if isinstance(_markets, dict) and symbol in _markets:
+                                    market_sample = _markets[symbol]
+
+                                if market_sample:
+                                    new_min_amount = market_sample.get('limits', {}).get('amount', {}).get('min')
+                                    # Fetch ticker to get the latest close price
+                                    try:
+                                        time.sleep(exchange.rateLimit / 1000)
+                                        ticker = exchange.fetch_ticker(symbol)
+                                        latest_close = float(ticker.get('close') or ticker.get('last') or 0.0)
+                                    except Exception as e:
+                                        console.print(f"Failed to fetch ticker for redlisted {symbol} during maintenance: {e}")
+                                        latest_close = info.get('last_close', 0.0)
+
+                                    if latest_close > 0 and new_min_amount is not None:
+                                        quote = market_sample.get('quote')
+                                        rate = get_eur_conversion_rate(exchange, quote, _markets)
+                                        market_min_expense_eur = float(new_min_amount) * latest_close * rate
+                                        if market_min_expense_eur <= 12.23:
+                                            console.print(f"[green]Pair {symbol} fits back! Removing from redlist.[/green]")
+                                            redlist.pop(symbol, None)
+                                            save_redlist(redlist)
+
+                                            # Consider back the pair: add to availablePairs if count is high enough
+                                            try:
+                                                _count = symbols_utils.updateTradingCount(symbol, exchange=exchange, console=console)
+                                            except Exception:
+                                                _count = 0
+                                            if _count >= miniCount:
+                                                _a = [
+                                                    market_sample.get('symbol'),
+                                                    market_sample.get('id'),
+                                                    market_sample.get('base'),
+                                                    market_sample.get('quote'),
+                                                    market_sample.get('limits', {}).get('amount', {}).get('min'),
+                                                    market_sample.get('precision', {}).get('price'),
+                                                    market_sample.get('precision', {}).get('amount')
+                                                ]
+                                                if not any(p[0] == symbol for p in availablePairs):
+                                                    availablePairs.append(_a)
+                                                    console.print(f"Added {symbol} back to availablePairs.")
+
                         # batch symbole au hasard - choisir correctement quand _markets est un dict
                         for _ in range(36):
                             market_sample = random.choice(list(_markets.values()))
@@ -1236,6 +1380,43 @@ if __name__ == '__main__':
                                     console.print(f"Sell order: {symbol_o} {sell_price} {amount_o} {sell_ts}")
                                 elif side == 'buy' and status == 'open':
                                     console.print(f"Buy order: {symbol_o} {sell_price} {amount_o} {sell_ts}")
+
+                                # Fetch candles for symbol_o to compute mc_score
+                                df_candles_o = None
+                                if exchange.has.get('fetchOHLCV'):
+                                    try:
+                                        _id_o = _markets.get(symbol_o, {}).get('id') if isinstance(_markets, dict) else None
+                                        if not _id_o:
+                                            _id_o = symbol_o.replace('/', '')
+                                        full_df_o = market_utils.fetch_ohlcv_data(
+                                            exchange=exchange,
+                                            _id=_id_o,
+                                            symbol=symbol_o,
+                                            pausedForBuy=pausedForBuy,
+                                            PAUSE_FILE=PAUSE_FILE,
+                                            console=console
+                                        )
+                                        calibrated_size_o = calibrate_window_by_non_repetition(full_df_o, target_active=480)
+                                        df_candles_o = full_df_o.tail(calibrated_size_o) if full_df_o is not None else None
+                                    except Exception as ce:
+                                        console.print(f"Failed to fetch candles for open order {symbol_o}: {ce}")
+
+                                if df_candles_o is not None and not df_candles_o.empty:
+                                    from monte_carlo2 import MonteCarloEngine
+                                    mc_engine_o = MonteCarloEngine(num_simulations=1000, timeframe_candles=240)
+                                    mc_score_o = mc_engine_o.validate_strategy(df_candles_o)
+                                    console.print(f"Order {o.get('id')} for {symbol_o} has mc_score={mc_score_o:.4f}")
+                                    if mc_score_o < 0.42:
+                                        console.print(f"Cancelling order {o.get('id')} ({symbol_o}) due to low mc_score ({mc_score_o:.4f} < 0.42)")
+                                        try:
+                                            time.sleep(exchange.rateLimit / 1000)
+                                            try:
+                                                exchange.cancel_order(o.get('id'), symbol_o)
+                                            except TypeError:
+                                                exchange.cancel_order(o.get('id'))
+                                            console.print(f"Order {o.get('id')} cancelled successfully.")
+                                        except Exception as ce:
+                                            console.print(f"Failed to cancel order {o.get('id')} for {symbol_o}: {ce}")
                             except Exception as e:
                                 console.print(f"Error sorting recent orders: {e}")
                         # TODO match order ids with the dump file
