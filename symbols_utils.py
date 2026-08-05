@@ -173,13 +173,33 @@ def computeSymbols(
                             print(msg_add2)
                     # si la base est dans la balance -> priorité vente
                     elif (_m[1].get('base') in source_assets):
-                        sell_candidates.append(_a)
-                        existing_symbols.add(str(_a[0]).upper())
-                        msg_add = f"balance add: {_m[1].get('symbol')}"
-                        if console:
-                            console.print(msg_add)
+                        base = _m[1].get('base')
+                        min_amount_val = _m[1].get('limits', {}).get('amount', {}).get('min')
+                        try:
+                            min_amount = float(min_amount_val) if min_amount_val is not None else 0.0
+                        except (ValueError, TypeError):
+                            min_amount = 0.0
+
+                        base_balance = 0.0
+                        if isinstance(balance, dict):
+                            free_bal = balance.get('free') or {}
+                            total_bal = balance.get('total') or {}
+                            try:
+                                base_balance = float(free_bal.get(base, 0.0) or total_bal.get(base, 0.0) or 0.0)
+                            except (ValueError, TypeError):
+                                base_balance = 0.0
+
+                        if base_balance > 0 and base_balance < min_amount:
+                            # durant l'évaluation des symboles de démarrage, ne pas considérer les paires en balance < min_amount
+                            pass
                         else:
-                            print(msg_add)
+                            sell_candidates.append(_a)
+                            existing_symbols.add(str(_a[0]).upper())
+                            msg_add = f"balance add: {_m[1].get('symbol')}"
+                            if console:
+                                console.print(msg_add)
+                            else:
+                                print(msg_add)
 
         # combiner en respectant max_num_pairs : priorité aux ventes
         combined = []
