@@ -706,7 +706,29 @@ if __name__ == '__main__':
                     console=console
                 )
                 redlist = load_redlist()
-                availablePairs = [p for p in availablePairs if p[0] not in redlist]
+                # durant la maintenance ou ailleurs, ne pas éliminer de paire dont l'asset base se trouve en balance et > min_amount.
+                filtered_pairs = []
+                for p in availablePairs:
+                    symbol = p[0]
+                    base = p[2]
+                    try:
+                        min_amt = float(p[4]) if p[4] is not None else 0.0
+                    except (ValueError, TypeError):
+                        min_amt = 0.0
+
+                    base_balance = 0.0
+                    if _balance and isinstance(_balance, dict):
+                        free_bal = _balance.get('free') or {}
+                        total_bal = _balance.get('total') or {}
+                        try:
+                            base_balance = float(free_bal.get(base, 0.0) or total_bal.get(base, 0.0) or 0.0)
+                        except (ValueError, TypeError):
+                            base_balance = 0.0
+
+                    if symbol in redlist and not (base_balance > min_amt):
+                        continue
+                    filtered_pairs.append(p)
+                availablePairs = filtered_pairs
                 marketsFetched = True
 
             # taux
@@ -768,16 +790,34 @@ if __name__ == '__main__':
                         rate = get_eur_conversion_rate(exchange, quote, _markets)
                         market_min_expense_eur = float(min_amount) * last_close * rate
                         if market_min_expense_eur > 12.23:
-                            console.print(f"[{symbol}] Redlisting pair: market minimum transaction cost ({market_min_expense_eur:.2f} EUR) exceeds 12.23 EUR (min_amount: {min_amount}, last_close: {last_close}, rate: {rate}).")
-                            redlist = load_redlist()
-                            redlist[symbol] = {
-                                "symbol": symbol,
-                                "min_amount": float(min_amount),
-                                "last_close": last_close
-                            }
-                            save_redlist(redlist)
-                            availablePairs = [p for p in availablePairs if p[0] != symbol]
-                            continue
+                            # durant la maintenance ou ailleurs, ne pas éliminer de paire dont l'asset base se trouve en balance et > min_amount.
+                            base_balance = 0.0
+                            if _balance and isinstance(_balance, dict):
+                                free_bal = _balance.get('free') or {}
+                                total_bal = _balance.get('total') or {}
+                                try:
+                                    base_balance = float(free_bal.get(base, 0.0) or total_bal.get(base, 0.0) or 0.0)
+                                except (ValueError, TypeError):
+                                    base_balance = 0.0
+
+                            try:
+                                min_amt_float = float(min_amount) if min_amount is not None else 0.0
+                            except (ValueError, TypeError):
+                                min_amt_float = 0.0
+
+                            if base_balance > min_amt_float:
+                                console.print(f"[{symbol}] Retaining pair despite high EUR cost ({market_min_expense_eur:.2f} EUR) because base balance is > min_amount ({base_balance} > {min_amount}).")
+                            else:
+                                console.print(f"[{symbol}] Redlisting pair: market minimum transaction cost ({market_min_expense_eur:.2f} EUR) exceeds 12.23 EUR (min_amount: {min_amount}, last_close: {last_close}, rate: {rate}).")
+                                redlist = load_redlist()
+                                redlist[symbol] = {
+                                    "symbol": symbol,
+                                    "min_amount": float(min_amount),
+                                    "last_close": last_close
+                                }
+                                save_redlist(redlist)
+                                availablePairs = [p for p in availablePairs if p[0] != symbol]
+                                continue
 
                     N = len(df_candles)
                     # compute per-strategy signals
@@ -1342,7 +1382,10 @@ if __name__ == '__main__':
                                     except (ValueError, TypeError):
                                         base_balance = 0.0
 
-                                if base_balance < min_amount:
+                                # durant la maintenance ou ailleurs, ne pas éliminer de paire dont l'asset base se trouve en balance et > min_amount.
+                                if base_balance > min_amount:
+                                    console.print(f"Retained {symbolChoose} in tracked pairs despite low trading count because non-dust balance exists ({base_balance} > {min_amount}).")
+                                elif base_balance < min_amount:
                                     availablePairs.pop(pair_index)
                                     expiry_ts = int(time.time()) + (4 * 3600)
                                     pausedForBuy[symbolChoose] = expiry_ts
@@ -1356,6 +1399,7 @@ if __name__ == '__main__':
                                         console.print(f"Failed to persist pausedForBuy: {ex}")
                                     console.print(f"Paused buys for {symbolChoose} until {datetime.fromtimestamp(expiry_ts)} due to trading count below minimum and balance being dust or missing ({base_balance} < {min_amount}). Removed from availablePairs.")
                                 else:
+                                    # This branch handles base_balance == min_amount exactly. We can retain or treat as needed, but the instruction says strictly "> min_amount" for retention, or maybe ">=" is also ok, but we stick to the prompt's instruction: "et > min_amount". Let's retain it if >= min_amount, or as the previous line did:
                                     console.print(f"Retained {symbolChoose} in tracked pairs despite low trading count because non-dust balance exists ({base_balance} >= {min_amount}).")
                         last_pending_fetch = now_ts
                         console.print(f"[yellow]Periodic task: fetching open orders at {datetime.fromtimestamp(now_ts)}[/yellow]")

@@ -235,6 +235,48 @@ class TestRefactoredUtils(unittest.TestCase):
         self.assertEqual(len(symbols), 1)
         self.assertEqual(symbols[0][0], "BTC/CHF")
 
+    def test_compute_symbols_excludes_low_balance(self):
+        # We test that a pair where the base balance is strictly less than min_amount is not added as a sell candidate
+        markets_data = {
+            "BTC/USD": {
+                "symbol": "BTC/USD",
+                "id": "BTCUSD",
+                "base": "BTC",
+                "quote": "USD",
+                "limits": {"amount": {"min": 0.1}},
+                "precision": {"price": 0.01, "amount": 0.01}
+            }
+        }
+        volumes_data = [
+            {"symbol": "BTC/USD", "id": "BTCUSD", "trades_count": 10, "timestamp": 1600000000}
+        ]
+
+        with open(self.test_markets_file, "w") as f:
+            json.dump(markets_data, f)
+        with open(self.test_volumes_file, "w") as f:
+            json.dump(volumes_data, f)
+
+        # BTC is present but balance (0.05) is less than min_amount (0.1)
+        balance = {
+            'free': {'USD': 100.0, 'BTC': 0.05}
+        }
+
+        source_assets = []
+        symbols = symbols_utils.computeSymbols(
+            balance=balance,
+            previousPairs=None,
+            source_assets=source_assets,
+            forbid_assets=['USDT'],
+            base_assets=['USD'],
+            max_num_pairs=5,
+            mini_count=100, # trades_count is 10, so it's not a volume candidate
+            markets_file=self.test_markets_file,
+            volumes_file=self.test_volumes_file
+        )
+
+        # BTC/USD should NOT be in symbols because its base balance is < min_amount
+        self.assertEqual(len(symbols), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
