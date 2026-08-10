@@ -1087,86 +1087,89 @@ if __name__ == '__main__':
                                                     console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.96")
                                                 else:
                                                     edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
-                                                if edited_order:
-                                                    order = edited_order
-                                                    add_pending_order(order)
-                                                    console.print(f"BUY order successfully updated via edit_order: {order}")
-                                                else:
-                                                    # We need to place a NEW limit buy order.
-                                                    # Fetch fresh balance and check if we have enough quote balance.
-                                                    _balance = market_utils.fetch_balance(exchange, console=console)
-                                                    _b = _balance.get('free').get(quote)
-                                                    quote_free = float(_b) if _b is not None else 0.0
-                                                    if quote_free <= 0:
-                                                        console.print(f"No quote balance available for {symbol} to BUY ({quote_free} <= 0)")
-                                                        # Raise exception to skip other steps and enter the outer try-except handler
-                                                        raise ValueError(f"Insufficient quote balance ({quote_free} <= 0)")
-                                                    else:
-                                                        console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
-                                                        order = exchange.create_limit_buy_order(symbol, amount, price)
-                                                        # persist pending order to file
+                                                    if edited_order:
+                                                        order = edited_order
                                                         add_pending_order(order)
-                                                        console.print(f"BUY order passed: {order}")
-                                                # Record purchase to ensure that SELL events can check profitability later
-                                                record_purchase(symbol, amount, price)
-                                                # plot a small chart with the BUY marker
-                                                try:
-                                                    plt_ascii.clf()
-                                                    plt_ascii.theme('dark')
-                                                    plt_ascii.subplots(1, 1)
-                                                    # prepare data
-                                                    timestamps = df_candles['timestamp'].astype(int).tolist()
-                                                    dates = [datetime.fromtimestamp(int(ts)/1000).strftime('%d/%m %H:%M') for ts in timestamps]
-                                                    opens = df_candles['open'].astype(float).tolist()
-                                                    highs = df_candles['high'].astype(float).tolist()
-                                                    lows = df_candles['low'].astype(float).tolist()
-                                                    closes = df_candles['close'].astype(float).tolist()
-                                                    volumes = df_candles['volume'].astype(float).tolist()
-                                                    data = {"Open": opens, "High": highs, "Low": lows, "Close": closes}
-                                                    x = list(range(len(dates)))
-                                                    # 1 plot containing both: the candlesticks on top, volume bars below
-                                                    plt_ascii.title(f"{symbol} - BUY")
-                                                    plt_ascii.subplot(1, 1)
-                                                    plt_ascii.candlestick(x, data)
-                                                    # draw volumes on the same subplot as short vertical lines anchored below the candles
-                                                    max_volume = max(volumes) if volumes else 1
-                                                    min_price = min(lows) if lows else 0
-                                                    max_price = max(highs) if highs else 1
-                                                    price_range = max_price - min_price if max_price != min_price else max_price
-                                                    # base position below the lowest low, and a height factor for volumes
-                                                    base = min_price - price_range * 0.02
-                                                    height_factor = price_range * 0.64
-                                                    # draw vertical dots for each volume data
-                                                    for i, v in enumerate(volumes):
-                                                        h = (v / max_volume) * height_factor if max_volume else 0
-                                                        plt_ascii.plot([i, i], [base, base + h], color='yellow')
-                                                    plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='o', color='red')
-                                                    # set x ticks as human-readable dates on bottom plot
-                                                    step = max(1, len(dates) // 8)
-                                                    x_ticks = x[::step]
-                                                    x_labels = [dates[i] for i in x_ticks]
-                                                    plt_ascii.xticks(x_ticks, x_labels)
-                                                    plt_ascii.show()
-                                                except Exception as e:
-                                                    console.print(f"Plot failed for BUY {symbol}: {e}")
+                                                        console.print(f"BUY order successfully updated via edit_order: {order}")
+                                                    else:
+                                                        # We need to place a NEW limit buy order.
+                                                        # Fetch fresh balance and check if we have enough quote balance.
+                                                        _balance = market_utils.fetch_balance(exchange, console=console)
+                                                        _b = _balance.get('free').get(quote)
+                                                        quote_free = float(_b) if _b is not None else 0.0
+                                                        if quote_free <= 0:
+                                                            console.print(f"No quote balance available for {symbol} to BUY ({quote_free} <= 0)")
+                                                            # Raise exception to skip other steps and enter the outer try-except handler
+                                                            raise ValueError(f"Insufficient quote balance ({quote_free} <= 0)")
+                                                        else:
+                                                            console.print(f"Placing LIMIT BUY {symbol} amount={amount} price={price}")
+                                                            order = exchange.create_limit_buy_order(symbol, amount, price)
+                                                            # persist pending order to file
+                                                            add_pending_order(order)
+                                                            console.print(f"BUY order passed: {order}")
+                                                    # Record purchase to ensure that SELL events can check profitability later
+                                                    record_purchase(symbol, amount, price)
+                                                    # plot a small chart with the BUY marker
+                                                    try:
+                                                        plt_ascii.clf()
+                                                        plt_ascii.theme('dark')
+                                                        plt_ascii.subplots(1, 1)
+                                                        # prepare data
+                                                        timestamps = df_candles['timestamp'].astype(int).tolist()
+                                                        dates = [datetime.fromtimestamp(int(ts)/1000).strftime('%d/%m %H:%M') for ts in timestamps]
+                                                        opens = df_candles['open'].astype(float).tolist()
+                                                        highs = df_candles['high'].astype(float).tolist()
+                                                        lows = df_candles['low'].astype(float).tolist()
+                                                        closes = df_candles['close'].astype(float).tolist()
+                                                        volumes = df_candles['volume'].astype(float).tolist()
+                                                        data = {"Open": opens, "High": highs, "Low": lows, "Close": closes}
+                                                        x = list(range(len(dates)))
+                                                        # 1 plot containing both: the candlesticks on top, volume bars below
+                                                        plt_ascii.title(f"{symbol} - BUY")
+                                                        plt_ascii.subplot(1, 1)
+                                                        plt_ascii.candlestick(x, data)
+                                                        # draw volumes on the same subplot as short vertical lines anchored below the candles
+                                                        max_volume = max(volumes) if volumes else 1
+                                                        min_price = min(lows) if lows else 0
+                                                        max_price = max(highs) if highs else 1
+                                                        price_range = max_price - min_price if max_price != min_price else max_price
+                                                        # base position below the lowest low, and a height factor for volumes
+                                                        base = min_price - price_range * 0.02
+                                                        height_factor = price_range * 0.64
+                                                        # draw vertical dots for each volume data
+                                                        for i, v in enumerate(volumes):
+                                                            h = (v / max_volume) * height_factor if max_volume else 0
+                                                            plt_ascii.plot([i, i], [base, base + h], color='yellow')
+                                                        plt_ascii.scatter([latest_idx], [closes[latest_idx]], marker='o', color='red')
+                                                        # set x ticks as human-readable dates on bottom plot
+                                                        step = max(1, len(dates) // 8)
+                                                        x_ticks = x[::step]
+                                                        x_labels = [dates[i] for i in x_ticks]
+                                                        plt_ascii.xticks(x_ticks, x_labels)
+                                                        plt_ascii.show()
+                                                    except Exception as e:
+                                                        console.print(f"Plot failed for BUY {symbol}: {e}")
                                         except Exception as e:
                                             console.print(f"Buy order failed for {symbol}: {e}")
                                             # detect specific errors and pause buys for 2 hours for this symbol
                                             err = str(e).lower()
+                                            expiry_ts = None
                                             if ('invalid permissions' in err):
                                                 expiry_ts = int(time.time()) + (366 * 24 * 3600)
                                             elif ('insufficient funds' in err) or ('minimum' in err and 'not met' in err) or ('invalid arguments' in err and 'volume' in err) or ('must be greater than minimum' in err):
                                                 expiry_ts = int(time.time()) + (4 * 3600)
-                                            pausedForBuy[symbol] = expiry_ts
-                                            try:
+
+                                            if expiry_ts is not None:
+                                                pausedForBuy[symbol] = expiry_ts
                                                 try:
-                                                    safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
-                                                except Exception:
-                                                    with open(PAUSE_FILE, 'w') as f:
-                                                        json.dump(pausedForBuy, f)
-                                            except Exception as ex:
-                                                console.print(f"Failed to persist pausedForBuy: {ex}")
-                                            console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to error: {e}")
+                                                    try:
+                                                        safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                                                    except Exception:
+                                                        with open(PAUSE_FILE, 'w') as f:
+                                                            json.dump(pausedForBuy, f)
+                                                except Exception as ex:
+                                                    console.print(f"Failed to persist pausedForBuy: {ex}")
+                                                console.print(f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to error: {e}")
 
                     # decide sell
                     if global_sell[latest_idx]:
