@@ -20,3 +20,4 @@ my_trades_cache.json
 *.bak
 .vs/
 recorded_purchases.json
+redlisted_pairs.json
