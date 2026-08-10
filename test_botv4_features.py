@@ -528,6 +528,10 @@ class TestBotV4Features(unittest.TestCase):
         try:
             # Import real modules now
             import pandas as pd
+        except (ModuleNotFoundError, ImportError):
+            raise unittest.SkipTest("pandas/numpy are not available in this environment")
+
+        try:
             import strategy_aggregator
 
             # Let's mock indicators2.get_signals to return a predefined series of buy/sell signals
@@ -587,6 +591,10 @@ class TestBotV4Features(unittest.TestCase):
         try:
             import pandas as pd
             import numpy as np
+        except (ModuleNotFoundError, ImportError):
+            raise unittest.SkipTest("pandas/numpy are not available in this environment")
+
+        try:
 
             # Create a dataframe where last price is on a crest high for ESPORTS/USD
             df_candles = pd.DataFrame({
