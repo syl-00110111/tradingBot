@@ -136,14 +136,14 @@ def check_candles_consistency(symbol: str, expected_interval_ms: int = 60000, co
         return []
 
 
-def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optional[Dict] = None, PAUSE_FILE: str = 'paused_for_buy.json', console: Optional[Any] = None) -> pd.DataFrame:
+def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optional[Dict] = None, PAUSE_FILE: str = 'paused_for_buy.json', console: Optional[Any] = None, timeframe: str = '1m', limit: Optional[int] = None) -> pd.DataFrame:
     if pausedForBuy is None:
         pausedForBuy = {}
 
     rate_limit_ms = getattr(exchange, 'rateLimit', 1000) or 1000
     time.sleep(rate_limit_ms / 1000) # time.sleep wants seconds
 
-    dataFile = f"ohlcv_data_{_id}_1m.json"
+    dataFile = f"ohlcv_data_{_id}_{timeframe}.json"
     data2 = []
     existing_data = []
     # Charger les données existantes si le fichier existe
@@ -184,15 +184,18 @@ def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optiona
             try:
                 while True:
                     time.sleep(rate_limit_ms / 1000)
-                    batch = exchange.fetch_ohlcv(symbol, '1m', since)
+                    batch = exchange.fetch_ohlcv(symbol, timeframe, since)
                     if not batch:
                         break
                     data.extend(batch)
                     last_ts = int(batch[-1][0])
                     if last_ts <= since:
                         break
-                    since = last_ts + 60 * 1000
-                    if last_ts >= currentTimestamp - 60*1000:
+                    tf_ms = 60 * 1000
+                    if timeframe == '4h':
+                        tf_ms = 4 * 60 * 60 * 1000
+                    since = last_ts + tf_ms
+                    if last_ts >= currentTimestamp - tf_ms:
                         break
             except Exception as e:
                 msg_warn3 = f"Warning: fetch_ohlcv batch failed for {symbol}: {e}"
@@ -202,7 +205,10 @@ def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optiona
                     print(msg_warn3)
                 try:
                     time.sleep(rate_limit_ms / 1000)
-                    data = exchange.fetch_ohlcv(symbol, '1m')
+                    if limit is not None:
+                        data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                    else:
+                        data = exchange.fetch_ohlcv(symbol, timeframe)
                 except Exception as e2:
                     msg_fail = f"Fallback fetch failed for {symbol}: {e2}"
                     if console:
@@ -213,7 +219,10 @@ def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optiona
     # sinon si le fichier n'existe pas
     else:
         try:
-            data = exchange.fetch_ohlcv(symbol, '1m')  # ce fetch trouve son max naturellement
+            if limit is not None:
+                data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            else:
+                data = exchange.fetch_ohlcv(symbol, timeframe)
         except Exception as e:
             msg_warn4 = f"Warning: initial fetch_ohlcv failed for {symbol}: {e}"
             if console:

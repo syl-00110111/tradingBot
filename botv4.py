@@ -67,6 +67,129 @@ with console.status("Bot init. Please wait some time, or expect a random error i
     # monnaies d'usage pour considérer les paires à leur quote asset
     baseAssets = ["USD", "EUR", "BTC", "CHF", "GBP", "USDC"]
 
+    def get_5_week_sma(exchange, symbol, _id, df_candles_1m, paused_for_buy=None, console=None):
+        """
+        Calculate the 5-week SMA.
+        If df_candles_1m (which contains the full 1m history) has at least 50,400 candles,
+        compute SMA from the last 50,400 candles.
+        Otherwise, fetch 276 candles of 4-hour timeframe, cache them, and compute SMA from the last 210 candles.
+        """
+        try:
+            # Check if 1-minute candle dataframe has at least 5 weeks of history (50,400 candles)
+            if df_candles_1m is not None and len(df_candles_1m) >= 50400:
+                return float(df_candles_1m['close'].tail(50400).mean())
+
+            # If not, fetch 276 of 4h candles
+            if _id is None:
+                _id = symbol.replace('/', '')
+
+            df_4h = market_utils.fetch_ohlcv_data(
+                exchange=exchange,
+                _id=_id,
+                symbol=symbol,
+                pausedForBuy=paused_for_buy,
+                console=console,
+                timeframe='4h',
+                limit=276
+            )
+
+            if df_4h is not None and not df_4h.empty:
+                # 5 weeks in 4-hour candles = 5 * 7 * 6 = 210 candles
+                if len(df_4h) >= 210:
+                    return float(df_4h['close'].tail(210).mean())
+                else:
+                    return float(df_4h['close'].mean())
+        except Exception as e:
+            msg_err = f"[{symbol}] Failed to compute/fetch 5-week SMA via 4h candles: {e}"
+            if console:
+                console.print(msg_err)
+            else:
+                print(msg_err)
+
+        # Fallback to whatever 1m history we have
+        if df_candles_1m is not None and len(df_candles_1m) > 0:
+            return float(df_candles_1m['close'].mean())
+        return None
+
+    def scan_market_and_add_pairs_for_quote(quote_asset, exchange, markets, forbid_assets, base_assets, mini_count, available_pairs, console=None):
+        """
+        Scans the market for pairs compatible with quote_asset and adds them to available_pairs
+        if they satisfy the standard conditions (e.g. not forbidden, trading count >= mini_count).
+        """
+        try:
+            msg = f"Starting market scan for compatible pairs with quote asset {quote_asset} (Driver)..."
+            if console:
+                console.print(msg)
+            else:
+                print(msg)
+
+            # Load volumes to check trade count
+            volumes_file = 'volumes_trades_data.json'
+            volumes = []
+            if os.path.exists(volumes_file):
+                with open(volumes_file, 'r') as f:
+                    try:
+                        volumes = json.load(f)
+                    except Exception:
+                        volumes = []
+
+            # Get list of market IDs with trades_count >= mini_count
+            good_volume_ids = set()
+            for v in volumes:
+                if v.get('trades_count', 0) >= mini_count:
+                    good_volume_ids.add(v.get('id'))
+
+            added_pairs = []
+            # markets can be a dict or a list
+            market_items = []
+            if isinstance(markets, dict):
+                market_items = list(markets.values())
+            elif isinstance(markets, list):
+                market_items = markets
+
+            for m in market_items:
+                m_symbol = m.get('symbol')
+                m_id = m.get('id')
+                m_base = m.get('base')
+                m_quote = m.get('quote')
+
+                # Standard conditions
+                if m_quote == quote_asset:
+                    if m_base not in forbid_assets and m_quote not in forbid_assets:
+                        if m_id in good_volume_ids:
+                            # Check if already in availablePairs
+                            already_exists = False
+                            for p in available_pairs:
+                                if p[0] == m_symbol:
+                                    already_exists = True
+                                    break
+                            if not already_exists:
+                                min_amount = m.get('limits', {}).get('amount', {}).get('min')
+                                price_precision = m.get('precision', {}).get('price')
+                                amount_precision = m.get('precision', {}).get('amount')
+                                pair_info = [m_symbol, m_id, m_base, m_quote, min_amount, price_precision, amount_precision]
+                                available_pairs.append(pair_info)
+                                added_pairs.append(m_symbol)
+
+            if added_pairs:
+                msg = f"[Driver] Added {len(added_pairs)} compatible pairs with quote {quote_asset} to tracked pairs: {', '.join(added_pairs)}"
+                if console:
+                    console.print(msg)
+                else:
+                    print(msg)
+            else:
+                msg = f"[Driver] No new compatible pairs found for quote {quote_asset}."
+                if console:
+                    console.print(msg)
+                else:
+                    print(msg)
+        except Exception as e:
+            msg_err = f"[Driver] Exception during market scan: {e}"
+            if console:
+                console.print(msg_err)
+            else:
+                print(msg_err)
+
     # trading state (position tracking for profit calc)
     def add_pending_order(order):
         """Append a single order dict to the pending dump file.
@@ -110,7 +233,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             console.print(f"dump_pending_orders failed (file read): {e}")
             return None
 
-    def cleanup_open_orders(exchange, symbol, new_price, side, df_candles, last_close, new_amount=None): # TODO rename?
+    def cleanup_open_orders(exchange, symbol, new_price, side, df_candles, last_close, new_amount=None, _id=None): # TODO rename?
         """Fetches open orders for the symbol and either edits or cancels them.
         Returns the edited order dict if edit_order is used successfully, otherwise returns None.
         """
@@ -158,13 +281,7 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 threshold = config.get('monte_carlo', {}).get('sufficient_probability', 0.96)
 
             # Calculate 5-week SMA (SMA_840) to check for crest high on BUY orders
-            sma_840 = None
-            if df_candles is not None and len(df_candles) > 0:
-                sma_840_len = 840 * 60
-                if len(df_candles) >= sma_840_len:
-                    sma_840 = float(df_candles['close'].tail(sma_840_len).mean())
-                else:
-                    sma_840 = float(df_candles['close'].mean())
+            sma_840 = get_5_week_sma(exchange, symbol, _id, df_candles, pausedForBuy, console)
 
             edited_order = None
 
@@ -862,14 +979,10 @@ if __name__ == '__main__':
                         console.print(f"[{symbol}] Prix de référence calculé sur les chandelles stockées: {ref_price:.8f}")
 
                     # 2/ prise en compte tendance Bullish / Bearish
-                    sma_840_len = 840 * 60
-                    if len(df_candles) >= sma_840_len:
-                        sma_840 = float(df_candles['close'].tail(sma_840_len).mean())
-                    else:
-                        sma_840 = float(df_candles['close'].mean())
-                    is_bullish = last_close > sma_840
+                    sma_840 = get_5_week_sma(exchange, symbol, _id, full_df_candles, pausedForBuy, console)
+                    is_bullish = last_close > sma_840 if sma_840 is not None else True
                     trend_str = 'Bullish' if is_bullish else 'Bearish'
-                    console.print(f"[{symbol}] Tendance détectée: {trend_str} (Last Close: {last_close:.8f} vs SMA 840: {sma_840:.8f})")
+                    console.print(f"[{symbol}] Tendance détectée: {trend_str} (Last Close: {last_close:.8f} vs SMA 840: {(sma_840 if sma_840 is not None else 0.0):.8f})")
 
                     # 3/ détection trend following / mean reversion
                     regime_str = 'Mean Reversion'
@@ -1077,16 +1190,16 @@ if __name__ == '__main__':
                                     else:
                                         try:
                                             # Check if we are on a crest high where the 5-week average (SMA_840) is not reached
-                                            if last_close > sma_840 or price > sma_840:
-                                                console.print(f"[{symbol}] Skipping/Cancelling BUY order: Price is on a crest high (last close {last_close:.8f}, limit price {price:.8f}) and 5-week SMA {sma_840:.8f} is not reached.")
+                                            if sma_840 is not None and (last_close > sma_840 or price > sma_840):
+                                                console.print(f"[{symbol}] Skipping/Cancelling BUY order: Price is on a crest high (last close {last_close:.8f}, limit price {price:.8f}) and 5-week SMA {(sma_840 if sma_840 is not None else 0.0):.8f} is not reached.")
                                                 # Call cleanup_open_orders to cancel any existing open buy orders
-                                                cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
+                                                cleanup_open_orders(exchange, symbol, price, 'buy', full_df_candles, last_close, amount, _id=_id)
                                             else:
                                                 should_place, prob = should_place_order(symbol, 'buy', price, last_close, df_candles, console)
                                                 if not should_place:
                                                     console.print(f"[{symbol}] Skipping/Cancelling BUY order: Estimated hit probability ({prob:.4f}) is not > 0.96")
                                                 else:
-                                                    edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', df_candles, last_close, amount)
+                                                    edited_order = cleanup_open_orders(exchange, symbol, price, 'buy', full_df_candles, last_close, amount, _id=_id)
                                                     if edited_order:
                                                         order = edited_order
                                                         add_pending_order(order)
@@ -1207,11 +1320,13 @@ if __name__ == '__main__':
                                         if not should_place:
                                             console.print(f"[{symbol}] Skipping/Cancelling SELL order: Estimated hit probability ({prob:.4f}) is not > 0.96")
                                         else:
-                                            edited_order = cleanup_open_orders(exchange, symbol, price, 'sell', df_candles, last_close, amount)
+                                            edited_order = cleanup_open_orders(exchange, symbol, price, 'sell', full_df_candles, last_close, amount, _id=_id)
                                             if edited_order:
                                                 order = edited_order
                                                 add_pending_order(order)
                                                 console.print(f"SELL order successfully updated via edit_order: {order}")
+                                                # Call market scan driver for quote asset
+                                                scan_market_and_add_pairs_for_quote(quote, exchange, _markets, forbidAssets, baseAssets, miniCount, availablePairs, console)
                                             else:
                                                 # We need to place a NEW limit sell order.
                                                 # Fetch fresh balance and check if we have enough base balance.
@@ -1230,6 +1345,8 @@ if __name__ == '__main__':
                                                     # persist pending order to file
                                                     add_pending_order(order)
                                                     console.print(f"SELL order passed: {order}")
+                                                    # Call market scan driver for quote asset
+                                                    scan_market_and_add_pairs_for_quote(quote, exchange, _markets, forbidAssets, baseAssets, miniCount, availablePairs, console)
                                             # Deduct sell_amount from recorded purchases
                                             remove_recorded_purchases(symbol, amount)
                                             # plot SELL

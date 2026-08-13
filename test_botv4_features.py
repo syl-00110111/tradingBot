@@ -658,5 +658,111 @@ class TestBotV4Features(unittest.TestCase):
         buy_multiplier = 1.0 - buy_offset
         self.assertAlmostEqual(buy_multiplier, 0.9982)
 
+    @patch('market_utils.fetch_ohlcv_data')
+    def test_get_5_week_sma(self, mock_fetch_ohlcv):
+        # Setup
+        mock_exchange = MagicMock()
+
+        # Scenario 1: df_candles_1m has >= 50400 candles
+        class LargeMockDataFrame:
+            def __init__(self, size):
+                self.size = size
+                self.close = MagicMock()
+                self.close.tail.return_value.mean.return_value = 100.0
+                self.close.mean.return_value = 100.0
+            def __len__(self):
+                return self.size
+            def __getitem__(self, item):
+                if item == 'close':
+                    return self.close
+                return self
+
+        df_large = LargeMockDataFrame(50400)
+        sma = botv4.get_5_week_sma(mock_exchange, "BTC/USD", "BTCUSD", df_large)
+        self.assertEqual(sma, 100.0)
+        mock_fetch_ohlcv.assert_not_called()
+
+        # Scenario 2: df_candles_1m has < 50400 candles, fetches 4h candles (>= 210 candles)
+        df_small = LargeMockDataFrame(100)
+
+        # Let's return a mock 4h dataframe from fetch_ohlcv_data
+        df_4h_mock = MagicMock()
+        df_4h_mock.empty = False
+        df_4h_mock.__len__.return_value = 250
+        df_4h_mock_tail = MagicMock()
+        df_4h_mock_tail.mean.return_value = 95.0
+        df_4h_mock['close'].tail.return_value = df_4h_mock_tail
+        mock_fetch_ohlcv.return_value = df_4h_mock
+
+        sma = botv4.get_5_week_sma(mock_exchange, "BTC/USD", "BTCUSD", df_small)
+        # It should call fetch_ohlcv_data with timeframe='4h' and limit=276
+        mock_fetch_ohlcv.assert_called_with(
+            exchange=mock_exchange,
+            _id="BTCUSD",
+            symbol="BTC/USD",
+            pausedForBuy=None,
+            console=None,
+            timeframe='4h',
+            limit=276
+        )
+        self.assertEqual(sma, 95.0)
+
+    def test_scan_market_and_add_pairs_for_quote(self):
+        # Create a mock volumes file
+        vol_file = 'volumes_trades_data.json'
+        test_volumes = [
+            {'symbol': 'SOL/USDC', 'id': 'SOLUSDC', 'trades_count': 500, 'timestamp': 1000},
+            {'symbol': 'BTC/USDC', 'id': 'BTCUSDC', 'trades_count': 600, 'timestamp': 1000},
+            {'symbol': 'XMR/USDC', 'id': 'XMRUSDC', 'trades_count': 700, 'timestamp': 1000}, # XMR is forbidden
+            {'symbol': 'LTC/USDC', 'id': 'LTCUSDC', 'trades_count': 200, 'timestamp': 1000}, # low volume
+        ]
+        with open(vol_file, 'w') as f:
+            json.dump(test_volumes, f)
+
+        try:
+            # Set up inputs
+            exchange = MagicMock()
+            markets = {
+                'SOL/USDC': {
+                    'symbol': 'SOL/USDC', 'id': 'SOLUSDC', 'base': 'SOL', 'quote': 'USDC',
+                    'limits': {'amount': {'min': 0.1}}, 'precision': {'price': 0.01, 'amount': 0.01}
+                },
+                'BTC/USDC': {
+                    'symbol': 'BTC/USDC', 'id': 'BTCUSDC', 'base': 'BTC', 'quote': 'USDC',
+                    'limits': {'amount': {'min': 0.001}}, 'precision': {'price': 1.0, 'amount': 0.0001}
+                },
+                'XMR/USDC': {
+                    'symbol': 'XMR/USDC', 'id': 'XMRUSDC', 'base': 'XMR', 'quote': 'USDC',
+                    'limits': {'amount': {'min': 0.1}}, 'precision': {'price': 0.01, 'amount': 0.01}
+                },
+                'LTC/USDC': {
+                    'symbol': 'LTC/USDC', 'id': 'LTCUSDC', 'base': 'LTC', 'quote': 'USDC',
+                    'limits': {'amount': {'min': 0.1}}, 'precision': {'price': 0.01, 'amount': 0.01}
+                }
+            }
+            forbid_assets = ['XMR']
+            base_assets = ['USDC']
+            mini_count = 400
+            available_pairs = [['SOL/USDC', 'SOLUSDC', 'SOL', 'USDC', 0.1, 0.01, 0.01]] # SOL/USDC already exists
+
+            # Run scan_market_and_add_pairs_for_quote for quote USDC
+            botv4.scan_market_and_add_pairs_for_quote('USDC', exchange, markets, forbid_assets, base_assets, mini_count, available_pairs)
+
+            # SOL/USDC should not be duplicated (since it already exists)
+            # BTC/USDC should be added because its volume is 600 (>= 400) and it's not forbidden
+            # XMR/USDC should NOT be added because XMR is forbidden
+            # LTC/USDC should NOT be added because its volume is 200 (< 400)
+
+            self.assertEqual(len(available_pairs), 2)
+            # Second element should be BTC/USDC
+            self.assertEqual(available_pairs[1][0], 'BTC/USDC')
+            self.assertEqual(available_pairs[1][1], 'BTCUSDC')
+            self.assertEqual(available_pairs[1][2], 'BTC')
+            self.assertEqual(available_pairs[1][3], 'USDC')
+
+        finally:
+            if os.path.exists(vol_file):
+                os.remove(vol_file)
+
 if __name__ == '__main__':
     unittest.main()
