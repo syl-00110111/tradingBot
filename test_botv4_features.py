@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import math
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -759,6 +760,145 @@ class TestBotV4Features(unittest.TestCase):
             self.assertEqual(available_pairs[1][1], 'BTCUSDC')
             self.assertEqual(available_pairs[1][2], 'BTC')
             self.assertEqual(available_pairs[1][3], 'USDC')
+
+        finally:
+            if os.path.exists(vol_file):
+                os.remove(vol_file)
+
+    def test_get_only_optimal(self):
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_ticker.return_value = {
+            'quoteVolume': 200000,
+            'ask': 100.01,
+            'bid': 100.00,
+            'last': 100.00
+        }
+        mock_exchange.fetch_ohlcv.return_value = [
+            [1000, 100, 101, 99, 100, 10],
+            [2000, 100, 100.5, 99.5, 100, 10]
+        ]
+        mock_exchange.fetch_trades.return_value = [
+            {'timestamp': 1000},
+            {'timestamp': 60000 * 10}
+        ] * 25
+
+        import symbols_utils
+        is_opt, reasons = symbols_utils.get_only_optimal(mock_exchange, "BTC/USD")
+        self.assertTrue(is_opt)
+        self.assertIn("High Vol", reasons)
+
+    def test_compute_symbols_with_get_only_optimal(self):
+        import symbols_utils
+        mock_exchange = MagicMock()
+        def mock_fetch_ticker(sym):
+            if sym == "BTC/USD":
+                return {'quoteVolume': 200000, 'ask': 100.01, 'bid': 100.00, 'last': 100.00}
+            else:
+                return {'quoteVolume': 10, 'ask': 100.00, 'bid': 100.00, 'last': 100.00}
+
+        mock_exchange.fetch_ticker.side_effect = mock_fetch_ticker
+        mock_exchange.fetch_ohlcv.return_value = [[1000, 100, 101, 99, 100, 10]]
+        mock_exchange.fetch_trades.return_value = []
+
+        markets = {
+            "BTC/USD": {"symbol": "BTC/USD", "id": "BTCUSD", "base": "BTC", "quote": "USD", "limits": {"amount": {"min": 0.001}}, "precision": {"price": 0.01, "amount": 0.001}},
+            "ETH/USD": {"symbol": "ETH/USD", "id": "ETHUSD", "base": "ETH", "quote": "USD", "limits": {"amount": {"min": 0.01}}, "precision": {"price": 0.01, "amount": 0.01}}
+        }
+        volumes = [
+            {"symbol": "BTC/USD", "id": "BTCUSD", "trades_per_minute": 500, "timestamp": 1000},
+            {"symbol": "ETH/USD", "id": "ETHUSD", "trades_per_minute": 500, "timestamp": 1000}
+        ]
+
+        with open('markets.json', 'w') as f:
+            json.dump(markets, f)
+        with open('volumes_trades_data.json', 'w') as f:
+            json.dump(volumes, f)
+
+        try:
+            balance = {'free': {'USD': 1000.0}}
+            symbols = symbols_utils.computeSymbols(
+                balance=balance,
+                previousPairs=None,
+                source_assets=[],
+                forbid_assets=[],
+                base_assets=['USD'],
+                max_num_pairs=10,
+                mini_count=400,
+                markets_file='markets.json',
+                volumes_file='volumes_trades_data.json',
+                exchange=mock_exchange
+            )
+            sym_names = [s[0] for s in symbols]
+            self.assertIn("BTC/USD", sym_names)
+            self.assertNotIn("ETH/USD", sym_names)
+
+        finally:
+            for f in ['markets.json', 'volumes_trades_data.json']:
+                if os.path.exists(f):
+                    os.remove(f)
+
+    def test_get_only_optimal_caching_guard(self):
+        vol_file = 'volumes_trades_data.json'
+        now_ts = int(time.time())
+        cached_data = [
+            {
+                'symbol': 'BTC/USD',
+                'id': 'BTCUSD',
+                'timestamp': now_ts,
+                'volume_48h': 200000,
+                'spread_pct': 0.0001,
+                'volatility_pct': 0.005,
+                'trades_per_minute': 50
+            }
+        ]
+        with open(vol_file, 'w') as f:
+            json.dump(cached_data, f)
+
+        try:
+            mock_exchange = MagicMock()
+            import symbols_utils
+            is_opt, reasons = symbols_utils.get_only_optimal(mock_exchange, "BTC/USD")
+            self.assertTrue(is_opt)
+            mock_exchange.fetch_ticker.assert_not_called()
+            mock_exchange.fetch_ohlcv.assert_not_called()
+            mock_exchange.fetch_trades.assert_not_called()
+        finally:
+            if os.path.exists(vol_file):
+                os.remove(vol_file)
+
+    def test_update_trading_count_characteristics(self):
+        import symbols_utils
+        vol_file = 'volumes_trades_data.json'
+        old_ts = int(time.time()) - (5 * 3600)
+        old_data = [
+            {
+                'symbol': 'BTC/USD',
+                'id': 'BTCUSD',
+                'timestamp': old_ts,
+                'trades_count': 100
+            }
+        ]
+        with open(vol_file, 'w') as f:
+            json.dump(old_data, f)
+
+        try:
+            mock_exchange = MagicMock()
+            mock_exchange.fetch_ticker.return_value = {'quoteVolume': 150000, 'ask': 100.01, 'bid': 100.00, 'last': 100.00}
+            mock_exchange.fetch_ohlcv.return_value = [[1000, 100, 101, 99, 100, 10]]
+            mock_exchange.fetch_trades.return_value = [{'timestamp': 1000}, {'timestamp': 60000 * 10}] * 25
+
+            tpm = symbols_utils.updateTradingCount('BTC/USD', mock_exchange, volumes_file=vol_file)
+            self.assertGreater(tpm, 0)
+
+            with open(vol_file, 'r') as f:
+                data = json.load(f)
+            self.assertEqual(len(data), 1)
+            entry = data[0]
+            self.assertIn('volume_48h', entry)
+            self.assertIn('spread_pct', entry)
+            self.assertIn('volatility_pct', entry)
+            self.assertIn('trades_per_minute', entry)
+            self.assertNotIn('trades_count', entry)
 
         finally:
             if os.path.exists(vol_file):
