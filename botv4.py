@@ -123,22 +123,6 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             else:
                 print(msg)
 
-            # Load volumes to check trade count
-            volumes_file = 'volumes_trades_data.json'
-            volumes = []
-            if os.path.exists(volumes_file):
-                with open(volumes_file, 'r') as f:
-                    try:
-                        volumes = json.load(f)
-                    except Exception:
-                        volumes = []
-
-            # Get list of market IDs with trades_count >= mini_count
-            good_volume_ids = set()
-            for v in volumes:
-                if v.get('trades_count', 0) >= mini_count:
-                    good_volume_ids.add(v.get('id'))
-
             added_pairs = []
             # markets can be a dict or a list
             market_items = []
@@ -156,11 +140,20 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 # Standard conditions
                 if m_quote == quote_asset:
                     if m_base not in forbid_assets and m_quote not in forbid_assets:
-                        if m_id in good_volume_ids:
+                        is_opt = False
+                        try:
+                            is_opt, _ = symbols_utils.get_only_optimal(exchange, m_symbol)
+                        except Exception:
+                            is_opt = False
+
+                        if is_opt:
                             # Check if already in availablePairs
                             already_exists = False
                             for p in available_pairs:
-                                if p[0] == m_symbol:
+                                if isinstance(p, (list, tuple)) and len(p) > 0 and p[0] == m_symbol:
+                                    already_exists = True
+                                    break
+                                elif isinstance(p, str) and p == m_symbol:
                                     already_exists = True
                                     break
                             if not already_exists:
@@ -1435,10 +1428,10 @@ if __name__ == '__main__':
 
                                             # Consider back the pair: add to availablePairs if count is high enough
                                             try:
-                                                _count = symbols_utils.updateTradingCount(symbol, exchange=exchange, console=console)
+                                                is_opt, _ = symbols_utils.get_only_optimal(exchange, symbol)
                                             except Exception:
-                                                _count = 0
-                                            if _count >= miniCount:
+                                                is_opt = False
+                                            if is_opt:
                                                 _a = [
                                                     market_sample.get('symbol'),
                                                     market_sample.get('id'),
@@ -1462,7 +1455,10 @@ if __name__ == '__main__':
                                 console.print(f"Skipping forbidden symbol: {symbolChoose}")
                                 continue
                             console.print(f"Chose to update symbol: {symbolChoose}")
-                            _count = symbols_utils.updateTradingCount(symbolChoose, exchange=exchange, console=console)
+                            try:
+                                is_opt, _ = symbols_utils.get_only_optimal(exchange, symbolChoose)
+                            except Exception:
+                                is_opt = False
                             # check if symbolChoose is in availablePairs (as a list/tuple or string)
                             pair_index = -1
                             for idx, pair in enumerate(availablePairs):
@@ -1473,7 +1469,7 @@ if __name__ == '__main__':
                                     pair_index = idx
                                     break
 
-                            if _count >= miniCount and pair_index == -1:
+                            if is_opt and pair_index == -1:
                                 _a = [
                                     market_sample.get('symbol'),
                                     market_sample.get('id'),
@@ -1485,7 +1481,7 @@ if __name__ == '__main__':
                                 ]
                                 availablePairs.append(_a)
                                 console.print(f"Appended {_a} to tracked pairs.")
-                            elif _count < miniCount and pair_index != -1:
+                            elif not is_opt and pair_index != -1:
                                 # Only remove/pause if the pair is not found in _balance (i.e. is dust or missing)
                                 base = market_sample.get('base')
                                 min_amount_val = market_sample.get('limits', {}).get('amount', {}).get('min')

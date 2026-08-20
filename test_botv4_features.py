@@ -709,13 +709,14 @@ class TestBotV4Features(unittest.TestCase):
         self.assertEqual(sma, 95.0)
 
     def test_scan_market_and_add_pairs_for_quote(self):
-        # Create a mock volumes file
+        # Create a mock volumes file with 4-hour cached characteristics
         vol_file = 'volumes_trades_data.json'
+        now_ts = int(time.time())
         test_volumes = [
-            {'symbol': 'SOL/USDC', 'id': 'SOLUSDC', 'trades_count': 500, 'timestamp': 1000},
-            {'symbol': 'BTC/USDC', 'id': 'BTCUSDC', 'trades_count': 600, 'timestamp': 1000},
-            {'symbol': 'XMR/USDC', 'id': 'XMRUSDC', 'trades_count': 700, 'timestamp': 1000}, # XMR is forbidden
-            {'symbol': 'LTC/USDC', 'id': 'LTCUSDC', 'trades_count': 200, 'timestamp': 1000}, # low volume
+            {'symbol': 'SOL/USDC', 'id': 'SOLUSDC', 'timestamp': now_ts, 'volume_48h': 200000, 'spread_pct': 0.001, 'volatility_pct': 0.05, 'trades_per_minute': 10},
+            {'symbol': 'BTC/USDC', 'id': 'BTCUSDC', 'timestamp': now_ts, 'volume_48h': 200000, 'spread_pct': 0.001, 'volatility_pct': 0.05, 'trades_per_minute': 10},
+            {'symbol': 'XMR/USDC', 'id': 'XMRUSDC', 'timestamp': now_ts, 'volume_48h': 200000, 'spread_pct': 0.001, 'volatility_pct': 0.05, 'trades_per_minute': 10}, # XMR is forbidden
+            {'symbol': 'LTC/USDC', 'id': 'LTCUSDC', 'timestamp': now_ts, 'volume_48h': 10, 'spread_pct': 1.0, 'volatility_pct': 0.2, 'trades_per_minute': 0}, # low score (non-optimal)
         ]
         with open(vol_file, 'w') as f:
             json.dump(test_volumes, f)
@@ -811,7 +812,7 @@ class TestBotV4Features(unittest.TestCase):
             if sym == "BTC/USD":
                 return {'quoteVolume': 200000, 'ask': 100.01, 'bid': 100.00, 'last': 100.00}
             else:
-                return {'quoteVolume': 10, 'ask': 100.00, 'bid': 100.00, 'last': 100.00}
+                return {'quoteVolume': 10, 'ask': 100.00, 'bid': 80.00, 'last': 100.00}
 
         mock_exchange.fetch_ticker.side_effect = mock_fetch_ticker
         mock_exchange.fetch_ohlcv.return_value = [[1000, 100, 101, 99, 100, 10]]
