@@ -399,12 +399,19 @@ def get_signals(df, mode_config, is_scan=False, global_config=None):
         pass
 
     rsi_len = 7
-    df['rsi'] = ta.rsi(df['close'], length=rsi_len).fillna(50)
+    _rsi = ta.rsi(df['close'], length=rsi_len)
+    df['rsi'] = _rsi.fillna(50) if _rsi is not None else 50
 
     macd = ta.macd(df['close'], fast=8, slow=20, signal=5)
-    df['macd_val'] = macd.iloc[:, 0].fillna(0); df['macd_sig'] = macd.iloc[:, 1].fillna(0); df['macd_hist'] = macd.iloc[:, 2].fillna(0)
+    if macd is not None and not macd.empty:
+        df['macd_val'] = macd.iloc[:, 0].fillna(0)
+        df['macd_sig'] = macd.iloc[:, 1].fillna(0)
+        df['macd_hist'] = macd.iloc[:, 2].fillna(0)
+    else:
+        df['macd_val'] = df['macd_sig'] = df['macd_hist'] = 0
 
-    df['tema_20'] = ta.tema(df['close'], length=20).fillna(df['close'])
+    _tema = ta.tema(df['close'], length=20)
+    df['tema_20'] = _tema.fillna(df['close']) if _tema is not None else df['close']
 
     if strategy == 'ichimoku_cloud':
         df = strategy_ichimoku(df)
@@ -876,8 +883,8 @@ def strategy_bollinger(df):
 
     # RSI length is currently hardcoded to 14 in this strategy, should probably use common rsi if possible
     # but for now let's use the provided logic
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['rsi'] = df['rsi'].fillna(50)
+    _rsi14 = ta.rsi(df['close'], length=14)
+    df['rsi'] = _rsi14.fillna(50) if _rsi14 is not None else 50
 
     df['buy_candidate'] = (df['close'] <= df['bb_low']) & (df['rsi'] < rsi_oversold)
     df['sell_candidate'] = (df['close'] >= df['bb_mid'])
