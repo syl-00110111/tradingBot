@@ -765,6 +765,23 @@ class TestBotV4Features(unittest.TestCase):
             if os.path.exists(vol_file):
                 os.remove(vol_file)
 
+    def test_fetch_symbol_characteristics_none_ticker_values(self):
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_ticker.return_value = {
+            'quoteVolume': None,
+            'baseVolume': 100.0,
+            'last': None,
+            'ask': None,
+            'bid': None
+        }
+        mock_exchange.fetch_ohlcv.return_value = []
+        mock_exchange.fetch_trades.return_value = []
+
+        import symbols_utils
+        # Before fix, this would raise TypeError: unsupported operand type(s) for *: 'float' and 'NoneType'
+        chars = symbols_utils.fetch_symbol_characteristics(mock_exchange, "AIO/EUR")
+        self.assertEqual(chars['volume_48h'], 0.0)
+
     def test_get_only_optimal(self):
         mock_exchange = MagicMock()
         mock_exchange.fetch_ticker.return_value = {

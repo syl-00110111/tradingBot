@@ -43,13 +43,33 @@ def fetch_symbol_characteristics(exchange: Any, symbol: str) -> dict:
     trades = _exec_call(exchange.fetch_trades, symbol, limit=1000)
 
     # 1. Volume 48h
-    volume_48h = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0) * ticker.get('last', 1)
+    quote_vol = ticker.get('quoteVolume')
+    try:
+        quote_vol = float(quote_vol) if quote_vol is not None else 0.0
+    except (ValueError, TypeError):
+        quote_vol = 0.0
+
+    base_vol = ticker.get('baseVolume')
+    try:
+        base_vol = float(base_vol) if base_vol is not None else 0.0
+    except (ValueError, TypeError):
+        base_vol = 0.0
+
+    last_price = ticker.get('last') or ticker.get('close')
+    try:
+        last_price = float(last_price) if last_price is not None else 0.0
+    except (ValueError, TypeError):
+        last_price = 0.0
+
+    volume_48h = quote_vol if quote_vol > 0 else (base_vol * last_price)
 
     # 2. Spread
     spread_pct = 0.5
-    if ticker.get('ask') and ticker.get('bid') and ticker['bid'] > 0:
-        spread = ticker['ask'] - ticker['bid']
-        spread_pct = (spread / ticker['bid']) * 100
+    ask_price = ticker.get('ask')
+    bid_price = ticker.get('bid')
+    if ask_price is not None and bid_price is not None and bid_price > 0:
+        spread = ask_price - bid_price
+        spread_pct = (spread / bid_price) * 100
 
     # 3. Volatility
     volatility_pct = 0.05
