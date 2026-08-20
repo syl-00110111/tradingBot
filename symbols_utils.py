@@ -150,7 +150,7 @@ def evaluate_scoring(chars: dict, config: Optional[dict] = None) -> tuple:
         score -= 1
         reasons.append("Inactive")
 
-    if score > 0:
+    if score >= -1:
         return True, reasons
     else:
         return False, reasons
