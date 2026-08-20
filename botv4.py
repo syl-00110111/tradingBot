@@ -820,7 +820,8 @@ if __name__ == '__main__':
                     base_assets=baseAssets,
                     max_num_pairs=maxNumPairs,
                     mini_count=miniCount,
-                    console=console
+                    console=console,
+                    exchange=exchange
                 )
                 redlist = load_redlist()
                 # durant la maintenance ou ailleurs, ne pas éliminer de paire dont l'asset base se trouve en balance et > min_amount.
