@@ -397,15 +397,6 @@ def computeSymbols(
         except Exception:
             existing_symbols = set()
 
-        _g = {'id': []}
-        for _v in _volumes:
-            if isinstance(_v, dict):
-                tpm = _v.get('trades_per_minute')
-                if tpm is None:
-                    tpm = _v.get('trades_count', 0)
-                if tpm >= mini_count:
-                    _g['id'].append(_v.get('id'))
-
         sell_candidates = []
         volume_candidates = []
         for _m in _markets.items():
@@ -420,6 +411,8 @@ def computeSymbols(
             ]
             if (_m[1].get('base') not in forbid_assets) and (_m[1].get('quote') not in forbid_assets):
                 if (_m[1].get('quote') in base_assets):
+                    is_optimal = True
+                    reasons = []
                     if exchange is not None:
                         is_optimal, reasons = get_only_optimal(exchange, _a[0], config=config, volumes_file=volumes_file)
                         if not is_optimal:
@@ -430,7 +423,7 @@ def computeSymbols(
                                 print(msg_opt)
                             continue
 
-                    if (_m[1].get('id') in _g.get('id')):
+                    if is_optimal:
                         volume_candidates.append(_a)
                         existing_symbols.add(str(_a[0]).upper())
                         msg_add2 = f"volume add: {_a[0]}"

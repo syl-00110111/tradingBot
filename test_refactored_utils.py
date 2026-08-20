@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 import os
 import json
+import time
 import shutil
 
 import market_utils
@@ -247,9 +248,17 @@ class TestRefactoredUtils(unittest.TestCase):
                 "precision": {"price": 0.01, "amount": 0.01}
             }
         }
+        now_ts = int(time.time())
         volumes_data = [
-            {"symbol": "BTC/USD", "id": "BTCUSD", "trades_count": 10, "timestamp": 1600000000}
+            {"symbol": "BTC/USD", "id": "BTCUSD", "timestamp": now_ts, "volume_48h": 10, "spread_pct": 1.0, "volatility_pct": 0.2, "trades_per_minute": 0}
         ]
+
+        mock_exchange = MagicMock()
+        def mock_fetch_ticker(sym):
+            return {'quoteVolume': 10, 'ask': 100.00, 'bid': 80.00, 'last': 100.00}
+        mock_exchange.fetch_ticker.side_effect = mock_fetch_ticker
+        mock_exchange.fetch_ohlcv.return_value = [[1000, 100, 101, 99, 100, 10]]
+        mock_exchange.fetch_trades.return_value = []
 
         with open(self.test_markets_file, "w") as f:
             json.dump(markets_data, f)
@@ -271,7 +280,8 @@ class TestRefactoredUtils(unittest.TestCase):
             max_num_pairs=5,
             mini_count=100, # trades_count is 10, so it's not a volume candidate
             markets_file=self.test_markets_file,
-            volumes_file=self.test_volumes_file
+            volumes_file=self.test_volumes_file,
+            exchange=mock_exchange
         )
 
         # BTC/USD should NOT be in symbols because its base balance is < min_amount
