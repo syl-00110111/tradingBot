@@ -766,6 +766,36 @@ class TestBotV4Features(unittest.TestCase):
             if os.path.exists(vol_file):
                 os.remove(vol_file)
 
+    def test_invalid_arguments_pause_one_week(self):
+        pause_file = 'test_pause_file.json'
+        if os.path.exists(pause_file):
+            os.remove(pause_file)
+
+        try:
+            paused_for_buy = {}
+            mock_exchange = MagicMock()
+            mock_exchange.rateLimit = 100
+            mock_exchange.fetch_ohlcv.side_effect = Exception('kraken {"error":["EGeneral:Invalid arguments"]}')
+
+            import market_utils
+            # Call market_utils.fetch_ohlcv_data
+            df = market_utils.fetch_ohlcv_data(
+                mock_exchange, 'EURRUSD', 'EURR/USD',
+                pausedForBuy=paused_for_buy, PAUSE_FILE=pause_file
+            )
+
+            self.assertIn('EURR/USD', paused_for_buy)
+            expected_pause = 7 * 24 * 3600
+            actual_pause = paused_for_buy['EURR/USD'] - int(time.time())
+            # Check pause duration is approximately 7 days (604800s +- 10s)
+            self.assertAlmostEqual(actual_pause, expected_pause, delta=10)
+
+        finally:
+            if os.path.exists(pause_file):
+                os.remove(pause_file)
+            if os.path.exists('ohlcv_data_EURRUSD_1m.json'):
+                os.remove('ohlcv_data_EURRUSD_1m.json')
+
     def test_scan_market_max_uncached_evals(self):
         vol_file = 'test_volumes_uncached.json'
         if os.path.exists(vol_file):
