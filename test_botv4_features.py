@@ -766,6 +766,40 @@ class TestBotV4Features(unittest.TestCase):
             if os.path.exists(vol_file):
                 os.remove(vol_file)
 
+    def test_scan_market_max_uncached_evals(self):
+        vol_file = 'test_volumes_uncached.json'
+        if os.path.exists(vol_file):
+            os.remove(vol_file)
+
+        try:
+            exchange = MagicMock()
+            markets = {}
+            for i in range(10):
+                sym = f"PAIR{i}/USD"
+                markets[sym] = {
+                    'symbol': sym, 'id': f"PAIR{i}USD", 'base': f"PAIR{i}", 'quote': 'USD',
+                    'limits': {'amount': {'min': 1.0}}, 'precision': {'price': 0.01, 'amount': 0.01}
+                }
+
+            forbid_assets = []
+            base_assets = ['USD']
+            mini_count = 400
+            available_pairs = []
+
+            with patch('symbols_utils.get_only_optimal', return_value=(True, [])) as mock_get_optimal:
+                botv4.scan_market_and_add_pairs_for_quote(
+                    'USD', exchange, markets, forbid_assets, base_assets, mini_count, available_pairs,
+                    max_uncached_evals=3, volumes_file=vol_file
+                )
+
+                # Expect get_only_optimal to be called exactly 3 times due to max_uncached_evals=3
+                self.assertEqual(mock_get_optimal.call_count, 3)
+                self.assertEqual(len(available_pairs), 3)
+
+        finally:
+            if os.path.exists(vol_file):
+                os.remove(vol_file)
+
     def test_fetch_symbol_characteristics_none_ticker_values(self):
         mock_exchange = MagicMock()
         mock_exchange.fetch_ticker.return_value = {

@@ -111,10 +111,11 @@ with console.status("Bot init. Please wait some time, or expect a random error i
             return float(df_candles_1m['close'].mean())
         return None
 
-    def scan_market_and_add_pairs_for_quote(quote_asset, exchange, markets, forbid_assets, base_assets, mini_count, available_pairs, console=None):
+    def scan_market_and_add_pairs_for_quote(quote_asset, exchange, markets, forbid_assets, base_assets, mini_count, available_pairs, console=None, max_uncached_evals=5, volumes_file='volumes_trades_data.json'):
         """
         Scans the market for pairs compatible with quote_asset and adds them to available_pairs
         if they satisfy the standard conditions (e.g. not forbidden, trading count >= mini_count).
+        Limits uncached exchange API evaluation calls to max_uncached_evals per scan to avoid blocking trade execution.
         """
         try:
             msg = f"Starting market scan for compatible pairs with quote asset {quote_asset} (Driver)..."
@@ -124,45 +125,78 @@ with console.status("Bot init. Please wait some time, or expect a random error i
                 print(msg)
 
             added_pairs = []
-            # markets can be a dict or a list
             market_items = []
             if isinstance(markets, dict):
                 market_items = list(markets.values())
             elif isinstance(markets, list):
                 market_items = markets
 
+            # Load volumes cache to identify cached vs uncached symbols
+            cached_symbols = set()
+            now_minus_4h = int(time.time()) - (4 * 3600)
+            if os.path.exists(volumes_file):
+                try:
+                    with open(volumes_file, 'r') as f:
+                        _vdata = json.load(f)
+                    for _v in _vdata:
+                        if isinstance(_v, dict) and _v.get('symbol'):
+                            _ts = _v.get('timestamp')
+                            if _ts is not None and int(_ts) > now_minus_4h:
+                                cached_symbols.add(_v.get('symbol'))
+                except Exception:
+                    pass
+
+            uncached_eval_count = 0
+
             for m in market_items:
+                if not isinstance(m, dict):
+                    continue
                 m_symbol = m.get('symbol')
                 m_id = m.get('id')
                 m_base = m.get('base')
                 m_quote = m.get('quote')
 
+                if not m_symbol or not m_base or not m_quote:
+                    continue
+
                 # Standard conditions
                 if m_quote == quote_asset:
                     if m_base not in forbid_assets and m_quote not in forbid_assets:
+                        # Check if already in availablePairs
+                        already_exists = False
+                        for p in available_pairs:
+                            if isinstance(p, (list, tuple)) and len(p) > 0 and p[0] == m_symbol:
+                                already_exists = True
+                                break
+                            elif isinstance(p, str) and p == m_symbol:
+                                already_exists = True
+                                break
+                        if already_exists:
+                            continue
+
+                        # If pair is uncached and we hit max_uncached_evals limit, skip to avoid blocking execution
+                        is_cached = m_symbol in cached_symbols
+                        if not is_cached and uncached_eval_count >= max_uncached_evals:
+                            continue
+
+                        if not is_cached:
+                            uncached_eval_count += 1
+
                         is_opt = False
                         try:
-                            is_opt, _ = symbols_utils.get_only_optimal(exchange, m_symbol)
-                        except Exception:
+                            is_opt, _ = symbols_utils.get_only_optimal(exchange, m_symbol, volumes_file=volumes_file)
+                        except Exception as ex_opt:
+                            if console:
+                                console.print(f"[Driver] Error evaluating optimal for {m_symbol}: {ex_opt}")
                             is_opt = False
 
                         if is_opt:
-                            # Check if already in availablePairs
-                            already_exists = False
-                            for p in available_pairs:
-                                if isinstance(p, (list, tuple)) and len(p) > 0 and p[0] == m_symbol:
-                                    already_exists = True
-                                    break
-                                elif isinstance(p, str) and p == m_symbol:
-                                    already_exists = True
-                                    break
-                            if not already_exists:
-                                min_amount = m.get('limits', {}).get('amount', {}).get('min')
-                                price_precision = m.get('precision', {}).get('price')
-                                amount_precision = m.get('precision', {}).get('amount')
-                                pair_info = [m_symbol, m_id, m_base, m_quote, min_amount, price_precision, amount_precision]
-                                available_pairs.append(pair_info)
-                                added_pairs.append(m_symbol)
+                            min_amount = m.get('limits', {}).get('amount', {}).get('min')
+                            price_precision = m.get('precision', {}).get('price')
+                            amount_precision = m.get('precision', {}).get('amount')
+                            pair_info = [m_symbol, m_id, m_base, m_quote, min_amount, price_precision, amount_precision]
+                            available_pairs.append(pair_info)
+                            added_pairs.append(m_symbol)
 
             if added_pairs:
                 msg = f"[Driver] Added {len(added_pairs)} compatible pairs with quote {quote_asset} to tracked pairs: {', '.join(added_pairs)}"
