@@ -203,6 +203,23 @@ def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optiona
                     console.print(msg_warn3)
                 else:
                     print(msg_warn3)
+                err_str = str(e).lower()
+                if 'invalid arguments' in err_str:
+                    try:
+                        expiry_ts = int(time.time()) + (7 * 24 * 3600)
+                        pausedForBuy[symbol] = expiry_ts
+                        try:
+                            safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                        except Exception:
+                            with open(PAUSE_FILE, 'w') as f:
+                                json.dump(pausedForBuy, f)
+                        msg_p = f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to invalid arguments error: {e}"
+                        if console:
+                            console.print(msg_p)
+                        else:
+                            print(msg_p)
+                    except Exception as ex_p:
+                        log_exception(ex_p, f"fetch_ohlcv_data pause {symbol}")
                 try:
                     time.sleep(rate_limit_ms / 1000)
                     if limit is not None:
@@ -215,6 +232,18 @@ def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optiona
                         console.print(msg_fail)
                     else:
                         print(msg_fail)
+                    err_str2 = str(e2).lower()
+                    if 'invalid arguments' in err_str2:
+                        try:
+                            expiry_ts = int(time.time()) + (7 * 24 * 3600)
+                            pausedForBuy[symbol] = expiry_ts
+                            try:
+                                safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                            except Exception:
+                                with open(PAUSE_FILE, 'w') as f:
+                                    json.dump(pausedForBuy, f)
+                        except Exception as ex_p2:
+                            log_exception(ex_p2, f"fetch_ohlcv_data fallback pause {symbol}")
                     data = []
     # sinon si le fichier n'existe pas
     else:
@@ -229,6 +258,23 @@ def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optiona
                 console.print(msg_warn4)
             else:
                 print(msg_warn4)
+            err_str = str(e).lower()
+            if 'invalid arguments' in err_str:
+                try:
+                    expiry_ts = int(time.time()) + (7 * 24 * 3600)
+                    pausedForBuy[symbol] = expiry_ts
+                    try:
+                        safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                    except Exception:
+                        with open(PAUSE_FILE, 'w') as f:
+                            json.dump(pausedForBuy, f)
+                    msg_p = f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to invalid arguments error: {e}"
+                    if console:
+                        console.print(msg_p)
+                    else:
+                        print(msg_p)
+                except Exception as ex_p:
+                    log_exception(ex_p, f"fetch_ohlcv_data initial pause {symbol}")
             data = []
         if data is None:
             data = []
@@ -258,20 +304,24 @@ def fetch_ohlcv_data(exchange: Any, _id: str, symbol: str, pausedForBuy: Optiona
                 console.print(msg_warn5)
             else:
                 print(msg_warn5)
-        # pause buys for this symbol for 8 hours
+        # pause buys for this symbol for 8 hours if not already paused for longer (e.g. 1 week due to invalid arguments)
         try:
-            expiry_ts = int(time.time()) + 8 * 3600
-            pausedForBuy[symbol] = expiry_ts
-            try:
-                safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
-            except Exception:
-                with open(PAUSE_FILE, 'w') as f:
-                    json.dump(pausedForBuy, f)
-            msg_pause = f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to empty OHLCV fetch"
-            if console:
-                console.print(msg_pause)
-            else:
-                print(msg_pause)
+            now_ts = int(time.time())
+            existing_expiry = pausedForBuy.get(symbol, 0) if isinstance(pausedForBuy, dict) else 0
+            if existing_expiry <= now_ts + 8 * 3600:
+                expiry_ts = now_ts + 8 * 3600
+                if pausedForBuy is not None and isinstance(pausedForBuy, dict):
+                    pausedForBuy[symbol] = expiry_ts
+                    try:
+                        safe_json.atomic_write_json(PAUSE_FILE, pausedForBuy, backup=True)
+                    except Exception:
+                        with open(PAUSE_FILE, 'w') as f:
+                            json.dump(pausedForBuy, f)
+                msg_pause = f"Paused buys for {symbol} until {datetime.fromtimestamp(expiry_ts)} due to empty OHLCV fetch"
+                if console:
+                    console.print(msg_pause)
+                else:
+                    print(msg_pause)
         except Exception as e:
             msg_fail2 = f"Failed to persist pausedForBuy for {symbol}: {e}"
             if console:

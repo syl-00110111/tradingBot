@@ -1292,12 +1292,14 @@ if __name__ == '__main__':
                                                         console.print(f"Plot failed for BUY {symbol}: {e}")
                                         except Exception as e:
                                             console.print(f"Buy order failed for {symbol}: {e}")
-                                            # detect specific errors and pause buys for 2 hours for this symbol
+                                            # detect specific errors and pause buys for this symbol
                                             err = str(e).lower()
                                             expiry_ts = None
                                             if ('invalid permissions' in err):
                                                 expiry_ts = int(time.time()) + (366 * 24 * 3600)
-                                            elif ('insufficient funds' in err) or ('minimum' in err and 'not met' in err) or ('invalid arguments' in err and 'volume' in err) or ('must be greater than minimum' in err):
+                                            elif ('invalid arguments' in err):
+                                                expiry_ts = int(time.time()) + (7 * 24 * 3600)
+                                            elif ('insufficient funds' in err) or ('minimum' in err and 'not met' in err) or ('must be greater than minimum' in err):
                                                 expiry_ts = int(time.time()) + (4 * 3600)
 
                                             if expiry_ts is not None:
