@@ -6,7 +6,7 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ## 1. Prohibited Assets Configuration
 - **Location**: `botv5/src/config.rs` (`default_forbid_assets()`)
-- **Prohibited Assets**: `["AKE", "ALLO", "USDS", "USDT", "WEMIX", "XMR"]`
+- **Prohibited Assets**: `["AKE", "ALLO", "USDS", "USDT", "VELVET", "WEMIX", "XMR"]`
 - **Behavior**: Any pair whose base or quote asset is in `forbid_assets` is strictly filtered out prior to candle fetching or order placement.
 
 ---
@@ -22,11 +22,25 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 3. Location & Correspondence of Monte Carlo Engine
+## 3. Direct REST Exchange Client Calls
+- **Location**: `botv5/src/exchange.rs` (`GenericExchange`)
+- **Public REST Endpoints**:
+  - `fetch_ohlcv`: Queries `/0/public/OHLC?pair=...` with rate limiting.
+  - `fetch_ticker`: Queries `/0/public/Ticker?pair=...` with rate limiting.
+  - `fetch_order_book`: Queries `/0/public/Depth?pair=...` with rate limiting.
+- **Authenticated REST Endpoints (HMAC-SHA512 Signed)**:
+  - `fetch_balance`: Queries `/0/private/Balance` with HMAC-SHA512 authentication.
+  - `fetch_open_orders`: Queries `/0/private/OpenOrders` with HMAC-SHA512 authentication.
+  - `create_limit_buy` / `create_limit_sell`: Queries `/0/private/AddOrder` with HMAC-SHA512 authentication.
+  - `cancel_order`: Queries `/0/private/CancelOrder` with HMAC-SHA512 authentication.
+
+---
+
+## 4. Location & Correspondence of Monte Carlo Engine
 - **Python counterpart**: `monte_carlo2.py:MonteCarloEngine`
 - **Rust location**: `botv5/src/monte_carlo.rs` (`MonteCarloEngine`)
 - **Algorithm & Correspondence**:
-  - **Path Generation (`simulate_paths` / `estimate_hit_probability`)**: Implements Geometric Brownian Motion (GBM) trajectories:
+  - **Path Generation (`simulate_paths` / `estimate_hit_probability`)**: Implements Geometric Brownian Motion (GBM) trajectories with Box-Muller normal sampling:
     $$\Delta S = S_t \cdot (\mu \cdot \Delta t + \sigma \cdot \epsilon \sqrt{\Delta t})$$
   - Multi-threaded simulation workers execute parallel path iterations using `Rayon`.
   - `estimate_hit_probability` checks whether simulated paths cross target buy (`below`) or sell (`above`) price limits.
@@ -34,16 +48,16 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 4. Location of Strategy Calculations
+## 5. Location of Strategy Calculations
 - **Location**: `botv5/src/strategy.rs` (`StrategyAggregator::aggregate`)
 - **Intrinsic Characteristics**:
-  - Technical indicator calculations (SMA, EMA, ADX, non-repetition window calibration) are computed in `botv5/src/indicators.rs` (`TechnicalAnalysis`).
+  - Technical indicator calculations (SMA, EMA, RSI, MACD, Bollinger Bands, ADX, non-repetition window calibration) are computed in `botv5/src/indicators.rs` (`TechnicalAnalysis`).
   - `StrategyAggregator::aggregate` processes active candle windows and parses strategy configurations from `Config` (covering trend, mean-reversion, breakout, scalping, proxy, and Monte Carlo strategy categories) to produce buy/sell signal multipliers.
   - Pair evaluations are parallelized across CPU cores using `Rayon` in `TradingEngine::evaluate_symbol_parallel`.
 
 ---
 
-## 5. Location of JSON File Management & Sub-Actions
+## 6. Location of JSON File Management & Sub-Actions
 - **Configuration Parsing**: `botv5/src/config.rs` (`Config::load_and_merge`) merges `config.default.json`, `config.json`, and `api.json`.
 - **Simulation State File Isolation**: `Config` dynamically resolves state file paths:
   - **Live Mode**: `redlisted_pairs.json`, `paused_for_buy.json`, `recorded_purchases.json`, `pending_orders_dump.json`.

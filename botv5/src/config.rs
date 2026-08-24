@@ -113,6 +113,7 @@ fn default_forbid_assets() -> Vec<String> {
         "ALLO".into(),
         "USDS".into(),
         "USDT".into(),
+        "VELVET".into(),
         "WEMIX".into(),
         "XMR".into(),
     ]
