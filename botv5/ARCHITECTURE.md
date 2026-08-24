@@ -1,6 +1,6 @@
 # 🏗 Botv5 Architecture & Clarification Guide
 
-This document clarifies the architecture and design decisions implemented in the Rust-based `botv5` rewrite.
+This document clarifies the architecture, algorithms, and design decisions implemented in the Rust-based `botv5` rewrite.
 
 ---
 
@@ -22,20 +22,24 @@ This document clarifies the architecture and design decisions implemented in the
 
 ---
 
-## 3. Location of Strategy Calculations
-- **Location**: `botv5/src/strategy.rs` (`StrategyAggregator::aggregate`)
-- **Intrinsic Characteristics**:
-  - Technical indicator calculations (SMA, ADX, non-repetition window calibration) are computed in `botv5/src/indicators.rs` (`TechnicalAnalysis`).
-  - `StrategyAggregator::aggregate` processes active candle windows and parses strategy configurations from `Config` (covering trend, mean-reversion, breakout, scalping, proxy, and Monte Carlo strategy categories) to produce buy/sell signal multipliers.
-  - Pair evaluations are parallelized across CPU cores using `Rayon` in `TradingEngine::evaluate_symbol_parallel`.
+## 3. Location & Correspondence of Monte Carlo Engine
+- **Python counterpart**: `monte_carlo2.py:MonteCarloEngine`
+- **Rust location**: `botv5/src/monte_carlo.rs` (`MonteCarloEngine`)
+- **Algorithm & Correspondence**:
+  - **Path Generation (`simulate_paths` / `estimate_hit_probability`)**: Implements Geometric Brownian Motion (GBM) trajectories:
+    $$\Delta S = S_t \cdot (\mu \cdot \Delta t + \sigma \cdot \epsilon \sqrt{\Delta t})$$
+  - Multi-threaded simulation workers execute parallel path iterations using `Rayon`.
+  - `estimate_hit_probability` checks whether simulated paths cross target buy (`below`) or sell (`above`) price limits.
+  - `validate_strategy` computes the probability of price exceeding target profit bounds (e.g. 0.15% profit threshold) to derive strategy confidence scaling factors.
 
 ---
 
-## 4. Location of Monte Carlo Engine
-- **Location**: `botv5/src/monte_carlo.rs` (`MonteCarloEngine`)
-- **Implementation**:
-  - Multi-threaded probability estimation (`estimate_hit_probability`) using `Rayon` thread pools to run parallel Monte Carlo path simulations.
-  - Strategy validation scoring (`validate_strategy`) used to adjust buy/sell target price multipliers.
+## 4. Location of Strategy Calculations
+- **Location**: `botv5/src/strategy.rs` (`StrategyAggregator::aggregate`)
+- **Intrinsic Characteristics**:
+  - Technical indicator calculations (SMA, EMA, ADX, non-repetition window calibration) are computed in `botv5/src/indicators.rs` (`TechnicalAnalysis`).
+  - `StrategyAggregator::aggregate` processes active candle windows and parses strategy configurations from `Config` (covering trend, mean-reversion, breakout, scalping, proxy, and Monte Carlo strategy categories) to produce buy/sell signal multipliers.
+  - Pair evaluations are parallelized across CPU cores using `Rayon` in `TradingEngine::evaluate_symbol_parallel`.
 
 ---
 

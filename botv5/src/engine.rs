@@ -88,7 +88,35 @@ impl TradingEngine {
         (score >= -1, reasons)
     }
 
-    pub fn filter_available_pairs(&self, sample_symbols: &[&'static str]) -> Vec<&'static str> {
+    pub fn compute_pair_characteristics(&self, candles: &[Candle]) -> PairCharacteristics {
+        if candles.is_empty() {
+            return PairCharacteristics {
+                volume_48h: 50000.0,
+                spread_pct: 0.005,
+                volatility_pct: 0.03,
+                trades_per_minute: 10.0,
+            };
+        }
+
+        let volume_48h: f64 = candles.iter().map(|c| c.volume * c.close).sum();
+        let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        let min_close = closes.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let max_close = closes.iter().fold(f64::MIN, |a, &b| a.max(b));
+        let volatility_pct = if min_close > 0.0 { (max_close - min_close) / min_close } else { 0.03 };
+
+        let last_candle = candles.last().unwrap();
+        let spread_pct = if last_candle.close > 0.0 { (last_candle.high - last_candle.low) / last_candle.close } else { 0.005 };
+        let trades_per_minute = (candles.len() as f64) / 60.0.max(1.0);
+
+        PairCharacteristics {
+            volume_48h,
+            spread_pct,
+            volatility_pct,
+            trades_per_minute,
+        }
+    }
+
+    pub fn filter_available_pairs(&self, sample_symbols: &[&'static str], pair_candles: &HashMap<&'static str, Vec<Candle>>) -> Vec<&'static str> {
         sample_symbols
             .iter()
             .copied()
@@ -97,13 +125,9 @@ impl TradingEngine {
                 !self.config.forbid_assets.contains(&base.to_string())
             })
             .filter(|sym| {
-                let default_chars = PairCharacteristics {
-                    volume_48h: 50000.0,
-                    spread_pct: 0.005,
-                    volatility_pct: 0.03,
-                    trades_per_minute: 10.0,
-                };
-                let (optimal, _) = self.evaluate_pair_scoring(&default_chars);
+                let candles = pair_candles.get(sym).cloned().unwrap_or_default();
+                let chars = self.compute_pair_characteristics(&candles);
+                let (optimal, _) = self.evaluate_pair_scoring(&chars);
                 optimal
             })
             .take(self.config.max_num_pairs)
@@ -174,16 +198,16 @@ impl TradingEngine {
         info!("Fetched balance response: {:?}", balance);
 
         let raw_symbols = vec!["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD"];
-        let available_pairs = self.filter_available_pairs(&raw_symbols);
-
-        info!("Running trading loop for {} pairs...", available_pairs.len());
 
         let mut pair_candles = HashMap::new();
-        for &sym in &available_pairs {
+        for &sym in &raw_symbols {
             if let Ok(candles) = self.fetch_pair_candles(sym).await {
                 pair_candles.insert(sym, candles);
             }
         }
+
+        let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles);
+        info!("Running trading loop for {} pairs...", available_pairs.len());
 
         // Parallel symbol evaluation across CPU cores using Rayon
         let evaluation_results: Vec<(&'static str, Option<(Signal, f64, f64)>)> = available_pairs
