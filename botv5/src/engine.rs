@@ -18,6 +18,14 @@ pub struct RecordedPurchase {
     pub price: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PairCharacteristics {
+    pub volume_48h: f64,
+    pub spread_pct: f64,
+    pub volatility_pct: f64,
+    pub trades_per_minute: f64,
+}
+
 pub struct TradingEngine {
     pub config: Config,
     pub exchange: Box<dyn ExchangeClient + Send + Sync>,
@@ -41,6 +49,45 @@ impl TradingEngine {
         }
     }
 
+    pub fn evaluate_pair_scoring(&self, chars: &PairCharacteristics) -> (bool, Vec<&'static str>) {
+        let mut score = 0;
+        let mut reasons = Vec::new();
+
+        if chars.volume_48h > 120000.0 {
+            score += 1;
+            reasons.push("High Vol");
+        } else if chars.volume_48h < 1000.0 {
+            score -= 1;
+            reasons.push("Low Vol");
+        }
+
+        if chars.spread_pct < 0.001 {
+            score += 1;
+            reasons.push("Tight Spread");
+        } else if chars.spread_pct > 0.04 {
+            score -= 1;
+            reasons.push("Wide Spread");
+        }
+
+        if chars.volatility_pct < 0.01 {
+            score += 1;
+            reasons.push("Stable");
+        } else if chars.volatility_pct > 0.1 {
+            score -= 1;
+            reasons.push("Volatile");
+        }
+
+        if chars.trades_per_minute > 40.0 {
+            score += 1;
+            reasons.push("Active");
+        } else if chars.trades_per_minute < 1.0 {
+            score -= 1;
+            reasons.push("Inactive");
+        }
+
+        (score >= -1, reasons)
+    }
+
     pub fn filter_available_pairs(&self, sample_symbols: &[&'static str]) -> Vec<&'static str> {
         sample_symbols
             .iter()
@@ -48,6 +95,16 @@ impl TradingEngine {
             .filter(|sym| {
                 let base = sym.split('/').next().unwrap_or(sym);
                 !self.config.forbid_assets.contains(&base.to_string())
+            })
+            .filter(|sym| {
+                let default_chars = PairCharacteristics {
+                    volume_48h: 50000.0,
+                    spread_pct: 0.005,
+                    volatility_pct: 0.03,
+                    trades_per_minute: 10.0,
+                };
+                let (optimal, _) = self.evaluate_pair_scoring(&default_chars);
+                optimal
             })
             .take(self.config.max_num_pairs)
             .collect()
