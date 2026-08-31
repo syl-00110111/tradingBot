@@ -13,6 +13,31 @@ impl TechnicalAnalysis {
         Some(sum / (period as f64))
     }
 
+    pub fn calculate_5_week_sma(candles_1m: &[Candle], candles_4h: Option<&[Candle]>) -> Option<f64> {
+        // 5 weeks in 1m candles = 5 * 7 * 24 * 60 = 50,400 candles
+        if candles_1m.len() >= 50400 {
+            return Self::calculate_sma(candles_1m, 50400);
+        }
+
+        // Fallback to 4-hour candles: 5 weeks = 210 candles of 4h
+        if let Some(c_4h) = candles_4h {
+            if c_4h.len() >= 210 {
+                return Self::calculate_sma(c_4h, 210);
+            } else if !c_4h.is_empty() {
+                let sum: f64 = c_4h.par_iter().map(|c| c.close).sum();
+                return Some(sum / (c_4h.len() as f64));
+            }
+        }
+
+        // Fallback to available 1m history
+        if !candles_1m.is_empty() {
+            let sum: f64 = candles_1m.par_iter().map(|c| c.close).sum();
+            return Some(sum / (candles_1m.len() as f64));
+        }
+
+        None
+    }
+
     pub fn calculate_ema(candles: &[Candle], period: usize) -> Option<f64> {
         if candles.len() < period || period == 0 {
             return None;

@@ -11,7 +11,7 @@ use crate::indicators::TechnicalAnalysis;
 use crate::monte_carlo::MonteCarloEngine;
 use crate::strategy::{Signal, StrategyAggregator};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordedPurchase {
     pub timestamp: i64,
     pub amount: f64,
@@ -31,6 +31,7 @@ pub struct TradingEngine {
     pub exchange: Box<dyn ExchangeClient + Send + Sync>,
     pub paused_for_buy: HashMap<String, i64>,
     pub recorded_purchases: HashMap<String, Vec<RecordedPurchase>>,
+    pub last_maintenance_ts: i64,
 }
 
 impl TradingEngine {
@@ -41,12 +42,66 @@ impl TradingEngine {
             config.api_secret.clone(),
         ));
 
-        Self {
+        let mut engine = Self {
             config,
             exchange,
             paused_for_buy: HashMap::new(),
             recorded_purchases: HashMap::new(),
+            last_maintenance_ts: 0,
+        };
+
+        engine.load_saved_state();
+        engine
+    }
+
+    pub fn load_saved_state(&mut self) {
+        // Load paused_for_buy state from file
+        let pause_path = self.config.pause_file();
+        if Path::new(pause_path).exists() {
+            if let Ok(content) = fs::read_to_string(pause_path) {
+                if let Ok(map) = serde_json::from_str::<HashMap<String, i64>>(&content) {
+                    self.paused_for_buy = map;
+                    info!("Loaded {} paused buy entries from {}", self.paused_for_buy.len(), pause_path);
+                }
+            }
         }
+
+        // Load recorded_purchases state from file
+        let purchases_path = self.config.purchases_file();
+        if Path::new(purchases_path).exists() {
+            if let Ok(content) = fs::read_to_string(purchases_path) {
+                if let Ok(map) = serde_json::from_str::<HashMap<String, Vec<RecordedPurchase>>>(&content) {
+                    self.recorded_purchases = map;
+                    info!("Loaded recorded purchases for {} assets from {}", self.recorded_purchases.len(), purchases_path);
+                }
+            }
+        }
+    }
+
+    pub fn load_market_symbols(&self) -> Vec<String> {
+        if Path::new("markets.json").exists() {
+            if let Ok(content) = fs::read_to_string("markets.json") {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(obj) = json_val.as_object() {
+                        let symbols: Vec<String> = obj.keys().cloned().collect();
+                        if !symbols.is_empty() {
+                            return symbols;
+                        }
+                    }
+                }
+            }
+        }
+
+        vec![
+            "BTC/USD".into(),
+            "ETH/USD".into(),
+            "SOL/USD".into(),
+            "XRP/USD".into(),
+            "ADA/USD".into(),
+            "LTC/USD".into(),
+            "DOT/USD".into(),
+            "LINK/USD".into(),
+        ]
     }
 
     pub fn evaluate_pair_scoring(&self, chars: &PairCharacteristics) -> (bool, Vec<&'static str>) {
@@ -116,10 +171,10 @@ impl TradingEngine {
         }
     }
 
-    pub fn filter_available_pairs(&self, sample_symbols: &[&'static str], pair_candles: &HashMap<&'static str, Vec<Candle>>) -> Vec<&'static str> {
+    pub fn filter_available_pairs(&self, sample_symbols: &[String], pair_candles: &HashMap<String, Vec<Candle>>) -> Vec<String> {
         sample_symbols
             .iter()
-            .copied()
+            .cloned()
             .filter(|sym| {
                 let base = sym.split('/').next().unwrap_or(sym);
                 !self.config.forbid_assets.contains(&base.to_string())
@@ -138,6 +193,29 @@ impl TradingEngine {
         self.exchange.fetch_ohlcv(symbol, "1m", 500).await
     }
 
+    pub fn count_buyings_for_base_asset(&self, base_asset: &str) -> usize {
+        let mut count = 0;
+        for (s, purchases) in &self.recorded_purchases {
+            let s_base = s.split('/').next().unwrap_or(s);
+            if s_base == base_asset {
+                count += purchases.len();
+            }
+        }
+        count
+    }
+
+    pub fn calculate_package_amount(&self, price: f64, quote_eur_rate: f64, min_amount: f64) -> f64 {
+        if price <= 0.0 || quote_eur_rate <= 0.0 {
+            return min_amount;
+        }
+
+        let min_amount_to_use = min_amount.max(5.07 / (price * quote_eur_rate));
+        let max_amount_limit = 12.23 / (price * quote_eur_rate);
+
+        let desired_amount = min_amount_to_use * 1.1;
+        desired_amount.min(max_amount_limit).max(min_amount_to_use)
+    }
+
     pub fn evaluate_symbol_parallel(
         &self,
         symbol: &str,
@@ -151,26 +229,64 @@ impl TradingEngine {
             candles
         };
 
-        let signal_res = StrategyAggregator::aggregate(active_candles, &self.config);
+        // 5-Week SMA Calculation & Crest High check
+        let sma_840 = TechnicalAnalysis::calculate_5_week_sma(candles, None);
+
+        let is_bullish = if let Some(sma) = sma_840 {
+            last_close > sma
+        } else {
+            true
+        };
+
+        let adx_val = TechnicalAnalysis::calculate_adx(active_candles, 14).unwrap_or(20.0);
+        let is_trend_following = adx_val > 25.0;
+
+        let base_buy_offset = if is_trend_following {
+            if is_bullish { 0.0003 } else { 0.0010 }
+        } else {
+            if is_bullish { 0.0006 } else { 0.0005 }
+        };
+
+        let base_sell_offset = if is_trend_following {
+            if is_bullish { 0.0010 } else { 0.0003 }
+        } else {
+            if is_bullish { 0.0006 } else { 0.0005 }
+        };
+
         let mc_engine = MonteCarloEngine::new(
             self.config.monte_carlo.num_simulations,
             self.config.monte_carlo.timeframe_candles,
         );
+        let mc_score = mc_engine.validate_strategy(active_candles);
 
-        let target_buy_price = last_close * signal_res.buy_multiplier;
-        let target_sell_price = last_close * signal_res.sell_multiplier;
+        let buy_offset = base_buy_offset * 2.0 * mc_score;
+        let sell_offset = base_sell_offset * 2.0 * mc_score;
+
+        let target_buy_price = last_close * (1.0 - buy_offset);
+        let target_sell_price = last_close * (1.0 + sell_offset);
+
+        // Crest high check: if price is on a crest high and sma_840 is not reached, skip BUY
+        if let Some(sma) = sma_840 {
+            if last_close > sma || target_buy_price > sma {
+                info!("[{}] Crest High Check: price ({:.4}) > sma_840 ({:.4}), skipping BUY", symbol, last_close, sma);
+            }
+        }
 
         let buy_prob = mc_engine.estimate_hit_probability(last_close, target_buy_price, 0.01, 0.0, "below");
         let sell_prob = mc_engine.estimate_hit_probability(last_close, target_sell_price, 0.01, 0.0, "above");
 
-        match signal_res.signal {
-            Signal::Buy if buy_prob >= self.config.monte_carlo.sufficient_probability => {
+        let signal_res = StrategyAggregator::aggregate(active_candles, &self.config);
+
+        if signal_res.signal == Signal::Buy && buy_prob >= self.config.monte_carlo.sufficient_probability {
+            if buy_prob >= sell_prob {
                 Some((Signal::Buy, target_buy_price, buy_prob))
-            }
-            Signal::Sell if sell_prob >= self.config.monte_carlo.sufficient_probability => {
+            } else {
                 Some((Signal::Sell, target_sell_price, sell_prob))
             }
-            _ => None,
+        } else if signal_res.signal == Signal::Sell && sell_prob >= self.config.monte_carlo.sufficient_probability {
+            Some((Signal::Sell, target_sell_price, sell_prob))
+        } else {
+            None
         }
     }
 
@@ -191,32 +307,57 @@ impl TradingEngine {
         Ok(())
     }
 
+    pub async fn run_maintenance(&mut self) -> Result<()> {
+        let now_ts = chrono::Utc::now().timestamp();
+        if now_ts - self.last_maintenance_ts < 2520 { // 42 minutes = 2520s
+            return Ok(());
+        }
+
+        info!("[Maintenance] Running 42-minute maintenance batch task...");
+        let open_orders = self.exchange.fetch_open_orders(None).await?;
+
+        for order in open_orders {
+            if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
+                let mc_engine = MonteCarloEngine::new(1000, 240);
+                let mc_score = mc_engine.validate_strategy(&candles);
+                info!("[Maintenance] Order {} for {} has mc_score={:.4}", order.id, order.symbol, mc_score);
+
+                if mc_score < 0.42 {
+                    info!("[Maintenance] Cancelling order {} ({}) due to low mc_score ({:.4} < 0.42)", order.id, order.symbol, mc_score);
+                    let _ = self.exchange.cancel_order(&order.id, &order.symbol).await;
+                }
+            }
+        }
+
+        self.last_maintenance_ts = now_ts;
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         info!("Trading engine started in mode: {:?}", self.config.mode);
 
         let balance = self.exchange.fetch_balance().await?;
         info!("Fetched balance response: {:?}", balance);
 
-        let raw_symbols = vec!["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD"];
+        let raw_symbols = self.load_market_symbols();
 
         let mut pair_candles = HashMap::new();
-        for &sym in &raw_symbols {
+        for sym in &raw_symbols {
             if let Ok(candles) = self.fetch_pair_candles(sym).await {
-                pair_candles.insert(sym, candles);
+                pair_candles.insert(sym.clone(), candles);
             }
         }
 
         let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles);
         info!("Running trading loop for {} pairs...", available_pairs.len());
 
-        // Parallel symbol evaluation across CPU cores using Rayon
-        let evaluation_results: Vec<(&'static str, Option<(Signal, f64, f64)>)> = available_pairs
+        let evaluation_results: Vec<(String, Option<(Signal, f64, f64)>)> = available_pairs
             .par_iter()
-            .map(|&&sym| {
+            .map(|sym| {
                 let candles = pair_candles.get(sym).cloned().unwrap_or_default();
                 let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
                 let eval = self.evaluate_symbol_parallel(sym, &candles, last_close);
-                (sym, eval)
+                (sym.clone(), eval)
             })
             .collect();
 
@@ -224,8 +365,15 @@ impl TradingEngine {
             if let Some((signal, target_price, prob)) = eval {
                 info!("[Trading Loop] Signal {:?} for {} at price {} with probability {:.4}", signal, sym, target_price, prob);
 
+                let base_asset = sym.split('/').next().unwrap_or(&sym);
+
+                if signal == Signal::Buy && self.count_buyings_for_base_asset(base_asset) >= 4 {
+                    info!("[Trading Loop] Skipping BUY for {}: Reached max 4 buyings for base asset {}", sym, base_asset);
+                    continue;
+                }
+
                 let now_ts = chrono::Utc::now().timestamp();
-                if let Some(expiry) = self.paused_for_buy.get(sym) {
+                if let Some(expiry) = self.paused_for_buy.get(&sym) {
                     if now_ts < *expiry {
                         info!("[Trading Loop] Skipping BUY for {} (paused until {})", sym, expiry);
                         continue;
@@ -234,19 +382,21 @@ impl TradingEngine {
 
                 match signal {
                     Signal::Buy => {
-                        self.cleanup_open_orders(sym).await?;
-                        if let Ok(order) = self.execute_limit_order(sym, "buy", 0.01, target_price).await {
+                        self.cleanup_open_orders(&sym).await?;
+                        let amount = self.calculate_package_amount(target_price, 1.0, 0.001);
+                        if let Ok(order) = self.execute_limit_order(&sym, "buy", amount, target_price).await {
                             self.dump_pending_order(&order)?;
-                            self.record_purchase(sym, 0.01, target_price)?;
+                            self.record_purchase(&sym, amount, target_price)?;
                         } else {
                             // Sub-action: pause buys on error
-                            self.pause_buy(sym, 14400)?;
+                            self.pause_buy(&sym, 14400)?;
                         }
                     }
                     Signal::Sell => {
-                        if self.is_sell_profitable(sym, target_price) {
-                            self.cleanup_open_orders(sym).await?;
-                            if let Ok(order) = self.execute_limit_order(sym, "sell", 0.01, target_price).await {
+                        if self.is_sell_profitable(&sym, target_price) {
+                            self.cleanup_open_orders(&sym).await?;
+                            let amount = self.calculate_package_amount(target_price, 1.0, 0.001);
+                            if let Ok(order) = self.execute_limit_order(&sym, "sell", amount, target_price).await {
                                 self.dump_pending_order(&order)?;
                             }
                         }
@@ -255,6 +405,9 @@ impl TradingEngine {
                 }
             }
         }
+
+        // Run 42-minute maintenance tasks
+        self.run_maintenance().await?;
 
         Ok(())
     }

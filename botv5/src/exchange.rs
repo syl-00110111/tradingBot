@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use base64::Engine;
 use hex;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -96,14 +97,19 @@ impl GenericExchange {
         hasher.update(post_data.as_bytes());
         let sha256_res = hasher.finalize();
 
-        let decoded_secret = hex::decode(&self.api_secret)?;
+        let mut mac_input = path.as_bytes().to_vec();
+        mac_input.extend_from_slice(&sha256_res);
+
+        let decoded_secret = base64::engine::general_purpose::STANDARD
+            .decode(&self.api_secret)
+            .or_else(|_| hex::decode(&self.api_secret))?;
+
         type HmacSha512 = Hmac<Sha512>;
         let mut mac = HmacSha512::new_from_slice(&decoded_secret)?;
-        mac.update(path.as_bytes());
-        mac.update(&sha256_res);
+        mac.update(&mac_input);
         let hmac_res = mac.finalize().into_bytes();
 
-        Ok(hex::encode(hmac_res))
+        Ok(base64::engine::general_purpose::STANDARD.encode(hmac_res))
     }
 
     pub async fn send_private_request(&self, path: &str, params: &mut Vec<(&str, String)>) -> Result<serde_json::Value> {
@@ -165,8 +171,8 @@ impl ExchangeClient for GenericExchange {
                 if let Some(result_obj) = json_res.get("result").and_then(|r| r.as_object()) {
                     for (_key, candles_val) in result_obj {
                         if let Some(candle_arr) = candles_val.as_array() {
-                            let mut candles = Vec::new();
-                            for c in candle_arr.iter().take(limit) {
+                            let mut raw_candles = Vec::new();
+                            for c in candle_arr {
                                 if let Some(arr) = c.as_array() {
                                     let ts = arr.get(0).and_then(|v| v.as_i64()).unwrap_or(0) * 1000;
                                     let open = arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
@@ -175,7 +181,7 @@ impl ExchangeClient for GenericExchange {
                                     let close = arr.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let volume = arr.get(6).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
-                                    candles.push(Candle {
+                                    raw_candles.push(Candle {
                                         timestamp: ts,
                                         open,
                                         high,
@@ -185,8 +191,10 @@ impl ExchangeClient for GenericExchange {
                                     });
                                 }
                             }
-                            if !candles.is_empty() {
-                                return Ok(candles);
+                            // Take the newest 'limit' candles (tail)
+                            if !raw_candles.is_empty() {
+                                let start_idx = if raw_candles.len() > limit { raw_candles.len() - limit } else { 0 };
+                                return Ok(raw_candles[start_idx..].to_vec());
                             }
                         }
                     }

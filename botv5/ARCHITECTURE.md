@@ -22,7 +22,31 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 3. Direct REST Exchange Client Calls
+## 3. 5-Week SMA & Crest High Check
+- **Location**: `botv5/src/indicators.rs` (`TechnicalAnalysis::calculate_5_week_sma`) and `botv5/src/engine.rs` (`TradingEngine::evaluate_symbol_parallel`)
+- **Calculation**: Computes 5-week SMA (`SMA_840`) using 50,400 candles of 1m timeframe or falling back to 210 candles of 4h timeframe.
+- **Crest High Check**: If `last_close > sma_840` or `target_buy_price > sma_840` (crest high), limit BUY orders are skipped or cancelled to prevent buying at local market peaks.
+
+---
+
+## 4. Regime Offsets, Package Sizing & Base Asset Purchase Limits
+- **Regime Offsets**: Detects trend (Bullish/Bearish via SMA_840) and regime (Trend Following vs Mean Reversion via ADX > 25) to scale price multipliers using Monte Carlo strategy scores (`buy_offset = base_buy_offset * 2 * mc_score`).
+- **Package Sizing**: Bounded transaction package sizing calculated between 5.07 EUR minimum required expense and 12.23 EUR maximum expense limit (`TradingEngine::calculate_package_amount`).
+- **Base Asset Purchase Limits**: Enforces a strict limit of maximum 4 active purchases per base asset across all pairs (`TradingEngine::count_buyings_for_base_asset`).
+
+---
+
+## 5. Periodic 42-Minute Maintenance Batch Task
+- **Location**: `botv5/src/engine.rs` (`TradingEngine::run_maintenance`)
+- **Routine**:
+  - Every 42 minutes (2,520 seconds), the engine fetches all open orders.
+  - Evaluates Monte Carlo score (`mc_score`) for each open order's symbol.
+  - Cancels open orders whose `mc_score < 0.42` to free up locked capital from deteriorating strategy setups.
+  - Re-evaluates redlisted pairs for fit against transaction cost thresholds.
+
+---
+
+## 6. Direct REST Exchange Client Calls
 - **Location**: `botv5/src/exchange.rs` (`GenericExchange`)
 - **Public REST Endpoints**:
   - `fetch_ohlcv`: Queries `/0/public/OHLC?pair=...` with rate limiting.
@@ -36,7 +60,7 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 4. Location & Correspondence of Monte Carlo Engine
+## 7. Location & Correspondence of Monte Carlo Engine
 - **Python counterpart**: `monte_carlo2.py:MonteCarloEngine`
 - **Rust location**: `botv5/src/monte_carlo.rs` (`MonteCarloEngine`)
 - **Algorithm & Correspondence**:
@@ -48,16 +72,7 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 5. Location of Strategy Calculations
-- **Location**: `botv5/src/strategy.rs` (`StrategyAggregator::aggregate`)
-- **Intrinsic Characteristics**:
-  - Technical indicator calculations (SMA, EMA, RSI, MACD, Bollinger Bands, ADX, non-repetition window calibration) are computed in `botv5/src/indicators.rs` (`TechnicalAnalysis`).
-  - `StrategyAggregator::aggregate` processes active candle windows and parses strategy configurations from `Config` (covering trend, mean-reversion, breakout, scalping, proxy, and Monte Carlo strategy categories) to produce buy/sell signal multipliers.
-  - Pair evaluations are parallelized across CPU cores using `Rayon` in `TradingEngine::evaluate_symbol_parallel`.
-
----
-
-## 6. Location of JSON File Management & Sub-Actions
+## 8. Location of JSON File Management & Sub-Actions
 - **Configuration Parsing**: `botv5/src/config.rs` (`Config::load_and_merge`) merges `config.default.json`, `config.json`, and `api.json`.
 - **Simulation State File Isolation**: `Config` dynamically resolves state file paths:
   - **Live Mode**: `redlisted_pairs.json`, `paused_for_buy.json`, `recorded_purchases.json`, `pending_orders_dump.json`.
