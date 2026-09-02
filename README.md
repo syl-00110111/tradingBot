@@ -4,6 +4,46 @@ A high-performance universal cryptocurrency trading bot written in Rust (`botv5`
 
 ---
 
+## ⚙️ Rust Installation Instructions
+
+Before building and running `botv5`, you need to install the Rust compiler (`rustc`) and package manager (`cargo`).
+
+### 1. Installing Rust
+
+#### **Linux & macOS**
+Open a terminal and run:
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+Follow the on-screen prompts (pressing `1` for standard installation). Once complete, reload your shell environment:
+```bash
+source "$HOME/.cargo/env"
+```
+
+#### **Windows**
+1. Download `rustup-init.exe` from the official site: [https://rustup.rs/](https://rustup.rs/)
+2. Run `rustup-init.exe` and follow the prompts.
+3. Ensure you have the **Visual Studio C++ Build Tools** installed if prompted by the installer.
+
+---
+
+### 2. Verifying Installation
+Verify that `rustc` and `cargo` are correctly installed and available in your PATH:
+```bash
+rustc --version
+cargo --version
+```
+
+---
+
+### 3. Updating Rust
+To update your Rust installation to the latest stable version at any time:
+```bash
+rustup update
+```
+
+---
+
 ## 🛠 Main Features
 
 ### ⚡ Performance & Acceleration
@@ -30,13 +70,7 @@ The Rust trading engine supports over 30 distinct trading strategy models catego
 
 ---
 
-## 🚀 Quick Start & Installation
-
-### Prerequisites
-- Install **Rust** toolchain (1.75+ recommended):
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
+## 🚀 Quick Start & Building
 
 ### Build
 Navigate to the `botv5` crate directory and compile:
