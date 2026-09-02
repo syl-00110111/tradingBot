@@ -96,7 +96,7 @@ impl TradingEngine {
 
     pub fn load_market_symbols(&self, balance: &HashMap<String, f64>) -> Vec<String> {
         let mut symbols = Vec::new();
-        let mut base_assets: Vec<String> = vec![
+        let base_assets: Vec<String> = vec![
             "USD".into(), "EUR".into(), "BTC".into(), "CHF".into(), "GBP".into(), "USDC".into(), "JPY".into(), "ETH".into(),
         ];
 
