@@ -3,9 +3,9 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::config::{Config, RunMode};
+use crate::config::Config;
 use crate::exchange::{Candle, ExchangeClient, GenericExchange, Order};
 use crate::indicators::TechnicalAnalysis;
 use crate::monte_carlo::MonteCarloEngine;
@@ -55,7 +55,6 @@ impl TradingEngine {
     }
 
     pub fn load_saved_state(&mut self) {
-        // Load paused_for_buy state from file
         let pause_path = self.config.pause_file();
         if Path::new(pause_path).exists() {
             if let Ok(content) = fs::read_to_string(pause_path) {
@@ -66,7 +65,6 @@ impl TradingEngine {
             }
         }
 
-        // Load recorded_purchases state from file
         let purchases_path = self.config.purchases_file();
         if Path::new(purchases_path).exists() {
             if let Ok(content) = fs::read_to_string(purchases_path) {
@@ -161,7 +159,7 @@ impl TradingEngine {
 
         let last_candle = candles.last().unwrap();
         let spread_pct = if last_candle.close > 0.0 { (last_candle.high - last_candle.low) / last_candle.close } else { 0.005 };
-        let trades_per_minute = (candles.len() as f64) / 60.0.max(1.0);
+        let trades_per_minute = (candles.len() as f64) / (60.0_f64).max(1.0);
 
         PairCharacteristics {
             volume_48h,
