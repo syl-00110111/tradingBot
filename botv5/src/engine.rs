@@ -34,6 +34,7 @@ pub struct TradingEngine {
     pub recorded_purchases: HashMap<String, Vec<RecordedPurchase>>,
     pub last_maintenance_ts: i64,
     pub previous_selected_pairs: Vec<String>,
+    pub previous_balance_map: HashMap<String, f64>,
 }
 
 impl TradingEngine {
@@ -51,6 +52,7 @@ impl TradingEngine {
             recorded_purchases: HashMap::new(),
             last_maintenance_ts: 0,
             previous_selected_pairs: Vec::new(),
+            previous_balance_map: HashMap::new(),
         };
 
         engine.load_saved_state();
@@ -59,21 +61,33 @@ impl TradingEngine {
 
     pub fn load_saved_state(&mut self) {
         let pause_path = self.config.pause_file();
-        if Path::new(pause_path).exists() {
-            if let Ok(content) = fs::read_to_string(pause_path) {
+        let actual_pause_file = if !Path::new(pause_path).exists() && self.config.mode == crate::config::RunMode::Simulation {
+            "paused_for_buy.json"
+        } else {
+            pause_path
+        };
+
+        if Path::new(actual_pause_file).exists() {
+            if let Ok(content) = fs::read_to_string(actual_pause_file) {
                 if let Ok(map) = serde_json::from_str::<HashMap<String, i64>>(&content) {
                     self.paused_for_buy = map;
-                    info!("Loaded {} paused buy entries from {}", self.paused_for_buy.len(), pause_path);
+                    info!("Loaded {} paused buy entries from {}", self.paused_for_buy.len(), actual_pause_file);
                 }
             }
         }
 
         let purchases_path = self.config.purchases_file();
-        if Path::new(purchases_path).exists() {
-            if let Ok(content) = fs::read_to_string(purchases_path) {
+        let actual_purchases_file = if !Path::new(purchases_path).exists() && self.config.mode == crate::config::RunMode::Simulation {
+            "recorded_purchases.json"
+        } else {
+            purchases_path
+        };
+
+        if Path::new(actual_purchases_file).exists() {
+            if let Ok(content) = fs::read_to_string(actual_purchases_file) {
                 if let Ok(map) = serde_json::from_str::<HashMap<String, Vec<RecordedPurchase>>>(&content) {
                     self.recorded_purchases = map;
-                    info!("Loaded recorded purchases for {} assets from {}", self.recorded_purchases.len(), purchases_path);
+                    info!("Loaded recorded purchases for {} assets from {}", self.recorded_purchases.len(), actual_purchases_file);
                 }
             }
         }
@@ -337,8 +351,10 @@ impl TradingEngine {
             }
         }
 
-        // 2. Fetch fresh candles from exchange
-        let fresh_candles = self.exchange.fetch_ohlcv(symbol, "1m", 500).await?;
+        let last_ts = cached_candles.last().map(|c| c.timestamp);
+
+        // 2. Fetch fresh candles from exchange differentially
+        let fresh_candles = self.exchange.fetch_ohlcv(symbol, "1m", 500, last_ts).await?;
 
         // 3. Merge cached and fresh candles based on timestamp
         let mut candle_map: HashMap<i64, Candle> = HashMap::new();
@@ -373,7 +389,9 @@ impl TradingEngine {
             }
         }
 
-        let fresh_candles = self.exchange.fetch_ohlcv(symbol, "4h", 276).await.unwrap_or_default();
+        let last_ts = cached_candles.last().map(|c| c.timestamp);
+
+        let fresh_candles = self.exchange.fetch_ohlcv(symbol, "4h", 276, last_ts).await.unwrap_or_default();
 
         let mut candle_map: HashMap<i64, Candle> = HashMap::new();
         for c in cached_candles {
@@ -480,13 +498,15 @@ impl TradingEngine {
 
         let signal_res = StrategyAggregator::aggregate(active_candles, &self.config);
 
-        if signal_res.signal == Signal::Buy && buy_prob >= self.config.monte_carlo.sufficient_probability {
-            if buy_prob >= sell_prob {
-                Some((Signal::Buy, target_buy_price, buy_prob))
-            } else {
-                Some((Signal::Sell, target_sell_price, sell_prob))
-            }
-        } else if signal_res.signal == Signal::Sell && sell_prob >= self.config.monte_carlo.sufficient_probability {
+        let required_prob = self.config.monte_carlo.sufficient_probability.min(0.50);
+
+        if signal_res.signal == Signal::Buy && buy_prob >= required_prob {
+            Some((Signal::Buy, target_buy_price, buy_prob))
+        } else if signal_res.signal == Signal::Sell && sell_prob >= required_prob {
+            Some((Signal::Sell, target_sell_price, sell_prob))
+        } else if signal_res.signal == Signal::Buy {
+            Some((Signal::Buy, target_buy_price, buy_prob))
+        } else if signal_res.signal == Signal::Sell {
             Some((Signal::Sell, target_sell_price, sell_prob))
         } else {
             None
@@ -552,28 +572,91 @@ impl TradingEngine {
                     } else {
                         0.0
                     };
-                    balance_map.insert(k.clone(), val);
+
+                    // Dust asset threshold filter (< 0.000001)
+                    if val >= 0.000001 {
+                        balance_map.insert(k.clone(), val);
+                    }
                 }
             }
 
-            let mut balance_entries: Vec<String> = balance_map
-                .iter()
-                .map(|(k, v)| format!("{}: {:.10}", k, v))
-                .collect();
-            balance_entries.sort();
-            info!("Fetched balance: {}", balance_entries.join(", "));
+            // Cache balance.json to disk for user monitoring
+            if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
+                let _ = fs::write("balance.json", json_str);
+            }
+
+            // Balance Differential Logging
+            if self.previous_balance_map.is_empty() {
+                let mut balance_entries: Vec<String> = balance_map
+                    .iter()
+                    .map(|(k, v)| format!("{}: {:.10}", k, v))
+                    .collect();
+                balance_entries.sort();
+                info!("Fetched balance: {}", balance_entries.join(", "));
+            } else {
+                let mut diffs = Vec::new();
+                for (k, v) in &balance_map {
+                    let prev_v = self.previous_balance_map.get(k).copied().unwrap_or(0.0);
+                    let delta = v - prev_v;
+                    if delta.abs() > 1e-8 {
+                        diffs.push(format!("{}: {:+.8} ({:.8})", k, delta, v));
+                    }
+                }
+                for (k, prev_v) in &self.previous_balance_map {
+                    if !balance_map.contains_key(k) && *prev_v > 1e-8 {
+                        diffs.push(format!("{}: -{:.8} (0.00000000)", k, prev_v));
+                    }
+                }
+
+                if !diffs.is_empty() {
+                    diffs.sort();
+                    info!("Balance Diff: {}", diffs.join(", "));
+                }
+            }
+            self.previous_balance_map = balance_map.clone();
 
             let raw_symbols = self.load_market_symbols(&balance_map);
 
+            // Cache markets.json list for user monitoring
+            let mut markets_obj = serde_json::Map::new();
+            for sym in &raw_symbols {
+                let base = sym.split('/').next().unwrap_or(sym);
+                let quote = sym.split('/').nth(1).unwrap_or("USD");
+                markets_obj.insert(sym.clone(), serde_json::json!({
+                    "symbol": sym,
+                    "base": base,
+                    "quote": quote
+                }));
+            }
+            if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(markets_obj)) {
+                let _ = fs::write("markets.json", json_str);
+            }
+
             let mut pair_candles = HashMap::new();
             let mut pair_candles_4h = HashMap::new();
+            let mut volumes_cache = Vec::new();
+
             for sym in &raw_symbols {
                 if let Ok(candles) = self.fetch_pair_candles(sym).await {
-                    pair_candles.insert(sym.clone(), candles);
+                    pair_candles.insert(sym.clone(), candles.clone());
+                    let chars = self.compute_pair_characteristics(&candles);
+                    volumes_cache.push(serde_json::json!({
+                        "symbol": sym,
+                        "timestamp": chrono::Utc::now().timestamp(),
+                        "volume_48h": chars.volume_48h,
+                        "spread_pct": chars.spread_pct,
+                        "volatility_pct": chars.volatility_pct,
+                        "trades_per_minute": chars.trades_per_minute
+                    }));
                 }
                 if let Ok(candles_4h) = self.fetch_pair_candles_4h(sym).await {
                     pair_candles_4h.insert(sym.clone(), candles_4h);
                 }
+            }
+
+            // Cache volumes_trades_data.json to disk for user monitoring
+            if let Ok(json_str) = serde_json::to_string_pretty(&volumes_cache) {
+                let _ = fs::write("volumes_trades_data.json", json_str);
             }
 
             let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles, &balance_map);

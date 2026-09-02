@@ -50,7 +50,7 @@ pub struct OrderBook {
 #[async_trait]
 pub trait ExchangeClient: Send + Sync {
     async fn fetch_balance(&self) -> Result<serde_json::Value>;
-    async fn fetch_ohlcv(&self, symbol: &str, timeframe: &str, limit: usize) -> Result<Vec<Candle>>;
+    async fn fetch_ohlcv(&self, symbol: &str, timeframe: &str, limit: usize, since: Option<i64>) -> Result<Vec<Candle>>;
     async fn fetch_ticker(&self, symbol: &str) -> Result<Ticker>;
     async fn fetch_order_book(&self, symbol: &str) -> Result<OrderBook>;
     async fn create_limit_buy(&self, symbol: &str, amount: f64, price: f64) -> Result<Order>;
@@ -161,38 +161,58 @@ impl ExchangeClient for GenericExchange {
         }))
     }
 
-    async fn fetch_ohlcv(&self, symbol: &str, _timeframe: &str, limit: usize) -> Result<Vec<Candle>> {
+    async fn fetch_ohlcv(&self, symbol: &str, timeframe: &str, limit: usize, since: Option<i64>) -> Result<Vec<Candle>> {
         self.apply_rate_limit().await;
         let formatted_pair = symbol.replace('/', "");
-        let url = format!("https://api.kraken.com/0/public/OHLC?pair={}&interval=1", formatted_pair);
+        let interval_min = if timeframe.eq_ignore_ascii_case("4h") { 240 } else { 1 };
+
+        let mut url = format!("https://api.kraken.com/0/public/OHLC?pair={}&interval={}", formatted_pair, interval_min);
+        if let Some(since_ts) = since {
+            let since_sec = if since_ts > 1_000_000_000_000 { since_ts / 1000 } else { since_ts };
+            url.push_str(&format!("&since={}", since_sec));
+        }
 
         if let Ok(resp) = self.http_client.get(&url).send().await {
             if let Ok(json_res) = resp.json::<serde_json::Value>().await {
+                if let Some(errs) = json_res.get("error").and_then(|e| e.as_array()) {
+                    if !errs.is_empty() {
+                        tracing::warn!("[Kraken API Warning] {} returned errors: {:?}", symbol, errs);
+                    }
+                }
+
                 if let Some(result_obj) = json_res.get("result").and_then(|r| r.as_object()) {
-                    for (_key, candles_val) in result_obj {
+                    for (key, candles_val) in result_obj {
+                        if key == "last" {
+                            continue;
+                        }
                         if let Some(candle_arr) = candles_val.as_array() {
                             let mut raw_candles = Vec::new();
                             for c in candle_arr {
                                 if let Some(arr) = c.as_array() {
-                                    let ts = arr.get(0).and_then(|v| v.as_i64()).unwrap_or(0) * 1000;
+                                    let ts_sec = arr.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
+                                    let ts = ts_sec * 1000;
                                     let open = arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let high = arr.get(2).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let low = arr.get(3).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let close = arr.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     let volume = arr.get(6).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
-                                    raw_candles.push(Candle {
-                                        timestamp: ts,
-                                        open,
-                                        high,
-                                        low,
-                                        close,
-                                        volume,
-                                    });
+                                    if ts > 0 && close > 0.0 {
+                                        raw_candles.push(Candle {
+                                            timestamp: ts,
+                                            open,
+                                            high,
+                                            low,
+                                            close,
+                                            volume,
+                                        });
+                                    }
                                 }
                             }
-                            // Take the newest 'limit' candles (tail)
-                            if !raw_candles.is_empty() {
+
+                            if raw_candles.is_empty() {
+                                tracing::warn!("[OHLCV Warning] Empty or dummy candles received for pair {}", symbol);
+                            } else {
                                 let start_idx = if raw_candles.len() > limit { raw_candles.len() - limit } else { 0 };
                                 return Ok(raw_candles[start_idx..].to_vec());
                             }
@@ -202,10 +222,12 @@ impl ExchangeClient for GenericExchange {
             }
         }
 
+        tracing::warn!("[OHLCV Warning] Failed to fetch candles for {}, fallback synthetic candles generated", symbol);
         let now = chrono::Utc::now().timestamp_millis();
+        let step_ms = if timeframe.eq_ignore_ascii_case("4h") { 14400000 } else { 60000 };
         let synthetic_candles = (0..limit.min(100))
             .map(|i| Candle {
-                timestamp: now - ((100 - i) as i64 * 60000),
+                timestamp: now - ((100 - i) as i64 * step_ms),
                 open: 50000.0,
                 high: 50100.0,
                 low: 49900.0,
