@@ -1,3 +1,6 @@
+botv5/target/
+*.lock
+PROMPT.TXT
 .pycache/
 __pycache__/
 *.py[cod]
