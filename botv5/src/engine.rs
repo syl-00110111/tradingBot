@@ -360,6 +360,41 @@ impl TradingEngine {
         Ok(merged_candles)
     }
 
+    pub async fn fetch_pair_candles_4h(&self, symbol: &str) -> Result<Vec<Candle>> {
+        let sanitized = symbol.replace('/', "");
+        let cache_file = format!("ohlcv_data_{}_4h.json", sanitized);
+
+        let mut cached_candles: Vec<Candle> = Vec::new();
+        if Path::new(&cache_file).exists() {
+            if let Ok(content) = fs::read_to_string(&cache_file) {
+                if let Ok(parsed) = serde_json::from_str::<Vec<Candle>>(&content) {
+                    cached_candles = parsed;
+                }
+            }
+        }
+
+        let fresh_candles = self.exchange.fetch_ohlcv(symbol, "4h", 276).await.unwrap_or_default();
+
+        let mut candle_map: HashMap<i64, Candle> = HashMap::new();
+        for c in cached_candles {
+            candle_map.insert(c.timestamp, c);
+        }
+        for c in fresh_candles {
+            candle_map.insert(c.timestamp, c);
+        }
+
+        let mut merged_candles: Vec<Candle> = candle_map.into_values().collect();
+        merged_candles.sort_by_key(|c| c.timestamp);
+
+        if !merged_candles.is_empty() {
+            if let Ok(json_str) = serde_json::to_string_pretty(&merged_candles) {
+                let _ = fs::write(&cache_file, json_str);
+            }
+        }
+
+        Ok(merged_candles)
+    }
+
     pub fn count_buyings_for_base_asset(&self, base_asset: &str) -> usize {
         let mut count = 0;
         for (s, purchases) in &self.recorded_purchases {
@@ -387,6 +422,7 @@ impl TradingEngine {
         &self,
         symbol: &str,
         candles: &[Candle],
+        candles_4h: Option<&[Candle]>,
         last_close: f64,
     ) -> Option<(Signal, f64, f64)> {
         let calibrated_window = TechnicalAnalysis::calibrate_window_by_non_repetition(candles, 480, 1e-5);
@@ -397,7 +433,7 @@ impl TradingEngine {
         };
 
         // 5-Week SMA Calculation & Crest High check
-        let sma_840 = TechnicalAnalysis::calculate_5_week_sma(candles, None);
+        let sma_840 = TechnicalAnalysis::calculate_5_week_sma(candles, candles_4h);
 
         let is_bullish = if let Some(sma) = sma_840 {
             last_close > sma
@@ -530,9 +566,13 @@ impl TradingEngine {
             let raw_symbols = self.load_market_symbols(&balance_map);
 
             let mut pair_candles = HashMap::new();
+            let mut pair_candles_4h = HashMap::new();
             for sym in &raw_symbols {
                 if let Ok(candles) = self.fetch_pair_candles(sym).await {
                     pair_candles.insert(sym.clone(), candles);
+                }
+                if let Ok(candles_4h) = self.fetch_pair_candles_4h(sym).await {
+                    pair_candles_4h.insert(sym.clone(), candles_4h);
                 }
             }
 
@@ -543,8 +583,9 @@ impl TradingEngine {
                 .par_iter()
                 .map(|sym| {
                     let candles = pair_candles.get(sym).cloned().unwrap_or_default();
+                    let c_4h = pair_candles_4h.get(sym);
                     let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
-                    let eval = self.evaluate_symbol_parallel(sym, &candles, last_close);
+                    let eval = self.evaluate_symbol_parallel(sym, &candles, c_4h.map(|v| v.as_slice()), last_close);
                     (sym.clone(), eval)
                 })
                 .collect();
