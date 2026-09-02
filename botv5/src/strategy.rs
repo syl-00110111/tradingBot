@@ -164,7 +164,7 @@ impl StrategyAggregator {
         };
 
         let last_vol = candles.last().map(|c| c.volume).unwrap_or(0.0);
-        let avg_vol = candles.iter().take(20).map(|c| c.volume).sum::<f64>() / 20.0.max(1.0);
+        let avg_vol = candles.iter().take(20).map(|c| c.volume).sum::<f64>() / (20.0_f64).max(1.0);
 
         let buy = ema_9 > ema_21 && rsi > 50.0 && last_vol > avg_vol;
         let sell = ema_9 < ema_21;
@@ -411,8 +411,8 @@ impl StrategyAggregator {
             };
         }
 
-        let mut buy_score = 0.0;
-        let mut sell_score = 0.0;
+        let mut buy_score: f64 = 0.0;
+        let mut sell_score: f64 = 0.0;
 
         let mc_engine = MonteCarloEngine::new(
             config.monte_carlo.num_simulations,
@@ -464,8 +464,8 @@ impl StrategyAggregator {
             Signal::Hold
         };
 
-        let buy_multiplier = 1.0 - (0.0006 * buy_score.min(2.0));
-        let sell_multiplier = 1.0 + (0.0006 * sell_score.min(2.0));
+        let buy_multiplier = 1.0 - (0.0006 * buy_score.min(2.0_f64));
+        let sell_multiplier = 1.0 + (0.0006 * sell_score.min(2.0_f64));
 
         SignalResult {
             signal,
