@@ -171,21 +171,45 @@ impl TradingEngine {
     }
 
     pub fn filter_available_pairs(&self, sample_symbols: &[String], pair_candles: &HashMap<String, Vec<Candle>>) -> Vec<String> {
-        sample_symbols
-            .iter()
-            .cloned()
-            .filter(|sym| {
-                let base = sym.split('/').next().unwrap_or(sym);
-                !self.config.forbid_assets.contains(&base.to_string())
-            })
-            .filter(|sym| {
-                let candles = pair_candles.get(sym).cloned().unwrap_or_default();
-                let chars = self.compute_pair_characteristics(&candles);
-                let (optimal, _) = self.evaluate_pair_scoring(&chars);
-                optimal
-            })
-            .take(self.config.max_num_pairs)
-            .collect()
+        let mut selected = Vec::new();
+
+        for sym in sample_symbols {
+            if selected.len() >= self.config.max_num_pairs {
+                break;
+            }
+
+            let base = sym.split('/').next().unwrap_or(sym);
+
+            // Prohibited asset check
+            if self.config.forbid_assets.contains(&base.to_string()) {
+                info!("[Pair Selection] Skipping prohibited asset: {}", sym);
+                continue;
+            }
+
+            let candles = pair_candles.get(sym).cloned().unwrap_or_default();
+            let chars = self.compute_pair_characteristics(&candles);
+            let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
+
+            if is_optimal {
+                info!(
+                    "[Pair Selection] Optimal volume pair added: {} (Reasons: {})",
+                    sym,
+                    reasons.join(", ")
+                );
+                selected.push(sym.clone());
+            } else if self.recorded_purchases.contains_key(base) {
+                info!("[Pair Selection] Balance inventory pair added: {}", sym);
+                selected.push(sym.clone());
+            } else {
+                info!(
+                    "[Pair Selection] Skipping non-optimal pair: {} (Reasons: {})",
+                    sym,
+                    reasons.join(", ")
+                );
+            }
+        }
+
+        selected
     }
 
     pub async fn fetch_pair_candles(&self, symbol: &str) -> Result<Vec<Candle>> {

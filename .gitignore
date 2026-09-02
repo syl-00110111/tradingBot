@@ -1,6 +1,3 @@
-botv5/target/
-*.lock
-PROMPT.TXT
 .pycache/
 __pycache__/
 *.py[cod]
@@ -24,3 +21,6 @@ my_trades_cache.json
 .vs/
 recorded_purchases.json
 redlisted_pairs.json
+botv5/target/
+*.lock
+PROMPT.TXT
