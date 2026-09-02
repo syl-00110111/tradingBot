@@ -96,12 +96,37 @@ impl TradingEngine {
 
     pub fn load_market_symbols(&self, balance: &HashMap<String, f64>) -> Vec<String> {
         let mut symbols = Vec::new();
+        let mut base_assets: Vec<String> = vec![
+            "USD".into(), "EUR".into(), "BTC".into(), "CHF".into(), "GBP".into(), "USDC".into(),
+        ];
+
+        // Explicitly generate pairs for all held non-zero balance assets
+        for (asset, amt) in balance {
+            if *amt > 0.0 && !self.config.forbid_assets.contains(asset) {
+                if asset != "USD" && asset != "ZUSD" {
+                    let pair_usd = format!("{}/USD", asset);
+                    if !symbols.contains(&pair_usd) {
+                        symbols.push(pair_usd);
+                    }
+                }
+                if asset != "EUR" && asset != "ZEUR" {
+                    let pair_eur = format!("{}/EUR", asset);
+                    if !symbols.contains(&pair_eur) {
+                        symbols.push(pair_eur);
+                    }
+                }
+            }
+        }
 
         if Path::new("markets.json").exists() {
             if let Ok(content) = fs::read_to_string("markets.json") {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(obj) = json_val.as_object() {
-                        for (sym, m_val) in obj {
+                        for (key, m_val) in obj {
+                            let sym = m_val
+                                .get("symbol")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(key.as_str());
                             let base = m_val.get("base").and_then(|v| v.as_str()).unwrap_or("");
                             let quote = m_val.get("quote").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -111,12 +136,8 @@ impl TradingEngine {
                                 continue;
                             }
 
-                            // Dynamic quote base assets matching botv4
-                            let is_valid_quote = matches!(quote, "USD" | "EUR" | "BTC" | "CHF" | "GBP" | "USDC")
-                                || balance.get(quote).copied().unwrap_or(0.0) > 0.0;
-
-                            if is_valid_quote {
-                                symbols.push(sym.clone());
+                            if base_assets.contains(&quote.to_string()) && !symbols.contains(&sym.to_string()) {
+                                symbols.push(sym.to_string());
                             }
                         }
                     }
@@ -124,20 +145,22 @@ impl TradingEngine {
             }
         }
 
-        if !symbols.is_empty() {
-            return symbols;
+        let defaults = vec![
+            "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD", "LTC/USD", "DOT/USD", "LINK/USD",
+            "AVAX/USD", "ATOM/USD", "NEAR/USD", "BCH/USD", "UNI/USD", "AAVE/USD", "DOGE/USD", "SHIB/USD",
+            "XLM/USD", "ALGO/USD", "FIL/USD", "APT/USD", "SUI/USD", "INJ/USD", "TIA/USD", "FET/USD",
+            "RENDER/USD", "GRT/USD", "LDO/USD", "ICP/USD", "ETC/USD", "MATIC/USD", "NEAR/EUR", "AVAX/EUR",
+            "BTC/EUR", "ETH/EUR", "SOL/EUR", "XRP/EUR", "ADA/EUR", "LTC/EUR", "DOT/EUR", "LINK/EUR",
+            "BCH/EUR", "UNI/EUR", "AAVE/EUR", "DOGE/EUR", "ALGO/EUR", "FIL/EUR", "APT/EUR", "SUI/EUR",
+            "INJ/EUR", "TIA/EUR", "LDO/EUR", "ICP/EUR", "ETC/EUR", "POL/USD", "PEPE/USD", "BONK/USD",
+        ];
+        for d in defaults {
+            if !symbols.contains(&d.to_string()) {
+                symbols.push(d.to_string());
+            }
         }
 
-        vec![
-            "BTC/USD".into(),
-            "ETH/USD".into(),
-            "SOL/USD".into(),
-            "XRP/USD".into(),
-            "ADA/USD".into(),
-            "LTC/USD".into(),
-            "DOT/USD".into(),
-            "LINK/USD".into(),
-        ]
+        symbols
     }
 
     pub fn evaluate_pair_scoring(&self, chars: &PairCharacteristics) -> (bool, Vec<&'static str>) {
@@ -182,10 +205,10 @@ impl TradingEngine {
     pub fn compute_pair_characteristics(&self, candles: &[Candle]) -> PairCharacteristics {
         if candles.is_empty() {
             return PairCharacteristics {
-                volume_48h: 50000.0,
-                spread_pct: 0.005,
-                volatility_pct: 0.03,
-                trades_per_minute: 10.0,
+                volume_48h: 250000.0,
+                spread_pct: 0.0005,
+                volatility_pct: 0.005,
+                trades_per_minute: 50.0,
             };
         }
 
