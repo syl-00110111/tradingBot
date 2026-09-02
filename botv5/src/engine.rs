@@ -448,7 +448,7 @@ impl TradingEngine {
                 .map(|(k, v)| format!("{}: {:.10}", k, v))
                 .collect();
             balance_entries.sort();
-            info!("Fetched balance response: {}", balance_entries.join(", "));
+            info!("Fetched balance: {}", balance_entries.join(", "));
 
             let raw_symbols = self.load_market_symbols();
 
