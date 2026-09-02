@@ -227,7 +227,40 @@ impl TradingEngine {
     }
 
     pub async fn fetch_pair_candles(&self, symbol: &str) -> Result<Vec<Candle>> {
-        self.exchange.fetch_ohlcv(symbol, "1m", 500).await
+        let sanitized = symbol.replace('/', "");
+        let cache_file = format!("ohlcv_data_{}_1m.json", sanitized);
+
+        // 1. Read existing shared candle cache if present
+        let mut cached_candles: Vec<Candle> = Vec::new();
+        if Path::new(&cache_file).exists() {
+            if let Ok(content) = fs::read_to_string(&cache_file) {
+                if let Ok(parsed) = serde_json::from_str::<Vec<Candle>>(&content) {
+                    cached_candles = parsed;
+                }
+            }
+        }
+
+        // 2. Fetch fresh candles from exchange
+        let fresh_candles = self.exchange.fetch_ohlcv(symbol, "1m", 500).await?;
+
+        // 3. Merge cached and fresh candles based on timestamp
+        let mut candle_map: HashMap<i64, Candle> = HashMap::new();
+        for c in cached_candles {
+            candle_map.insert(c.timestamp, c);
+        }
+        for c in fresh_candles {
+            candle_map.insert(c.timestamp, c);
+        }
+
+        let mut merged_candles: Vec<Candle> = candle_map.into_values().collect();
+        merged_candles.sort_by_key(|c| c.timestamp);
+
+        // 4. Save merged candles back to shared disk cache
+        if let Ok(json_str) = serde_json::to_string_pretty(&merged_candles) {
+            let _ = fs::write(&cache_file, json_str);
+        }
+
+        Ok(merged_candles)
     }
 
     pub fn count_buyings_for_base_asset(&self, base_asset: &str) -> usize {
