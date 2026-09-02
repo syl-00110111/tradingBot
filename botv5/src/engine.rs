@@ -33,6 +33,7 @@ pub struct TradingEngine {
     pub paused_for_buy: HashMap<String, i64>,
     pub recorded_purchases: HashMap<String, Vec<RecordedPurchase>>,
     pub last_maintenance_ts: i64,
+    pub previous_selected_pairs: Vec<String>,
 }
 
 impl TradingEngine {
@@ -49,6 +50,7 @@ impl TradingEngine {
             paused_for_buy: HashMap::new(),
             recorded_purchases: HashMap::new(),
             last_maintenance_ts: 0,
+            previous_selected_pairs: Vec::new(),
         };
 
         engine.load_saved_state();
@@ -185,7 +187,12 @@ impl TradingEngine {
         }
     }
 
-    pub fn filter_available_pairs(&self, sample_symbols: &[String], pair_candles: &HashMap<String, Vec<Candle>>) -> Vec<String> {
+    pub fn filter_available_pairs(
+        &mut self,
+        sample_symbols: &[String],
+        pair_candles: &HashMap<String, Vec<Candle>>,
+        balance: &HashMap<String, f64>,
+    ) -> Vec<String> {
         let mut selected = Vec::new();
 
         for sym in sample_symbols {
@@ -196,33 +203,46 @@ impl TradingEngine {
             let base = sym.split('/').next().unwrap_or(sym);
 
             if self.config.forbid_assets.contains(&base.to_string()) {
-                info!("[Pair Selection] Skipping prohibited asset: {}", sym);
                 continue;
             }
 
             let candles = pair_candles.get(sym).cloned().unwrap_or_default();
             let chars = self.compute_pair_characteristics(&candles);
-            let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
+            let (is_optimal, _reasons) = self.evaluate_pair_scoring(&chars);
 
-            if is_optimal {
-                info!(
-                    "[Pair Selection] Optimal volume pair added: {} (Reasons: {})",
-                    sym,
-                    reasons.join(", ")
-                );
+            let has_balance = balance.get(base).copied().unwrap_or(0.0) > 0.0
+                || self.recorded_purchases.contains_key(base);
+
+            if is_optimal || has_balance {
                 selected.push(sym.clone());
-            } else if self.recorded_purchases.contains_key(base) {
-                info!("[Pair Selection] Balance inventory pair added: {}", sym);
-                selected.push(sym.clone());
-            } else {
-                info!(
-                    "[Pair Selection] Skipping non-optimal pair: {} (Reasons: {})",
-                    sym,
-                    reasons.join(", ")
-                );
             }
         }
 
+        // Differential logging compared to previous selection choice
+        let added: Vec<String> = selected
+            .iter()
+            .filter(|p| !self.previous_selected_pairs.contains(p))
+            .cloned()
+            .collect();
+        let removed: Vec<String> = self
+            .previous_selected_pairs
+            .iter()
+            .filter(|p| !selected.contains(p))
+            .cloned()
+            .collect();
+
+        if !added.is_empty() || !removed.is_empty() || self.previous_selected_pairs.is_empty() {
+            info!(
+                "[Pair Selection Differential] Selected: {} pairs | Added (+{}): [{}] | Removed (-{}): [{}]",
+                selected.len(),
+                added.len(),
+                added.join(", "),
+                removed.len(),
+                removed.join(", ")
+            );
+        }
+
+        self.previous_selected_pairs = selected.clone();
         selected
     }
 
@@ -419,7 +439,7 @@ impl TradingEngine {
                 }
             }
 
-            let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles);
+            let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles, &balance);
             info!("Running trading loop for {} pairs...", available_pairs.len());
 
             let evaluation_results: Vec<(String, Option<(Signal, f64, f64)>)> = available_pairs
