@@ -94,18 +94,38 @@ impl TradingEngine {
         Ok(())
     }
 
-    pub fn load_market_symbols(&self) -> Vec<String> {
+    pub fn load_market_symbols(&self, balance: &HashMap<String, f64>) -> Vec<String> {
+        let mut symbols = Vec::new();
+
         if Path::new("markets.json").exists() {
             if let Ok(content) = fs::read_to_string("markets.json") {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(obj) = json_val.as_object() {
-                        let symbols: Vec<String> = obj.keys().cloned().collect();
-                        if !symbols.is_empty() {
-                            return symbols;
+                        for (sym, m_val) in obj {
+                            let base = m_val.get("base").and_then(|v| v.as_str()).unwrap_or("");
+                            let quote = m_val.get("quote").and_then(|v| v.as_str()).unwrap_or("");
+
+                            if self.config.forbid_assets.contains(&base.to_string())
+                                || self.config.forbid_assets.contains(&quote.to_string())
+                            {
+                                continue;
+                            }
+
+                            // Dynamic quote base assets matching botv4
+                            let is_valid_quote = matches!(quote, "USD" | "EUR" | "BTC" | "CHF" | "GBP" | "USDC")
+                                || balance.get(quote).copied().unwrap_or(0.0) > 0.0;
+
+                            if is_valid_quote {
+                                symbols.push(sym.clone());
+                            }
                         }
                     }
                 }
             }
+        }
+
+        if !symbols.is_empty() {
+            return symbols;
         }
 
         vec![
@@ -193,13 +213,11 @@ impl TradingEngine {
         pair_candles: &HashMap<String, Vec<Candle>>,
         balance: &HashMap<String, f64>,
     ) -> Vec<String> {
-        let mut selected = Vec::new();
+        let mut sell_candidates = Vec::new();
+        let mut volume_candidates = Vec::new();
+        let mut reasons_map: HashMap<String, String> = HashMap::new();
 
         for sym in sample_symbols {
-            if selected.len() >= self.config.max_num_pairs {
-                break;
-            }
-
             let base = sym.split('/').next().unwrap_or(sym);
 
             if self.config.forbid_assets.contains(&base.to_string()) {
@@ -208,17 +226,40 @@ impl TradingEngine {
 
             let candles = pair_candles.get(sym).cloned().unwrap_or_default();
             let chars = self.compute_pair_characteristics(&candles);
-            let (is_optimal, _reasons) = self.evaluate_pair_scoring(&chars);
+            let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
 
-            let has_balance = balance.get(base).copied().unwrap_or(0.0) > 0.0
-                || self.recorded_purchases.contains_key(base);
+            let base_balance = balance.get(base).copied().unwrap_or(0.0);
+            let has_balance = base_balance > 0.0 || self.recorded_purchases.contains_key(base);
 
-            if is_optimal || has_balance {
-                selected.push(sym.clone());
+            if is_optimal {
+                reasons_map.insert(sym.clone(), format!("Optimal Volume ({})", reasons.join(", ")));
+                volume_candidates.push(sym.clone());
+            } else if has_balance {
+                reasons_map.insert(sym.clone(), format!("Balance Inventory (Held: {:.4})", base_balance));
+                sell_candidates.push(sym.clone());
             }
         }
 
-        // Differential logging compared to previous selection choice
+        let mut selected = Vec::new();
+        for s in sell_candidates {
+            if selected.len() >= self.config.max_num_pairs {
+                break;
+            }
+            if !selected.contains(&s) {
+                selected.push(s);
+            }
+        }
+        for v in volume_candidates {
+            if selected.len() >= self.config.max_num_pairs {
+                break;
+            }
+            if !selected.contains(&v) {
+                selected.push(v);
+            }
+        }
+
+        // Output detailed reasons for initial run or changes
+        let is_initial = self.previous_selected_pairs.is_empty();
         let added: Vec<String> = selected
             .iter()
             .filter(|p| !self.previous_selected_pairs.contains(p))
@@ -231,7 +272,16 @@ impl TradingEngine {
             .cloned()
             .collect();
 
-        if !added.is_empty() || !removed.is_empty() || self.previous_selected_pairs.is_empty() {
+        if is_initial {
+            info!(
+                "[Pair Selection] Initial selection of {} pairs:",
+                selected.len()
+            );
+            for p in &selected {
+                let r = reasons_map.get(p).cloned().unwrap_or_else(|| "Selected".to_string());
+                info!("  - {}: {}", p, r);
+            }
+        } else if !added.is_empty() || !removed.is_empty() {
             info!(
                 "[Pair Selection Differential] Selected: {} pairs | Added (+{}): [{}] | Removed (-{}): [{}]",
                 selected.len(),
@@ -240,6 +290,10 @@ impl TradingEngine {
                 removed.len(),
                 removed.join(", ")
             );
+            for p in &added {
+                let r = reasons_map.get(p).cloned().unwrap_or_else(|| "Added".to_string());
+                info!("  + Added {}: {}", p, r);
+            }
         }
 
         self.previous_selected_pairs = selected.clone();
@@ -450,7 +504,7 @@ impl TradingEngine {
             balance_entries.sort();
             info!("Fetched balance: {}", balance_entries.join(", "));
 
-            let raw_symbols = self.load_market_symbols();
+            let raw_symbols = self.load_market_symbols(&balance_map);
 
             let mut pair_candles = HashMap::new();
             for sym in &raw_symbols {
