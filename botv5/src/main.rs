@@ -23,14 +23,25 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .expect("setting default subscriber failed");
 
-    info!("Initializing Botv5 Rust skeleton in mode: {:?}", args.mode);
+    info!("Initializing Botv5 Rust engine in mode: {:?}", args.mode);
 
     let config = Config::load_and_merge(args.mode)?;
     info!("Configuration loaded. Exchange ID: {}", config.exchange_id);
 
     let mut engine = TradingEngine::new(config);
-    info!("Starting trading engine loop...");
-    engine.run().await?;
+
+    tokio::select! {
+        res = engine.run() => {
+            if let Err(e) = res {
+                tracing::error!("Trading engine error: {}", e);
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl+C signal received. Shutting down Botv5 cleanly...");
+            let _ = engine.save_state();
+            info!("Botv5 graceful shutdown complete.");
+        }
+    }
 
     Ok(())
 }

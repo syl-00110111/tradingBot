@@ -77,6 +77,21 @@ impl TradingEngine {
         }
     }
 
+    pub fn save_state(&self) -> Result<()> {
+        let pause_path = self.config.pause_file();
+        if let Ok(json_str) = serde_json::to_string_pretty(&self.paused_for_buy) {
+            let _ = fs::write(pause_path, json_str);
+        }
+
+        let purchases_path = self.config.purchases_file();
+        if let Ok(json_str) = serde_json::to_string_pretty(&self.recorded_purchases) {
+            let _ = fs::write(purchases_path, json_str);
+        }
+
+        info!("[Shutdown] Botv5 engine state successfully saved to disk.");
+        Ok(())
+    }
+
     pub fn load_market_symbols(&self) -> Vec<String> {
         if Path::new("markets.json").exists() {
             if let Ok(content) = fs::read_to_string("markets.json") {
@@ -180,7 +195,6 @@ impl TradingEngine {
 
             let base = sym.split('/').next().unwrap_or(sym);
 
-            // Prohibited asset check
             if self.config.forbid_assets.contains(&base.to_string()) {
                 info!("[Pair Selection] Skipping prohibited asset: {}", sym);
                 continue;

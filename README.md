@@ -44,6 +44,59 @@ rustup update
 
 ---
 
+## 🔑 `api.json` Placement Instructions (Live Mode Credentials)
+
+To trade in **Live Mode** with real exchange API keys, place your `api.json` credentials file directly in the `botv5` working directory:
+
+### **Linux / macOS Location**
+```bash
+# Path relative to repository root:
+/path/to/tradingBot/botv5/api.json
+```
+
+### **Windows Location**
+```powershell
+# Path relative to repository root:
+C:\path\to\tradingBot\botv5\api.json
+```
+
+### **`api.json` Format**
+```json
+{
+  "api_key": "YOUR_KRAKEN_API_KEY",
+  "api_secret": "YOUR_KRAKEN_API_SECRET",
+  "exchange_id": "kraken"
+}
+```
+
+---
+
+## 📁 Bot Data Files & Storage Locations
+
+The bot automatically persists runtime state and trading history to JSON data files located in the `botv5` working directory. Live mode and Simulation mode use strictly isolated filenames to prevent state pollution.
+
+### **Live Mode Data Files**
+- `redlisted_pairs.json`: Stores pairs suspended due to high transaction costs or API errors.
+- `paused_for_buy.json`: Stores buy-paused pairs with expiration timestamps.
+- `recorded_purchases.json`: Stores recorded buy prices and quantities for profitability checks (`is_sell_profitable`).
+- `pending_orders_dump.json`: Dumps active/placed limit orders.
+
+### **Simulation Mode Data Files (Isolated)**
+- `sim_redlisted_pairs.json`
+- `sim_paused_for_buy.json`
+- `sim_recorded_purchases.json`
+- `sim_pending_orders_dump.json`
+
+---
+
+## 🛑 Clean Exit / Graceful Shutdown
+
+To trigger a clean and graceful shutdown at any time:
+- Press `Ctrl + C` in your terminal window.
+- The engine catches the `SIGINT` signal, immediately persists all active position tracking (`recorded_purchases.json`) and paused buy states (`paused_for_buy.json`) to disk, and exits safely.
+
+---
+
 ## 🛠 Main Features
 
 ### ⚡ Performance & Acceleration
@@ -95,19 +148,6 @@ cargo build --release
   ```bash
   cargo run -- --mode backtest
   ```
-
----
-
-## 🔑 Configuration (`api.json` & `config.json`)
-The bot loads `config.default.json`, merges overrides from `config.json`, and injects exchange API keys from `api.json`:
-
-```json
-{
-  "api_key": "YOUR_KEY",
-  "api_secret": "YOUR_SECRET",
-  "exchange_id": "kraken"
-}
-```
 
 ---
 
