@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::Config;
 use crate::exchange::{Candle, ExchangeClient, GenericExchange, Order};
