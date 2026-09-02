@@ -427,8 +427,28 @@ impl TradingEngine {
         info!("Trading engine started in mode: {:?}", self.config.mode);
 
         loop {
-            let balance = self.exchange.fetch_balance().await?;
-            info!("Fetched balance response: {:?}", balance);
+            let balance_json = self.exchange.fetch_balance().await?;
+            let mut balance_map: HashMap<String, f64> = HashMap::new();
+
+            if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
+                for (k, v) in free_obj {
+                    let val = if let Some(s) = v.as_str() {
+                        s.parse::<f64>().unwrap_or(0.0)
+                    } else if let Some(n) = v.as_f64() {
+                        n
+                    } else {
+                        0.0
+                    };
+                    balance_map.insert(k.clone(), val);
+                }
+            }
+
+            let mut balance_entries: Vec<String> = balance_map
+                .iter()
+                .map(|(k, v)| format!("{}: {:.10}", k, v))
+                .collect();
+            balance_entries.sort();
+            info!("Fetched balance response: {}", balance_entries.join(", "));
 
             let raw_symbols = self.load_market_symbols();
 
@@ -439,7 +459,7 @@ impl TradingEngine {
                 }
             }
 
-            let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles, &balance);
+            let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles, &balance_map);
             info!("Running trading loop for {} pairs...", available_pairs.len());
 
             let evaluation_results: Vec<(String, Option<(Signal, f64, f64)>)> = available_pairs
