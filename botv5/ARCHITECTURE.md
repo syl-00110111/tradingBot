@@ -11,7 +11,23 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 2. Score-Based Pair Filtering (`evaluate_pair_scoring`)
+## 2. Continuous Trading Loop Iteration
+- **Location**: `botv5/src/engine.rs` (`TradingEngine::run`)
+- **Behavior**: Runs an infinite asynchronous loop (`loop { ... tokio::time::sleep(Duration::from_secs(4)).await; }`) matching `botv4.py` execution semantics.
+- **Per-Iteration Workflow**:
+  1. Fetches current account balances via `ExchangeClient::fetch_balance`.
+  2. Loads market symbols dynamically from `markets.json` or fallback defaults.
+  3. Evaluates pair characteristics (`volume_48h`, `spread_pct`, `volatility_pct`, `trades_per_minute`) using `evaluate_pair_scoring`.
+  4. Parallelizes per-symbol indicator and strategy evaluation across CPU cores using `Rayon`.
+  5. Enforces 5-week SMA (`SMA_840`) crest high checks, base asset purchase caps (max 4 buyings), and transaction cost bounds (5.07 EUR to 12.23 EUR).
+  6. Executes order cleanup and limit order placement via REST calls.
+  7. Triggers write-once sub-actions (`dump_pending_order`, `record_purchase`, `pause_buy`).
+  8. Executes the 42-minute maintenance batch task (`run_maintenance`).
+  9. Sleeps for 4 seconds before starting the next iteration cycle.
+
+---
+
+## 3. Score-Based Pair Filtering (`evaluate_pair_scoring`)
 - **Location**: `botv5/src/engine.rs` (`TradingEngine::evaluate_pair_scoring`)
 - **Metrics Evaluated**:
   - `volume_48h`: Evaluated against low (< $1,000) and high (> $120,000) thresholds.
@@ -22,21 +38,21 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 3. 5-Week SMA & Crest High Check
+## 4. 5-Week SMA & Crest High Check
 - **Location**: `botv5/src/indicators.rs` (`TechnicalAnalysis::calculate_5_week_sma`) and `botv5/src/engine.rs` (`TradingEngine::evaluate_symbol_parallel`)
 - **Calculation**: Computes 5-week SMA (`SMA_840`) using 50,400 candles of 1m timeframe or falling back to 210 candles of 4h timeframe.
 - **Crest High Check**: If `last_close > sma_840` or `target_buy_price > sma_840` (crest high), limit BUY orders are skipped or cancelled to prevent buying at local market peaks.
 
 ---
 
-## 4. Regime Offsets, Package Sizing & Base Asset Purchase Limits
+## 5. Regime Offsets, Package Sizing & Base Asset Purchase Limits
 - **Regime Offsets**: Detects trend (Bullish/Bearish via SMA_840) and regime (Trend Following vs Mean Reversion via ADX > 25) to scale price multipliers using Monte Carlo strategy scores (`buy_offset = base_buy_offset * 2 * mc_score`).
 - **Package Sizing**: Bounded transaction package sizing calculated between 5.07 EUR minimum required expense and 12.23 EUR maximum expense limit (`TradingEngine::calculate_package_amount`).
 - **Base Asset Purchase Limits**: Enforces a strict limit of maximum 4 active purchases per base asset across all pairs (`TradingEngine::count_buyings_for_base_asset`).
 
 ---
 
-## 5. Periodic 42-Minute Maintenance Batch Task
+## 6. Periodic 42-Minute Maintenance Batch Task
 - **Location**: `botv5/src/engine.rs` (`TradingEngine::run_maintenance`)
 - **Routine**:
   - Every 42 minutes (2,520 seconds), the engine fetches all open orders.
@@ -46,7 +62,7 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 6. Direct REST Exchange Client Calls
+## 7. Direct REST Exchange Client Calls
 - **Location**: `botv5/src/exchange.rs` (`GenericExchange`)
 - **Public REST Endpoints**:
   - `fetch_ohlcv`: Queries `/0/public/OHLC?pair=...` with rate limiting.
@@ -60,7 +76,7 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 7. Location & Correspondence of Monte Carlo Engine
+## 8. Location & Correspondence of Monte Carlo Engine
 - **Python counterpart**: `monte_carlo2.py:MonteCarloEngine`
 - **Rust location**: `botv5/src/monte_carlo.rs` (`MonteCarloEngine`)
 - **Algorithm & Correspondence**:
@@ -72,7 +88,7 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 8. Location of JSON File Management & Sub-Actions
+## 9. Location of JSON File Management & Sub-Actions
 - **Configuration Parsing**: `botv5/src/config.rs` (`Config::load_and_merge`) merges `config.default.json`, `config.json`, and `api.json`.
 - **Simulation State File Isolation**: `Config` dynamically resolves state file paths:
   - **Live Mode**: `redlisted_pairs.json`, `paused_for_buy.json`, `recorded_purchases.json`, `pending_orders_dump.json`.

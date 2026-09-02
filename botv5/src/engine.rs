@@ -3,7 +3,8 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::info;
+use std::time::Duration;
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::exchange::{Candle, ExchangeClient, GenericExchange, Order};
@@ -334,80 +335,83 @@ impl TradingEngine {
     pub async fn run(&mut self) -> Result<()> {
         info!("Trading engine started in mode: {:?}", self.config.mode);
 
-        let balance = self.exchange.fetch_balance().await?;
-        info!("Fetched balance response: {:?}", balance);
+        loop {
+            let balance = self.exchange.fetch_balance().await?;
+            info!("Fetched balance response: {:?}", balance);
 
-        let raw_symbols = self.load_market_symbols();
+            let raw_symbols = self.load_market_symbols();
 
-        let mut pair_candles = HashMap::new();
-        for sym in &raw_symbols {
-            if let Ok(candles) = self.fetch_pair_candles(sym).await {
-                pair_candles.insert(sym.clone(), candles);
-            }
-        }
-
-        let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles);
-        info!("Running trading loop for {} pairs...", available_pairs.len());
-
-        let evaluation_results: Vec<(String, Option<(Signal, f64, f64)>)> = available_pairs
-            .par_iter()
-            .map(|sym| {
-                let candles = pair_candles.get(sym).cloned().unwrap_or_default();
-                let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
-                let eval = self.evaluate_symbol_parallel(sym, &candles, last_close);
-                (sym.clone(), eval)
-            })
-            .collect();
-
-        for (sym, eval) in evaluation_results {
-            if let Some((signal, target_price, prob)) = eval {
-                info!("[Trading Loop] Signal {:?} for {} at price {} with probability {:.4}", signal, sym, target_price, prob);
-
-                let base_asset = sym.split('/').next().unwrap_or(&sym);
-
-                if signal == Signal::Buy && self.count_buyings_for_base_asset(base_asset) >= 4 {
-                    info!("[Trading Loop] Skipping BUY for {}: Reached max 4 buyings for base asset {}", sym, base_asset);
-                    continue;
+            let mut pair_candles = HashMap::new();
+            for sym in &raw_symbols {
+                if let Ok(candles) = self.fetch_pair_candles(sym).await {
+                    pair_candles.insert(sym.clone(), candles);
                 }
+            }
 
-                let now_ts = chrono::Utc::now().timestamp();
-                if let Some(expiry) = self.paused_for_buy.get(&sym) {
-                    if now_ts < *expiry {
-                        info!("[Trading Loop] Skipping BUY for {} (paused until {})", sym, expiry);
+            let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles);
+            info!("Running trading loop for {} pairs...", available_pairs.len());
+
+            let evaluation_results: Vec<(String, Option<(Signal, f64, f64)>)> = available_pairs
+                .par_iter()
+                .map(|sym| {
+                    let candles = pair_candles.get(sym).cloned().unwrap_or_default();
+                    let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
+                    let eval = self.evaluate_symbol_parallel(sym, &candles, last_close);
+                    (sym.clone(), eval)
+                })
+                .collect();
+
+            for (sym, eval) in evaluation_results {
+                if let Some((signal, target_price, prob)) = eval {
+                    info!("[Trading Loop] Signal {:?} for {} at price {} with probability {:.4}", signal, sym, target_price, prob);
+
+                    let base_asset = sym.split('/').next().unwrap_or(&sym);
+
+                    if signal == Signal::Buy && self.count_buyings_for_base_asset(base_asset) >= 4 {
+                        info!("[Trading Loop] Skipping BUY for {}: Reached max 4 buyings for base asset {}", sym, base_asset);
                         continue;
                     }
-                }
 
-                match signal {
-                    Signal::Buy => {
-                        self.cleanup_open_orders(&sym).await?;
-                        let amount = self.calculate_package_amount(target_price, 1.0, 0.001);
-                        if let Ok(order) = self.execute_limit_order(&sym, "buy", amount, target_price).await {
-                            self.dump_pending_order(&order)?;
-                            self.record_purchase(&sym, amount, target_price)?;
-                        } else {
-                            // Sub-action: pause buys on error
-                            self.pause_buy(&sym, 14400)?;
+                    let now_ts = chrono::Utc::now().timestamp();
+                    if let Some(expiry) = self.paused_for_buy.get(&sym) {
+                        if now_ts < *expiry {
+                            info!("[Trading Loop] Skipping BUY for {} (paused until {})", sym, expiry);
+                            continue;
                         }
                     }
-                    Signal::Sell => {
-                        if self.is_sell_profitable(&sym, target_price) {
+
+                    match signal {
+                        Signal::Buy => {
                             self.cleanup_open_orders(&sym).await?;
                             let amount = self.calculate_package_amount(target_price, 1.0, 0.001);
-                            if let Ok(order) = self.execute_limit_order(&sym, "sell", amount, target_price).await {
+                            if let Ok(order) = self.execute_limit_order(&sym, "buy", amount, target_price).await {
                                 self.dump_pending_order(&order)?;
+                                self.record_purchase(&sym, amount, target_price)?;
+                            } else {
+                                // Sub-action: pause buys on error
+                                self.pause_buy(&sym, 14400)?;
                             }
                         }
+                        Signal::Sell => {
+                            if self.is_sell_profitable(&sym, target_price) {
+                                self.cleanup_open_orders(&sym).await?;
+                                let amount = self.calculate_package_amount(target_price, 1.0, 0.001);
+                                if let Ok(order) = self.execute_limit_order(&sym, "sell", amount, target_price).await {
+                                    self.dump_pending_order(&order)?;
+                                }
+                            }
+                        }
+                        Signal::Hold => {}
                     }
-                    Signal::Hold => {}
                 }
             }
+
+            // Run 42-minute maintenance tasks
+            self.run_maintenance().await?;
+
+            // Sleep for 4 seconds between trading loop iterations (matching botv4.py)
+            tokio::time::sleep(Duration::from_secs(4)).await;
         }
-
-        // Run 42-minute maintenance tasks
-        self.run_maintenance().await?;
-
-        Ok(())
     }
 
     // Write-once sub-action: redlist pair
