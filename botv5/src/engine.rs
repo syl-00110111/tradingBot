@@ -254,12 +254,12 @@ impl TradingEngine {
             let base_balance = balance.get(base).copied().unwrap_or(0.0);
             let has_balance = base_balance > 0.0 || self.recorded_purchases.contains_key(base);
 
-            if is_optimal {
-                reasons_map.insert(sym.clone(), format!("Optimal Volume ({})", reasons.join(", ")));
-                volume_candidates.push(sym.clone());
-            } else if has_balance {
+            if has_balance {
                 reasons_map.insert(sym.clone(), format!("Balance Inventory (Held: {:.4})", base_balance));
                 sell_candidates.push(sym.clone());
+            } else if is_optimal {
+                reasons_map.insert(sym.clone(), format!("Optimal Volume ({})", reasons.join(", ")));
+                volume_candidates.push(sym.clone());
             }
         }
 
