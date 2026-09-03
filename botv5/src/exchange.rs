@@ -163,8 +163,12 @@ impl ExchangeClient for GenericExchange {
 
     async fn fetch_ohlcv(&self, symbol: &str, timeframe: &str, limit: usize, since: Option<i64>) -> Result<Vec<Candle>> {
         self.apply_rate_limit().await;
-        let clean_symbol = symbol.strip_prefix('Z').unwrap_or(symbol).strip_prefix('X').unwrap_or(symbol);
-        let formatted_pair = clean_symbol.replace('/', "");
+        let formatted_pair = if symbol.contains('/') {
+            symbol.replace('/', "")
+        } else {
+            let clean = symbol.strip_prefix('Z').unwrap_or(symbol).strip_prefix('X').unwrap_or(symbol);
+            clean.to_string()
+        };
         let interval_min = if timeframe.eq_ignore_ascii_case("4h") { 240 } else { 1 };
 
         let mut url = format!("https://api.kraken.com/0/public/OHLC?pair={}&interval={}", formatted_pair, interval_min);
