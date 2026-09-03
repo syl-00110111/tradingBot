@@ -563,31 +563,35 @@ impl ExchangeClient for GenericExchange {
             ("volume", amount.to_string()),
         ];
 
-        if let Ok(res) = self.send_private_request("/0/private/AddOrder", &mut params).await {
-            if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
-                if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
-                    return Ok(Order {
-                        id: txid.to_string(),
-                        symbol: symbol.to_string(),
-                        side: "buy".into(),
-                        order_type: "limit".into(),
-                        price,
-                        amount,
-                        status: "open".into(),
-                    });
-                }
+        let res = self.send_private_request("/0/private/AddOrder", &mut params).await?;
+
+        if let Some(errs) = res.get("error").and_then(|e| e.as_array()) {
+            if !errs.is_empty() {
+                let err_msg = errs
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or(""))
+                    .collect::<Vec<&str>>()
+                    .join(", ");
+                anyhow::bail!("[Exchange API Error] AddOrder for BUY failed: {}", err_msg);
             }
         }
 
-        Ok(Order {
-            id: format!("buy_{}", chrono::Utc::now().timestamp_millis()),
-            symbol: symbol.to_string(),
-            side: "buy".into(),
-            order_type: "limit".into(),
-            price,
-            amount,
-            status: "open".into(),
-        })
+        if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
+            if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
+                tracing::info!("[Exchange API] Placed real BUY limit order on exchange: txid={}, symbol={}, amount={}, price={}", txid, symbol, amount, price);
+                return Ok(Order {
+                    id: txid.to_string(),
+                    symbol: symbol.to_string(),
+                    side: "buy".into(),
+                    order_type: "limit".into(),
+                    price,
+                    amount,
+                    status: "open".into(),
+                });
+            }
+        }
+
+        anyhow::bail!("[Exchange API Error] AddOrder for BUY returned unexpected response payload: {:?}", res);
     }
 
     async fn create_limit_sell(&self, symbol: &str, amount: f64, price: f64) -> Result<Order> {
@@ -601,31 +605,35 @@ impl ExchangeClient for GenericExchange {
             ("volume", amount.to_string()),
         ];
 
-        if let Ok(res) = self.send_private_request("/0/private/AddOrder", &mut params).await {
-            if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
-                if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
-                    return Ok(Order {
-                        id: txid.to_string(),
-                        symbol: symbol.to_string(),
-                        side: "sell".into(),
-                        order_type: "limit".into(),
-                        price,
-                        amount,
-                        status: "open".into(),
-                    });
-                }
+        let res = self.send_private_request("/0/private/AddOrder", &mut params).await?;
+
+        if let Some(errs) = res.get("error").and_then(|e| e.as_array()) {
+            if !errs.is_empty() {
+                let err_msg = errs
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or(""))
+                    .collect::<Vec<&str>>()
+                    .join(", ");
+                anyhow::bail!("[Exchange API Error] AddOrder for SELL failed: {}", err_msg);
             }
         }
 
-        Ok(Order {
-            id: format!("sell_{}", chrono::Utc::now().timestamp_millis()),
-            symbol: symbol.to_string(),
-            side: "sell".into(),
-            order_type: "limit".into(),
-            price,
-            amount,
-            status: "open".into(),
-        })
+        if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
+            if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
+                tracing::info!("[Exchange API] Placed real SELL limit order on exchange: txid={}, symbol={}, amount={}, price={}", txid, symbol, amount, price);
+                return Ok(Order {
+                    id: txid.to_string(),
+                    symbol: symbol.to_string(),
+                    side: "sell".into(),
+                    order_type: "limit".into(),
+                    price,
+                    amount,
+                    status: "open".into(),
+                });
+            }
+        }
+
+        anyhow::bail!("[Exchange API Error] AddOrder for SELL returned unexpected response payload: {:?}", res);
     }
 
     async fn cancel_order(&self, order_id: &str, _symbol: &str) -> Result<bool> {
