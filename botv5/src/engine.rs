@@ -594,6 +594,42 @@ impl TradingEngine {
         count
     }
 
+    pub fn get_market_precision(&self, symbol: &str) -> (f64, f64) {
+        if Path::new("markets.json").exists() {
+            if let Ok(content) = fs::read_to_string("markets.json") {
+                if let Ok(markets) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(entry) = markets.get(symbol) {
+                        let price_prec = entry
+                            .get("precision")
+                            .and_then(|p| p.get("price"))
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0001);
+                        let amount_prec = entry
+                            .get("precision")
+                            .and_then(|p| p.get("amount"))
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0001);
+                        return (price_prec, amount_prec);
+                    }
+                }
+            }
+        }
+        (0.0001, 0.0001)
+    }
+
+    pub fn round_to_precision(&self, val: f64, precision: f64) -> f64 {
+        if precision <= 0.0 || !val.is_finite() {
+            return val;
+        }
+        let decimals = (-precision.log10()).round() as i32;
+        if decimals <= 0 {
+            val.round()
+        } else {
+            let factor = 10.0_f64.powi(decimals);
+            (val * factor).round() / factor
+        }
+    }
+
     pub fn calculate_package_amount(&self, price: f64, quote_eur_rate: f64, min_amount: f64, amount_precision: f64) -> f64 {
         if price <= 0.0 || quote_eur_rate <= 0.0 {
             return min_amount;
@@ -1158,41 +1194,53 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
-                        let amount = self.calculate_package_amount(target_price, quote_eur_rate, 0.0001, 0.0001);
+                        let (price_prec, amount_prec) = self.get_market_precision(sym);
+                        let rounded_target_price = self.round_to_precision(target_price, price_prec);
 
-                        let edited = self.cleanup_open_orders(sym, target_price, "buy", &candles, last_close, amount).await?;
+                        let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
+                        let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
+
+                        let edited = self.cleanup_open_orders(sym, rounded_target_price, "buy", &candles, last_close, amount).await?;
                         if edited.is_some() {
                             info!("[{}] BUY order updated via edit/replace", sym);
-                            self.record_purchase(sym, amount, target_price)?;
+                            self.record_purchase(sym, amount, rounded_target_price)?;
+                            let last_idx = candles.len().saturating_sub(1);
+                            self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
                         } else {
-                            if let Ok(order) = self.execute_limit_order(sym, "buy", amount, target_price).await {
+                            if let Ok(order) = self.execute_limit_order(sym, "buy", amount, rounded_target_price).await {
                                 self.dump_pending_order(&order)?;
-                                self.record_purchase(sym, amount, target_price)?;
+                                self.record_purchase(sym, amount, rounded_target_price)?;
+                                let last_idx = candles.len().saturating_sub(1);
+                                self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
                             } else {
                                 self.pause_buy(sym, 14400)?;
                             }
                         }
                     } else if signal == Signal::Sell {
-                        let (profitable, details) = self.is_sell_profitable(sym, target_price);
+                        let (price_prec, amount_prec) = self.get_market_precision(sym);
+                        let rounded_target_price = self.round_to_precision(target_price, price_prec);
+
+                        let (profitable, details) = self.is_sell_profitable(sym, rounded_target_price);
                         if !profitable {
                             info!("[{}] Ignoring SELL event because unprofitable: {}", sym, details);
                             continue;
                         }
 
-                        let (should_sell, estimated_prob) = self.should_place_order(sym, "sell", target_price, last_close, &candles);
+                        let (should_sell, estimated_prob) = self.should_place_order(sym, "sell", rounded_target_price, last_close, &candles);
                         if !should_sell {
                             info!("[{}] Skipping SELL order: Estimated hit probability ({:.4}) is not > 0.96", sym, estimated_prob);
                             continue;
                         }
 
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
-                        let amount = self.calculate_package_amount(target_price, quote_eur_rate, 0.0001, 0.0001);
+                        let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
 
-                        self.cleanup_open_orders(sym, target_price, "sell", &candles, last_close, amount).await?;
-                        if let Ok(order) = self.execute_limit_order(sym, "sell", amount, target_price).await {
+                        self.cleanup_open_orders(sym, rounded_target_price, "sell", &candles, last_close, amount).await?;
+                        if let Ok(order) = self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
                             self.dump_pending_order(&order)?;
                             self.remove_recorded_purchases(sym)?;
+                            let last_idx = candles.len().saturating_sub(1);
+                            self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
                         }
                     }
                 }

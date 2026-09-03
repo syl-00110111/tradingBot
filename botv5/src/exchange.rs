@@ -563,24 +563,33 @@ impl ExchangeClient for GenericExchange {
             ("volume", amount.to_string()),
         ];
 
-        if let Ok(res) = self.send_private_request("/0/private/AddOrder", &mut params).await {
-            if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
-                if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
-                    return Ok(Order {
-                        id: txid.to_string(),
-                        symbol: symbol.to_string(),
-                        side: "buy".into(),
-                        order_type: "limit".into(),
-                        price,
-                        amount,
-                        status: "open".into(),
-                    });
+        match self.send_private_request("/0/private/AddOrder", &mut params).await {
+            Ok(res) => {
+                if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
+                    if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
+                        tracing::info!("[Exchange API] Placed real BUY limit order on exchange: txid={}, symbol={}, amount={}, price={}", txid, symbol, amount, price);
+                        return Ok(Order {
+                            id: txid.to_string(),
+                            symbol: symbol.to_string(),
+                            side: "buy".into(),
+                            order_type: "limit".into(),
+                            price,
+                            amount,
+                            status: "open".into(),
+                        });
+                    }
                 }
+                tracing::warn!("[Exchange API] AddOrder for BUY returned unexpected payload or error: {:?}. Generating fallback mock order ID.", res);
+            }
+            Err(e) => {
+                tracing::warn!("[Exchange API] AddOrder request for BUY failed: {}. Generating fallback mock order ID.", e);
             }
         }
 
+        let fallback_id = format!("buy_{}", chrono::Utc::now().timestamp_millis());
+        tracing::info!("[Simulation / Fallback] Created mock BUY order: id={}, symbol={}, amount={}, price={}", fallback_id, symbol, amount, price);
         Ok(Order {
-            id: format!("buy_{}", chrono::Utc::now().timestamp_millis()),
+            id: fallback_id,
             symbol: symbol.to_string(),
             side: "buy".into(),
             order_type: "limit".into(),
@@ -601,24 +610,33 @@ impl ExchangeClient for GenericExchange {
             ("volume", amount.to_string()),
         ];
 
-        if let Ok(res) = self.send_private_request("/0/private/AddOrder", &mut params).await {
-            if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
-                if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
-                    return Ok(Order {
-                        id: txid.to_string(),
-                        symbol: symbol.to_string(),
-                        side: "sell".into(),
-                        order_type: "limit".into(),
-                        price,
-                        amount,
-                        status: "open".into(),
-                    });
+        match self.send_private_request("/0/private/AddOrder", &mut params).await {
+            Ok(res) => {
+                if let Some(txid_arr) = res.get("result").and_then(|r| r.get("txid")).and_then(|t| t.as_array()) {
+                    if let Some(txid) = txid_arr.first().and_then(|v| v.as_str()) {
+                        tracing::info!("[Exchange API] Placed real SELL limit order on exchange: txid={}, symbol={}, amount={}, price={}", txid, symbol, amount, price);
+                        return Ok(Order {
+                            id: txid.to_string(),
+                            symbol: symbol.to_string(),
+                            side: "sell".into(),
+                            order_type: "limit".into(),
+                            price,
+                            amount,
+                            status: "open".into(),
+                        });
+                    }
                 }
+                tracing::warn!("[Exchange API] AddOrder for SELL returned unexpected payload or error: {:?}. Generating fallback mock order ID.", res);
+            }
+            Err(e) => {
+                tracing::warn!("[Exchange API] AddOrder request for SELL failed: {}. Generating fallback mock order ID.", e);
             }
         }
 
+        let fallback_id = format!("sell_{}", chrono::Utc::now().timestamp_millis());
+        tracing::info!("[Simulation / Fallback] Created mock SELL order: id={}, symbol={}, amount={}, price={}", fallback_id, symbol, amount, price);
         Ok(Order {
-            id: format!("sell_{}", chrono::Utc::now().timestamp_millis()),
+            id: fallback_id,
             symbol: symbol.to_string(),
             side: "sell".into(),
             order_type: "limit".into(),
