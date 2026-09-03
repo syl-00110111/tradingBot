@@ -122,6 +122,18 @@ impl TradingEngine {
         }
     }
 
+    pub fn is_pair_redlisted(&self, symbol: &str) -> bool {
+        let file_path = self.config.redlist_file();
+        if Path::new(file_path).exists() {
+            if let Ok(content) = fs::read_to_string(file_path) {
+                if let Ok(redlist) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content) {
+                    return redlist.contains_key(symbol);
+                }
+            }
+        }
+        false
+    }
+
     pub fn load_market_symbols(&self, balance: &HashMap<String, f64>, markets: &serde_json::Value) -> Vec<String> {
         let mut symbols = Vec::new();
 
@@ -147,6 +159,9 @@ impl TradingEngine {
 
         if let Some(m_obj) = active_markets {
             for (sym, entry) in m_obj {
+                if self.is_pair_redlisted(sym) {
+                    continue;
+                }
                 if entry.get("active").and_then(|v| v.as_bool()).unwrap_or(true) {
                     let base = entry.get("base").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').next().unwrap_or(""));
                     let quote = entry.get("quote").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').nth(1).unwrap_or(""));
@@ -433,6 +448,10 @@ impl TradingEngine {
         let mut reasons_map: HashMap<String, String> = HashMap::new();
 
         for sym in sample_symbols {
+            if self.is_pair_redlisted(sym) {
+                continue;
+            }
+
             let base = sym.split('/').next().unwrap_or(sym);
             let quote = sym.split('/').nth(1).unwrap_or("USD");
 
@@ -1047,20 +1066,9 @@ impl TradingEngine {
 
         if is_buy {
             let buy_threshold = 0.73;
-            info!("[DEBUG BUY] StrategyAggregator returned BUY for {}: last_close={:.8}, target_price={:.8}, buy_prob={:.4}, threshold={:.4}, num_peaks={}, is_crest_high={}", symbol, last_close, target_buy_price, buy_prob, buy_threshold, num_peaks, is_crest_high);
-
-            if is_crest_high {
-                if let Some(sma) = sma_840 {
-                    info!("[DEBUG BUY] [{}] Crest High Check REJECTED: price ({:.8}) > sma_840 ({:.8}) with num_peaks={}", symbol, last_close, sma, num_peaks);
-                } else {
-                    info!("[DEBUG BUY] [{}] Crest High Check REJECTED: price > sma_840 with num_peaks={}", symbol, num_peaks);
-                }
-                None
-            } else if buy_prob < buy_threshold {
-                info!("[DEBUG BUY] [{}] Probability REJECTED: buy_prob ({:.4}) < threshold ({:.4})", symbol, buy_prob, buy_threshold);
+            if is_crest_high || buy_prob < buy_threshold {
                 None
             } else {
-                info!("[DEBUG BUY] [{}] BUY signal PASSED evaluation! target_price={:.8}, buy_prob={:.4}", symbol, target_buy_price, buy_prob);
                 Some((Signal::Buy, target_buy_price, buy_prob))
             }
         } else if is_sell {
@@ -1292,9 +1300,19 @@ impl TradingEngine {
             info!("Running trading loop for {} pairs...", available_pairs.len());
 
             for sym in &available_pairs {
+                if self.is_pair_redlisted(sym) {
+                    continue;
+                }
+
                 let candles = match self.fetch_pair_candles(sym).await {
                     Ok(c) if !c.is_empty() => c,
-                    _ => continue,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        if e.to_string().contains("EAccount:Invalid permissions") {
+                            let _ = self.redlist_pair(sym, 0.0, 0.0);
+                        }
+                        continue;
+                    }
                 };
                 let candles_4h = self.fetch_pair_candles_4h(sym).await.ok();
 
@@ -1326,7 +1344,10 @@ impl TradingEngine {
                             }
                             Err(e) => {
                                 tracing::error!("[{}] Unscored pair SELL ALL limit order execution failed on exchange (amount: {:.8}, price: {:.8}): {}", sym, amount, rounded_target_price, e);
-                                if e.to_string().contains("Insufficient funds") {
+                                let err_str = e.to_string();
+                                if err_str.contains("EAccount:Invalid permissions") {
+                                    let _ = self.redlist_pair(sym, 0.0, 0.0);
+                                } else if err_str.contains("Insufficient funds") {
                                     if let Ok(nb) = self.handle_insufficient_funds(sym).await {
                                         balance_map = nb;
                                     }
@@ -1346,57 +1367,38 @@ impl TradingEngine {
                     let quote_asset = sym.split('/').nth(1).unwrap_or("USD");
 
                     if signal == Signal::Buy {
-                        info!("[DEBUG BUY] Processing BUY signal in trading loop for {}...", sym);
-
                         let current_buyings = self.count_buyings_for_base_asset(base_asset);
                         if current_buyings >= self.config.max_buyings_per_base_asset {
-                            info!("[DEBUG BUY] [{}] SKIPPED: Reached max buyings per base asset (current {}, max {})", sym, current_buyings, self.config.max_buyings_per_base_asset);
                             continue;
                         }
 
                         let now_ts = chrono::Utc::now().timestamp();
                         if let Some(expiry) = self.paused_for_buy.get(sym) {
                             if now_ts < *expiry {
-                                info!("[DEBUG BUY] [{}] SKIPPED: Paused for buy until timestamp {} (current ts {})", sym, expiry, now_ts);
                                 continue;
                             }
-                        }
-
-                        // Quote Asset Remaining Prioritization (Wind-choice)
-                        let mut pass_on_buy = false;
-                        if current_buyings == 0 {
-                            let current_quote_free = balance_map.get(quote_asset).copied().unwrap_or(0.0);
-                            for other_sym in &available_pairs {
-                                let other_base = other_sym.split('/').next().unwrap_or(other_sym);
-                                let other_quote = other_sym.split('/').nth(1).unwrap_or("USD");
-                                if other_base == base_asset && other_quote != quote_asset {
-                                    let other_quote_free = balance_map.get(other_quote).copied().unwrap_or(0.0);
-                                    let conversion_rate = self.get_eur_conversion_rate(other_quote) / self.get_eur_conversion_rate(quote_asset);
-                                    let other_quote_converted = other_quote_free * conversion_rate;
-                                    if other_quote_converted > current_quote_free {
-                                        info!("[DEBUG BUY] [{}] Wind-choice SKIPPED: {} has more available funds ({:.2} vs {:.2} {})", sym, other_sym, other_quote_converted, current_quote_free, quote_asset);
-                                        pass_on_buy = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if pass_on_buy {
-                            continue;
-                        }
-
-                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
-                        if !should_buy {
-                            info!("[DEBUG BUY] [{}] should_place_order returned false (estimated_prob={:.4})", sym, estimated_prob);
-                            continue;
                         }
 
                         let (price_prec, amount_prec) = self.get_market_precision(sym);
                         let rounded_target_price = self.round_to_precision(target_price, price_prec);
 
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
-                        let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
+                        let market_min_amount = self.get_market_min_amount(sym);
+                        let min_amount = market_min_amount.max(0.0001);
+                        let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, min_amount, amount_prec);
+
+                        let quote_free = balance_map.get(quote_asset).copied().unwrap_or(0.0);
+                        let required_cost = rounded_target_price * amount;
+
+                        if amount < min_amount || quote_free <= 0.0 || quote_free < required_cost {
+                            tracing::warn!("[{}] Skipping BUY signal: insufficient free {} balance ({:.8} free vs {:.8} required, amount {:.8} vs min_amount {:.8})", sym, quote_asset, quote_free, required_cost, amount, min_amount);
+                            continue;
+                        }
+
+                        let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
+                        if !should_buy {
+                            continue;
+                        }
 
                         let edited = self.cleanup_open_orders(sym, rounded_target_price, "buy", &candles, last_close, amount).await?;
                         if edited.is_some() {
@@ -1405,14 +1407,6 @@ impl TradingEngine {
                             let last_idx = candles.len().saturating_sub(1);
                             self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
                         } else {
-                            let quote_free = balance_map.get(quote_asset).copied().unwrap_or(0.0);
-                            let required_cost = rounded_target_price * amount;
-                            if quote_free <= 0.0 || quote_free < required_cost {
-                                tracing::warn!("[{}] Skipping BUY order: insufficient free {} balance ({:.8} free vs {:.8} required)", sym, quote_asset, quote_free, required_cost);
-                                self.pause_buy(sym, 14400)?;
-                                continue;
-                            }
-
                             match self.execute_limit_order(sym, "buy", amount, rounded_target_price).await {
                                 Ok(order) => {
                                     self.dump_pending_order(&order)?;
@@ -1422,7 +1416,10 @@ impl TradingEngine {
                                 }
                                 Err(e) => {
                                     tracing::error!("[{}] BUY order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Pausing buys.", sym, amount, rounded_target_price, e);
-                                    if e.to_string().contains("Insufficient funds") {
+                                    let err_str = e.to_string();
+                                    if err_str.contains("EAccount:Invalid permissions") {
+                                        let _ = self.redlist_pair(sym, 0.0, 0.0);
+                                    } else if err_str.contains("Insufficient funds") {
                                         if let Ok(nb) = self.handle_insufficient_funds(sym).await {
                                             balance_map = nb;
                                         }
@@ -1432,6 +1429,16 @@ impl TradingEngine {
                             }
                         }
                     } else if signal == Signal::Sell {
+                        let market_min_amount = self.get_market_min_amount(sym);
+                        let min_amount = market_min_amount.max(0.0001);
+
+                        let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
+
+                        if base_free < min_amount {
+                            tracing::warn!("[{}] Skipping SELL signal: insufficient free {} balance ({:.8} free vs min_amount {:.8})", sym, base_asset, base_free, min_amount);
+                            continue;
+                        }
+
                         let (price_prec, amount_prec) = self.get_market_precision(sym);
                         let rounded_target_price = self.round_to_precision(target_price, price_prec);
 
@@ -1446,10 +1453,6 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let market_min_amount = self.get_market_min_amount(sym);
-                        let min_amount = market_min_amount.max(0.0001);
-
-                        let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
                         let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, min_amount, amount_prec);
                         let raw_amount = calculated_amount.min(base_free);
@@ -1470,7 +1473,10 @@ impl TradingEngine {
                             }
                             Err(e) => {
                                 tracing::error!("[{}] SELL order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Preserving recorded purchases.", sym, amount, rounded_target_price, e);
-                                if e.to_string().contains("Insufficient funds") {
+                                let err_str = e.to_string();
+                                if err_str.contains("EAccount:Invalid permissions") {
+                                    let _ = self.redlist_pair(sym, 0.0, 0.0);
+                                } else if err_str.contains("Insufficient funds") {
                                     if let Ok(nb) = self.handle_insufficient_funds(sym).await {
                                         balance_map = nb;
                                     }
@@ -1878,5 +1884,13 @@ mod tests {
         assert_eq!(selected[0], "BTC/USD", "BTC/USD has highest score/volume and should be first");
         assert_eq!(selected[1], "ETH/USD", "ETH/USD has second highest score/volume and should be second");
         assert!(!selected.contains(&"0G/USD".to_string()), "0G/USD lower score/volume should be truncated");
+    }
+
+    #[test]
+    fn test_is_pair_redlisted_filters_redlisted_pair() {
+        let config = Config::default();
+        let mut engine = TradingEngine::new(config);
+        let _ = engine.redlist_pair("TEST/USD", 0.0, 0.0);
+        assert!(engine.is_pair_redlisted("TEST/USD"));
     }
 }
