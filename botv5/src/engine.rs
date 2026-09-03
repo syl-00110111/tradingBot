@@ -1232,8 +1232,17 @@ impl TradingEngine {
                             continue;
                         }
 
+                        let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
-                        let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
+                        let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
+                        let raw_amount = calculated_amount.min(base_free);
+                        let amount = self.round_to_precision(raw_amount, amount_prec);
+
+                        let min_amount = 0.0001;
+                        if amount < min_amount {
+                            tracing::warn!("[{}] Skipping SELL order: available free balance {:.8} {} (sell amount {:.8}) is below min_amount {}", sym, base_free, base_asset, amount, min_amount);
+                            continue;
+                        }
 
                         self.cleanup_open_orders(sym, rounded_target_price, "sell", &candles, last_close, amount).await?;
                         match self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
