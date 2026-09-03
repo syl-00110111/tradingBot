@@ -621,7 +621,12 @@ impl TradingEngine {
         if precision <= 0.0 || !val.is_finite() {
             return val;
         }
-        let decimals = (-precision.log10()).round() as i32;
+        let decimals = if precision >= 1.0 {
+            precision as i32
+        } else {
+            (-precision.log10()).round() as i32
+        };
+
         if decimals <= 0 {
             val.round()
         } else {
@@ -1049,19 +1054,58 @@ impl TradingEngine {
         let raw_symbols = self.load_market_symbols(&balance_map, &markets_val);
         let _re_evaluated = self.filter_available_pairs(&raw_symbols, &balance_map).await;
 
-        // 4. Order cancellation check for open orders
-        let open_orders = self.exchange.fetch_open_orders(None).await.unwrap_or_default();
-        for order in open_orders {
-            if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
-                let mc_engine = MonteCarloEngine::new(1000, 240);
-                let mc_score = mc_engine.validate_strategy(&candles);
-                info!("[Maintenance] Order {} for {} has mc_score={:.4}", order.id, order.symbol, mc_score);
+        // 4. Order cancellation check and filled SELL order processing for open orders
+        if let Ok(open_orders) = self.exchange.fetch_open_orders(None).await {
+            let open_order_ids: std::collections::HashSet<String> = open_orders.iter().map(|o| o.id.clone()).collect();
 
-                if mc_score < 0.42 {
-                    info!("[Maintenance] Cancelling order {} ({}) due to low mc_score ({:.4} < 0.42)", order.id, order.symbol, mc_score);
-                    let _ = self.exchange.cancel_order(&order.id, &order.symbol).await;
+            for order in &open_orders {
+                if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
+                    let mc_engine = MonteCarloEngine::new(1000, 240);
+                    let mc_score = mc_engine.validate_strategy(&candles);
+                    info!("[Maintenance] Order {} for {} has mc_score={:.4}", order.id, order.symbol, mc_score);
+
+                    if mc_score < 0.42 {
+                        info!("[Maintenance] Cancelling order {} ({}) due to low mc_score ({:.4} < 0.42)", order.id, order.symbol, mc_score);
+                        let _ = self.exchange.cancel_order(&order.id, &order.symbol).await;
+                    }
                 }
             }
+
+            // Check pending dump file for filled SELL orders
+            let pending_path = self.config.pending_file();
+            if Path::new(pending_path).exists() {
+                if let Ok(content) = fs::read_to_string(pending_path) {
+                    if let Ok(mut pending_list) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                        let mut updated = false;
+                        for entry in &mut pending_list {
+                            if let Some(order_val) = entry.get("order") {
+                                let side = order_val.get("side").and_then(|s| s.as_str()).unwrap_or("");
+                                let id = order_val.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                                let symbol = order_val.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+                                let processed = entry.get("processed").and_then(|p| p.as_bool()).unwrap_or(false);
+
+                                if side.eq_ignore_ascii_case("sell") && !id.is_empty() && !id.starts_with("sell_") && !processed {
+                                    if !open_order_ids.contains(id) {
+                                        info!("[Maintenance] Pending SELL order {} for {} is effectively processed/filled on exchange. Clearing recorded purchases.", id, symbol);
+                                        let _ = self.remove_recorded_purchases(symbol);
+                                        if let Some(obj) = entry.as_object_mut() {
+                                            obj.insert("processed".into(), serde_json::json!(true));
+                                            updated = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if updated {
+                            if let Ok(json_str) = serde_json::to_string_pretty(&pending_list) {
+                                let _ = fs::write(pending_path, json_str);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            tracing::warn!("[Maintenance] Could not fetch open orders from exchange API. Skipping pending filled order check.");
         }
 
         self.last_maintenance_ts = now_ts;
@@ -1248,11 +1292,7 @@ impl TradingEngine {
                         match self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
                             Ok(order) => {
                                 self.dump_pending_order(&order)?;
-                                if !order.id.starts_with("sell_") {
-                                    self.remove_recorded_purchases(sym)?;
-                                } else {
-                                    tracing::warn!("[{}] Skipping deletion of recorded purchases for mock order {}", sym, order.id);
-                                }
+                                info!("[{}] SELL limit order {} placed on exchange and dumped to pending orders. Purchases will be cleared when order is filled.", sym, order.id);
                                 let last_idx = candles.len().saturating_sub(1);
                                 self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
                             }
