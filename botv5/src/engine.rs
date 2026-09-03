@@ -403,6 +403,10 @@ impl TradingEngine {
         sample_symbols: &[String],
         balance: &HashMap<String, f64>,
     ) -> Vec<String> {
+        if !Path::new("volumes_trades_data.json").exists() {
+            info!("Computing volumes and trades data for new volumes_trades_data.json file, please wait...");
+        }
+
         let mut sell_candidates = Vec::new();
         let mut volume_candidates = Vec::new();
         let mut reasons_map: HashMap<String, String> = HashMap::new();
@@ -415,7 +419,7 @@ impl TradingEngine {
                 continue;
             }
 
-            let (is_optimal, reasons, chars) = self.get_only_optimal(sym).await;
+            let (is_optimal, reasons, _chars) = self.get_only_optimal(sym).await;
 
             let base_balance = balance.get(base).copied().unwrap_or(0.0);
             let has_balance = base_balance > 0.0 || self.recorded_purchases.contains_key(base);
