@@ -15,6 +15,7 @@ pub struct SignalResult {
     pub signal: Signal,
     pub buy_multiplier: f64,
     pub sell_multiplier: f64,
+    pub tendency: String,
 }
 
 pub struct StrategyAggregator;
@@ -467,10 +468,19 @@ impl StrategyAggregator {
         let buy_multiplier = 1.0 - (0.0006 * buy_score.min(2.0_f64));
         let sell_multiplier = 1.0 + (0.0006 * sell_score.min(2.0_f64));
 
+        let tendency = if buy_score > sell_score {
+            "Bullish".to_string()
+        } else if sell_score > buy_score {
+            "Bearish".to_string()
+        } else {
+            "Neutral".to_string()
+        };
+
         SignalResult {
             signal,
             buy_multiplier,
             sell_multiplier,
+            tendency,
         }
     }
 }
