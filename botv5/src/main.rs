@@ -30,22 +30,23 @@ async fn main() -> Result<()> {
 
     let mut engine = TradingEngine::new(config);
 
-    if engine.config.mode == RunMode::Backtest {
-        if let Err(e) = engine.run_backtest().await {
-            tracing::error!("Backtest engine error: {}", e);
+    let mode = engine.config.mode;
+    tokio::select! {
+        res = async {
+            if mode == RunMode::Backtest {
+                engine.run_backtest().await
+            } else {
+                engine.run().await
+            }
+        } => {
+            if let Err(e) = res {
+                tracing::error!("Engine error in {:?} mode: {}", mode, e);
+            }
         }
-    } else {
-        tokio::select! {
-            res = engine.run() => {
-                if let Err(e) = res {
-                    tracing::error!("Trading engine error: {}", e);
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C signal received. Shutting down Botv5 cleanly...");
-                let _ = engine.save_state();
-                info!("Botv5 graceful shutdown complete.");
-            }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl+C signal received. Shutting down Botv5 cleanly...");
+            let _ = engine.save_state();
+            info!("Botv5 graceful shutdown complete.");
         }
     }
 
