@@ -1082,6 +1082,99 @@ impl TradingEngine {
         }
     }
 
+    pub async fn refresh_balance(&mut self) -> Result<HashMap<String, f64>> {
+        let balance_json = self.exchange.fetch_balance().await?;
+        let mut balance_map: HashMap<String, f64> = HashMap::new();
+
+        if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
+            for (k, v) in free_obj {
+                let val = if let Some(s) = v.as_str() {
+                    s.parse::<f64>().unwrap_or(0.0)
+                } else if let Some(n) = v.as_f64() {
+                    n
+                } else {
+                    0.0
+                };
+
+                if val >= 0.000001 {
+                    balance_map.insert(k.clone(), val);
+                }
+            }
+        }
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
+            let _ = fs::write("balance.json", json_str);
+        }
+
+        self.previous_balance_map = balance_map.clone();
+        Ok(balance_map)
+    }
+
+    pub async fn process_pending_orders_and_clear_purchases(&mut self, target_base_asset: Option<&str>) -> Result<()> {
+        if let Ok(open_orders) = self.exchange.fetch_open_orders(None).await {
+            let open_order_ids: std::collections::HashSet<String> = open_orders.iter().map(|o| o.id.clone()).collect();
+
+            let pending_path = self.config.pending_file();
+            if Path::new(pending_path).exists() {
+                if let Ok(content) = fs::read_to_string(pending_path) {
+                    if let Ok(mut pending_list) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                        let mut updated = false;
+                        for entry in &mut pending_list {
+                            if let Some(order_val) = entry.get("order") {
+                                let side = order_val.get("side").and_then(|s| s.as_str()).unwrap_or("");
+                                let id = order_val.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                                let symbol = order_val.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+                                let processed = entry.get("processed").and_then(|p| p.as_bool()).unwrap_or(false);
+
+                                let sym_base = symbol.split('/').next().unwrap_or(symbol);
+                                if let Some(target) = target_base_asset {
+                                    if sym_base != target {
+                                        continue;
+                                    }
+                                }
+
+                                if side.eq_ignore_ascii_case("sell") && !id.is_empty() && !id.starts_with("sell_") && !processed {
+                                    if !open_order_ids.contains(id) {
+                                        info!("[Pending Orders Check] Pending SELL order {} for {} is effectively processed/filled on exchange. Clearing recorded purchases.", id, symbol);
+                                        let _ = self.remove_recorded_purchases(symbol);
+                                        if let Some(obj) = entry.as_object_mut() {
+                                            obj.insert("processed".into(), serde_json::json!(true));
+                                            updated = true;
+                                        }
+                                    } else {
+                                        info!("[Pending Orders Check] Pending SELL order {} for {} remains open on exchange.", id, symbol);
+                                    }
+                                }
+                            }
+                        }
+                        if updated {
+                            if let Ok(json_str) = serde_json::to_string_pretty(&pending_list) {
+                                let _ = fs::write(pending_path, json_str);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            tracing::warn!("[Pending Orders Check] Could not fetch open orders from exchange API. Skipping pending filled order check.");
+        }
+        Ok(())
+    }
+
+    pub async fn handle_insufficient_funds(&mut self, symbol: &str) -> Result<HashMap<String, f64>> {
+        let base_asset = symbol.split('/').next().unwrap_or(symbol);
+        info!("[Insufficient Funds Handler] Insufficient funds error encountered for symbol {}. Fetching fresh balance and checking pending orders for base asset {}...", symbol, base_asset);
+
+        let new_balance = self.refresh_balance().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to refresh balance after insufficient funds error on {}: {}", symbol, e);
+            self.previous_balance_map.clone()
+        });
+
+        let _ = self.process_pending_orders_and_clear_purchases(Some(base_asset)).await;
+
+        Ok(new_balance)
+    }
+
     pub async fn run_maintenance(&mut self) -> Result<()> {
         let now_ts = chrono::Utc::now().timestamp();
         if now_ts - self.last_maintenance_ts < 2520 { // 42 minutes = 2520s
@@ -1099,27 +1192,8 @@ impl TradingEngine {
         }
 
         // 2. Refresh balance.json from exchange
-        if let Ok(balance_json) = self.exchange.fetch_balance().await {
-            let mut balance_map: HashMap<String, f64> = HashMap::new();
-            if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
-                for (k, v) in free_obj {
-                    let val = if let Some(s) = v.as_str() {
-                        s.parse::<f64>().unwrap_or(0.0)
-                    } else if let Some(n) = v.as_f64() {
-                        n
-                    } else {
-                        0.0
-                    };
-                    if val >= 0.000001 {
-                        balance_map.insert(k.clone(), val);
-                    }
-                }
-            }
-            if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
-                let _ = fs::write("balance.json", json_str);
-                info!("[Maintenance] Refreshed balance.json");
-            }
-            self.previous_balance_map = balance_map;
+        if let Ok(_) = self.refresh_balance().await {
+            info!("[Maintenance] Refreshed balance.json");
         }
 
         // 3. Re-evaluate symbols with volumes_trades_data (refreshing 4-hour expired timestamps)
@@ -1131,8 +1205,6 @@ impl TradingEngine {
 
         // 4. Order cancellation check and filled SELL order processing for open orders
         if let Ok(open_orders) = self.exchange.fetch_open_orders(None).await {
-            let open_order_ids: std::collections::HashSet<String> = open_orders.iter().map(|o| o.id.clone()).collect();
-
             for order in &open_orders {
                 if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
                     let mc_engine = MonteCarloEngine::new(1000, 240);
@@ -1145,45 +1217,9 @@ impl TradingEngine {
                     }
                 }
             }
-
-            // Check pending dump file for filled SELL orders
-            let pending_path = self.config.pending_file();
-            if Path::new(pending_path).exists() {
-                if let Ok(content) = fs::read_to_string(pending_path) {
-                    if let Ok(mut pending_list) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                        let mut updated = false;
-                        for entry in &mut pending_list {
-                            if let Some(order_val) = entry.get("order") {
-                                let side = order_val.get("side").and_then(|s| s.as_str()).unwrap_or("");
-                                let id = order_val.get("id").and_then(|s| s.as_str()).unwrap_or("");
-                                let symbol = order_val.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-                                let processed = entry.get("processed").and_then(|p| p.as_bool()).unwrap_or(false);
-
-                                if side.eq_ignore_ascii_case("sell") && !id.is_empty() && !id.starts_with("sell_") && !processed {
-                                    if !open_order_ids.contains(id) {
-                                        info!("[Maintenance] Pending SELL order {} for {} is effectively processed/filled on exchange. Clearing recorded purchases.", id, symbol);
-                                        let _ = self.remove_recorded_purchases(symbol);
-                                        if let Some(obj) = entry.as_object_mut() {
-                                            obj.insert("processed".into(), serde_json::json!(true));
-                                            updated = true;
-                                        }
-                                    } else {
-                                        info!("[Maintenance] Pending SELL order {} for {} remains open on exchange.", id, symbol);
-                                    }
-                                }
-                            }
-                        }
-                        if updated {
-                            if let Ok(json_str) = serde_json::to_string_pretty(&pending_list) {
-                                let _ = fs::write(pending_path, json_str);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            tracing::warn!("[Maintenance] Could not fetch open orders from exchange API. Skipping pending filled order check.");
         }
+
+        let _ = self.process_pending_orders_and_clear_purchases(None).await;
 
         self.last_maintenance_ts = now_ts;
         Ok(())
@@ -1290,6 +1326,11 @@ impl TradingEngine {
                             }
                             Err(e) => {
                                 tracing::error!("[{}] Unscored pair SELL ALL limit order execution failed on exchange (amount: {:.8}, price: {:.8}): {}", sym, amount, rounded_target_price, e);
+                                if e.to_string().contains("Insufficient funds") {
+                                    if let Ok(nb) = self.handle_insufficient_funds(sym).await {
+                                        balance_map = nb;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1381,6 +1422,11 @@ impl TradingEngine {
                                 }
                                 Err(e) => {
                                     tracing::error!("[{}] BUY order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Pausing buys.", sym, amount, rounded_target_price, e);
+                                    if e.to_string().contains("Insufficient funds") {
+                                        if let Ok(nb) = self.handle_insufficient_funds(sym).await {
+                                            balance_map = nb;
+                                        }
+                                    }
                                     self.pause_buy(sym, 14400)?;
                                 }
                             }
@@ -1424,6 +1470,11 @@ impl TradingEngine {
                             }
                             Err(e) => {
                                 tracing::error!("[{}] SELL order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Preserving recorded purchases.", sym, amount, rounded_target_price, e);
+                                if e.to_string().contains("Insufficient funds") {
+                                    if let Ok(nb) = self.handle_insufficient_funds(sym).await {
+                                        balance_map = nb;
+                                    }
+                                }
                             }
                         }
                     }
