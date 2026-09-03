@@ -50,6 +50,7 @@ pub struct OrderBook {
 #[async_trait]
 pub trait ExchangeClient: Send + Sync {
     async fn fetch_balance(&self) -> Result<serde_json::Value>;
+    async fn fetch_markets(&self) -> Result<serde_json::Value>;
     async fn fetch_ohlcv(&self, symbol: &str, timeframe: &str, limit: usize, since: Option<i64>) -> Result<Vec<Candle>>;
     async fn fetch_ticker(&self, symbol: &str) -> Result<Ticker>;
     async fn fetch_order_book(&self, symbol: &str) -> Result<OrderBook>;
@@ -171,6 +172,117 @@ impl GenericExchange {
 
 #[async_trait]
 impl ExchangeClient for GenericExchange {
+    async fn fetch_markets(&self) -> Result<serde_json::Value> {
+        self.apply_rate_limit().await;
+        let url = "https://api.kraken.com/0/public/AssetPairs";
+
+        if let Ok(resp) = self.http_client.get(url).send().await {
+            if let Ok(json_res) = resp.json::<serde_json::Value>().await {
+                if let Some(result_obj) = json_res.get("result").and_then(|r| r.as_object()) {
+                    let mut markets_map = serde_json::Map::new();
+
+                    for (pair_key, pair_val) in result_obj {
+                        let altname = pair_val.get("altname").and_then(|v| v.as_str()).unwrap_or(pair_key.as_str()).to_string();
+                        let wsname = pair_val.get("wsname").and_then(|v| v.as_str());
+
+                        let raw_base = pair_val.get("base").and_then(|v| v.as_str()).unwrap_or("");
+                        let raw_quote = pair_val.get("quote").and_then(|v| v.as_str()).unwrap_or("");
+
+                        let base = normalize_kraken_symbol(raw_base).to_string();
+                        let quote = normalize_kraken_symbol(raw_quote).to_string();
+
+                        let symbol = if let Some(ws) = wsname {
+                            if ws.contains('/') {
+                                let parts: Vec<&str> = ws.split('/').collect();
+                                format!("{}/{}", normalize_kraken_symbol(parts[0]), normalize_kraken_symbol(parts[1]))
+                            } else {
+                                format!("{}/{}", base, quote)
+                            }
+                        } else {
+                            format!("{}/{}", base, quote)
+                        };
+
+                        let ws_id = wsname.unwrap_or(&symbol).to_string();
+                        let status = pair_val.get("status").and_then(|v| v.as_str()).unwrap_or("online");
+                        let active = status == "online";
+
+                        let pair_decimals = pair_val.get("pair_decimals").and_then(|v| v.as_i64()).unwrap_or(4);
+                        let lot_decimals = pair_val.get("lot_decimals").and_then(|v| v.as_i64()).unwrap_or(4);
+
+                        let tick_size = pair_val.get("tick_size").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+                        let price_precision = tick_size.unwrap_or_else(|| 10.0_f64.powi(-(pair_decimals as i32)));
+                        let amount_precision = 10.0_f64.powi(-(lot_decimals as i32));
+
+                        let ordermin = pair_val.get("ordermin").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+                        let costmin = pair_val.get("costmin").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+
+                        let taker = pair_val
+                            .get("fees")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|item| item.as_array())
+                            .and_then(|arr| arr.get(1))
+                            .and_then(|v| v.as_f64())
+                            .map(|pct| pct / 100.0)
+                            .unwrap_or(0.004);
+
+                        let maker = pair_val
+                            .get("fees_maker")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|item| item.as_array())
+                            .and_then(|arr| arr.get(1))
+                            .and_then(|v| v.as_f64())
+                            .map(|pct| pct / 100.0)
+                            .unwrap_or(0.0023);
+
+                        let market_entry = serde_json::json!({
+                            "id": pair_key,
+                            "symbol": symbol,
+                            "base": base,
+                            "quote": quote,
+                            "altname": altname,
+                            "wsId": ws_id,
+                            "type": "spot",
+                            "spot": true,
+                            "active": active,
+                            "taker": taker,
+                            "maker": maker,
+                            "precision": {
+                                "price": price_precision,
+                                "amount": amount_precision
+                            },
+                            "limits": {
+                                "amount": { "min": ordermin, "max": serde_json::Value::Null },
+                                "price": { "min": serde_json::Value::Null, "max": serde_json::Value::Null },
+                                "cost": { "min": costmin, "max": serde_json::Value::Null }
+                            },
+                            "info": pair_val
+                        });
+
+                        markets_map.insert(symbol, market_entry);
+                    }
+
+                    let val = serde_json::Value::Object(markets_map);
+                    if let Ok(json_str) = serde_json::to_string_pretty(&val) {
+                        let _ = std::fs::write("markets.json", json_str);
+                    }
+                    return Ok(val);
+                }
+            }
+        }
+
+        if std::path::Path::new("markets.json").exists() {
+            if let Ok(content) = std::fs::read_to_string("markets.json") {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                    return Ok(parsed);
+                }
+            }
+        }
+
+        Ok(serde_json::json!({}))
+    }
+
     async fn fetch_balance(&self) -> Result<serde_json::Value> {
         let mut params = Vec::new();
         if let Ok(res) = self.send_private_request("/0/private/Balance", &mut params).await {
