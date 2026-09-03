@@ -91,7 +91,7 @@ fn default_exchange_id() -> String {
 }
 
 fn default_max_num_pairs() -> usize {
-    100
+    150
 }
 
 fn default_max_buyings_per_base_asset() -> usize {
@@ -254,7 +254,7 @@ impl Config {
         }
 
         // Apply hardcoded botv4.py defaults as strict overrides
-        config.max_num_pairs = 100;
+        config.max_num_pairs = 150;
         config.mini_count = 400;
         config.base_assets = default_base_assets();
         config.forbid_assets = default_forbid_assets();
