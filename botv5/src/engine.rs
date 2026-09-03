@@ -336,7 +336,10 @@ impl TradingEngine {
 
     pub async fn get_only_optimal(&self, symbol: &str) -> (bool, i32, Vec<&'static str>, PairCharacteristics) {
         let now_sec = chrono::Utc::now().timestamp();
-        let now_minus_4h = now_sec - (4 * 3600);
+
+        // Individualized TTL between 8 and 12 hours (28,800 to 43,200 seconds) derived deterministically per symbol
+        let symbol_hash: u64 = symbol.bytes().fold(5381u64, |acc, b| (acc.wrapping_shl(5)).wrapping_add(acc).wrapping_add(b as u64));
+        let cache_ttl_secs = 28800 + ((symbol_hash % 14400) as i64);
 
         if Path::new("volumes_trades_data.json").exists() {
             if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
@@ -344,7 +347,7 @@ impl TradingEngine {
                     for v in volumes {
                         if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
                             if let Some(ts) = v.get("timestamp").and_then(|t| t.as_i64()) {
-                                if ts > now_minus_4h {
+                                if now_sec - ts < cache_ttl_secs {
                                     let vol_48h = v.get("volume_48h").and_then(|x| x.as_f64()).unwrap_or(0.0);
                                     let spread = v.get("spread_pct").and_then(|x| x.as_f64()).unwrap_or(0.5);
                                     let vola = v.get("volatility_pct").and_then(|x| x.as_f64()).unwrap_or(0.05);
@@ -356,7 +359,7 @@ impl TradingEngine {
                                         volatility_pct: vola,
                                         trades_per_minute: tpm,
                                     };
-                                    tracing::debug!("[Pair Scoring Preprocess] Reusing valid (<4h) cached characteristics for {} (ts: {})", symbol, ts);
+                                    tracing::debug!("[Pair Scoring Preprocess] Reusing valid ({:.1}h TTL) cached characteristics for {} (ts: {})", cache_ttl_secs as f64 / 3600.0, symbol, ts);
                                     let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
                                     return (is_optimal, score, reasons, chars);
                                 }
@@ -367,7 +370,7 @@ impl TradingEngine {
             }
         }
 
-        info!("[Pair Scoring Preprocess] Fetching fresh characteristics for {} (missing or >4h expired cache)", symbol);
+        info!("[Pair Scoring Preprocess] Fetching fresh characteristics for {} (missing or expired >{:.1}h cache)", symbol, cache_ttl_secs as f64 / 3600.0);
         let chars = match self.fetch_symbol_characteristics(symbol).await {
             Ok(c) => c,
             Err(_) => {
@@ -1322,13 +1325,17 @@ impl TradingEngine {
                                 continue;
                             }
 
-                            if let Ok(order) = self.execute_limit_order(sym, "buy", amount, rounded_target_price).await {
-                                self.dump_pending_order(&order)?;
-                                self.record_purchase(sym, amount, rounded_target_price)?;
-                                let last_idx = candles.len().saturating_sub(1);
-                                self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
-                            } else {
-                                self.pause_buy(sym, 14400)?;
+                            match self.execute_limit_order(sym, "buy", amount, rounded_target_price).await {
+                                Ok(order) => {
+                                    self.dump_pending_order(&order)?;
+                                    self.record_purchase(sym, amount, rounded_target_price)?;
+                                    let last_idx = candles.len().saturating_sub(1);
+                                    self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
+                                }
+                                Err(e) => {
+                                    tracing::error!("[{}] BUY order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Pausing buys.", sym, amount, rounded_target_price, e);
+                                    self.pause_buy(sym, 14400)?;
+                                }
                             }
                         }
                     } else if signal == Signal::Sell {
@@ -1369,7 +1376,7 @@ impl TradingEngine {
                                 self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
                             }
                             Err(e) => {
-                                tracing::error!("[{}] SELL order execution failed on exchange: {}. Preserving recorded purchases.", sym, e);
+                                tracing::error!("[{}] SELL order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Preserving recorded purchases.", sym, amount, rounded_target_price, e);
                             }
                         }
                     }
