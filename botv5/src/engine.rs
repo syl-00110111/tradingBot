@@ -1,5 +1,4 @@
 use anyhow::Result;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -241,10 +240,22 @@ impl TradingEngine {
         }
     }
 
+    pub fn load_cached_candles(&self, symbol: &str) -> Vec<Candle> {
+        let sanitized = symbol.replace('/', "");
+        let cache_file = format!("ohlcv_data_{}_1m.json", sanitized);
+        if Path::new(&cache_file).exists() {
+            if let Ok(content) = fs::read_to_string(&cache_file) {
+                if let Ok(parsed) = serde_json::from_str::<Vec<Candle>>(&content) {
+                    return parsed;
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub fn filter_available_pairs(
         &mut self,
         sample_symbols: &[String],
-        pair_candles: &HashMap<String, Vec<Candle>>,
         balance: &HashMap<String, f64>,
     ) -> Vec<String> {
         let mut sell_candidates = Vec::new();
@@ -259,7 +270,7 @@ impl TradingEngine {
                 continue;
             }
 
-            let candles = pair_candles.get(sym).cloned().unwrap_or_default();
+            let candles = self.load_cached_candles(sym);
             let chars = self.compute_pair_characteristics(&candles);
             let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
 
@@ -885,55 +896,36 @@ impl TradingEngine {
 
             let raw_symbols = self.load_market_symbols(&balance_map, &markets_json);
 
-            let mut pair_candles = HashMap::new();
-            let mut pair_candles_4h = HashMap::new();
-            let mut volumes_cache = Vec::new();
-
-            for sym in &raw_symbols {
-                if let Ok(candles) = self.fetch_pair_candles(sym).await {
-                    pair_candles.insert(sym.clone(), candles.clone());
-                    let chars = self.compute_pair_characteristics(&candles);
-                    volumes_cache.push(serde_json::json!({
-                        "symbol": sym,
-                        "timestamp": chrono::Utc::now().timestamp(),
-                        "volume_48h": chars.volume_48h,
-                        "spread_pct": chars.spread_pct,
-                        "volatility_pct": chars.volatility_pct,
-                        "trades_per_minute": chars.trades_per_minute
-                    }));
-                }
-                if let Ok(candles_4h) = self.fetch_pair_candles_4h(sym).await {
-                    pair_candles_4h.insert(sym.clone(), candles_4h);
-                }
-            }
-
-            if let Ok(json_str) = serde_json::to_string_pretty(&volumes_cache) {
-                let _ = fs::write("volumes_trades_data.json", json_str);
-            }
-
-            let available_pairs = self.filter_available_pairs(&raw_symbols, &pair_candles, &balance_map);
+            let available_pairs = self.filter_available_pairs(&raw_symbols, &balance_map);
             info!("Running trading loop for {} pairs...", available_pairs.len());
 
-            let evaluation_results: Vec<(String, Option<(Signal, f64, f64)>)> = available_pairs
-                .par_iter()
-                .map(|sym| {
-                    let candles = pair_candles.get(sym).cloned().unwrap_or_default();
-                    let c_4h = pair_candles_4h.get(sym);
-                    let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
-                    let eval = self.evaluate_symbol_parallel(sym, &candles, c_4h.map(|v| v.as_slice()), last_close);
-                    (sym.clone(), eval)
-                })
-                .collect();
+            let mut volumes_cache = Vec::new();
 
-            for (sym, eval) in evaluation_results {
+            for sym in &available_pairs {
+                let candles = match self.fetch_pair_candles(sym).await {
+                    Ok(c) if !c.is_empty() => c,
+                    _ => continue,
+                };
+                let candles_4h = self.fetch_pair_candles_4h(sym).await.ok();
+
+                let chars = self.compute_pair_characteristics(&candles);
+                volumes_cache.push(serde_json::json!({
+                    "symbol": sym,
+                    "timestamp": chrono::Utc::now().timestamp(),
+                    "volume_48h": chars.volume_48h,
+                    "spread_pct": chars.spread_pct,
+                    "volatility_pct": chars.volatility_pct,
+                    "trades_per_minute": chars.trades_per_minute
+                }));
+
+                let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
+                let eval = self.evaluate_symbol_parallel(sym, &candles, candles_4h.as_deref(), last_close);
+
                 if let Some((signal, target_price, prob)) = eval {
                     info!("[Trading Loop] Signal {:?} for {} at price {} with probability {:.4}", signal, sym, target_price, prob);
 
-                    let base_asset = sym.split('/').next().unwrap_or(&sym);
+                    let base_asset = sym.split('/').next().unwrap_or(sym);
                     let quote_asset = sym.split('/').nth(1).unwrap_or("USD");
-
-                    let candles = pair_candles.get(&sym).cloned().unwrap_or_default();
-                    let last_close = candles.last().map(|c| c.close).unwrap_or(target_price);
 
                     if signal == Signal::Buy {
                         if self.count_buyings_for_base_asset(base_asset) >= self.config.max_buyings_per_base_asset {
@@ -942,7 +934,7 @@ impl TradingEngine {
                         }
 
                         let now_ts = chrono::Utc::now().timestamp();
-                        if let Some(expiry) = self.paused_for_buy.get(&sym) {
+                        if let Some(expiry) = self.paused_for_buy.get(sym) {
                             if now_ts < *expiry {
                                 info!("[Trading Loop] Skipping BUY for {} (paused until {})", sym, expiry);
                                 continue;
@@ -973,7 +965,7 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, estimated_prob) = self.should_place_order(&sym, "buy", target_price, last_close, &candles);
+                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
                             info!("[{}] Skipping BUY order: Estimated hit probability ({:.4}) is not > 0.96", sym, estimated_prob);
                             continue;
@@ -982,26 +974,26 @@ impl TradingEngine {
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
                         let amount = self.calculate_package_amount(target_price, quote_eur_rate, 0.0001, 0.0001);
 
-                        let edited = self.cleanup_open_orders(&sym, target_price, "buy", &candles, last_close, amount).await?;
+                        let edited = self.cleanup_open_orders(sym, target_price, "buy", &candles, last_close, amount).await?;
                         if edited.is_some() {
                             info!("[{}] BUY order updated via edit/replace", sym);
-                            self.record_purchase(&sym, amount, target_price)?;
+                            self.record_purchase(sym, amount, target_price)?;
                         } else {
-                            if let Ok(order) = self.execute_limit_order(&sym, "buy", amount, target_price).await {
+                            if let Ok(order) = self.execute_limit_order(sym, "buy", amount, target_price).await {
                                 self.dump_pending_order(&order)?;
-                                self.record_purchase(&sym, amount, target_price)?;
+                                self.record_purchase(sym, amount, target_price)?;
                             } else {
-                                self.pause_buy(&sym, 14400)?;
+                                self.pause_buy(sym, 14400)?;
                             }
                         }
                     } else if signal == Signal::Sell {
-                        let (profitable, details) = self.is_sell_profitable(&sym, target_price);
+                        let (profitable, details) = self.is_sell_profitable(sym, target_price);
                         if !profitable {
                             info!("[{}] Ignoring SELL event because unprofitable: {}", sym, details);
                             continue;
                         }
 
-                        let (should_sell, estimated_prob) = self.should_place_order(&sym, "sell", target_price, last_close, &candles);
+                        let (should_sell, estimated_prob) = self.should_place_order(sym, "sell", target_price, last_close, &candles);
                         if !should_sell {
                             info!("[{}] Skipping SELL order: Estimated hit probability ({:.4}) is not > 0.96", sym, estimated_prob);
                             continue;
@@ -1010,13 +1002,17 @@ impl TradingEngine {
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
                         let amount = self.calculate_package_amount(target_price, quote_eur_rate, 0.0001, 0.0001);
 
-                        self.cleanup_open_orders(&sym, target_price, "sell", &candles, last_close, amount).await?;
-                        if let Ok(order) = self.execute_limit_order(&sym, "sell", amount, target_price).await {
+                        self.cleanup_open_orders(sym, target_price, "sell", &candles, last_close, amount).await?;
+                        if let Ok(order) = self.execute_limit_order(sym, "sell", amount, target_price).await {
                             self.dump_pending_order(&order)?;
-                            self.remove_recorded_purchases(&sym)?;
+                            self.remove_recorded_purchases(sym)?;
                         }
                     }
                 }
+            }
+
+            if let Ok(json_str) = serde_json::to_string_pretty(&volumes_cache) {
+                let _ = fs::write("volumes_trades_data.json", json_str);
             }
 
             self.run_maintenance().await?;

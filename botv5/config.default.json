@@ -3,7 +3,7 @@
     "max_lots_per_symbol": 1,
     "max_trade_percentage": 2.0,
     "quote_asset": "USD",
-    "max_number_of_pairs": 100,
+    "max_number_of_pairs": 150,
     "include_inventory_pairs": true,
     "include_all_quote_pairs": false,
     "min_profit_margin": 0.01,
