@@ -617,15 +617,33 @@ impl TradingEngine {
 
             let raw_symbols = self.load_market_symbols(&balance_map);
 
-            // Cache markets.json list for user monitoring
+            // Cache markets.json list for user monitoring with full precision and limits
             let mut markets_obj = serde_json::Map::new();
             for sym in &raw_symbols {
-                let base = sym.split('/').next().unwrap_or(sym);
-                let quote = sym.split('/').nth(1).unwrap_or("USD");
-                markets_obj.insert(sym.clone(), serde_json::json!({
-                    "symbol": sym,
+                let clean_sym = sym.strip_prefix('Z').unwrap_or(sym).strip_prefix('X').unwrap_or(sym);
+                let base = clean_sym.split('/').next().unwrap_or(clean_sym);
+                let quote = clean_sym.split('/').nth(1).unwrap_or("USD");
+                let id = format!("{}{}", base, quote);
+
+                markets_obj.insert(clean_sym.to_string(), serde_json::json!({
+                    "id": id,
+                    "symbol": clean_sym,
                     "base": base,
-                    "quote": quote
+                    "quote": quote,
+                    "altname": format!("{}{}", base, quote),
+                    "wsId": clean_sym,
+                    "type": "spot",
+                    "spot": true,
+                    "active": true,
+                    "precision": {
+                        "price": 0.0001,
+                        "amount": 0.0001
+                    },
+                    "limits": {
+                        "amount": { "min": 0.0001, "max": null },
+                        "price": { "min": null, "max": null },
+                        "cost": { "min": 0.5, "max": null }
+                    }
                 }));
             }
             if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(markets_obj)) {

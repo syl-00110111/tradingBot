@@ -93,6 +93,8 @@ This document clarifies the architecture, algorithms, and design decisions imple
 - **Simulation State File Isolation**: `Config` dynamically resolves state file paths:
   - **Live Mode**: `redlisted_pairs.json`, `paused_for_buy.json`, `recorded_purchases.json`, `pending_orders_dump.json`.
   - **Simulation Mode**: `sim_redlisted_pairs.json`, `sim_paused_for_buy.json`, `sim_recorded_purchases.json`, `sim_pending_orders_dump.json`.
+- **Legacy Python Backup**: Legacy Python modules (`botv4.py`, `market_utils.py`, `symbols_utils.py`, `indicators2.py`, `monte_carlo2.py`, etc.) are archived in the `botv4/` directory.
+- **Symbol vs ID Mapping**: Public exchange REST queries use clean normalized pair symbols (`GBP/USD`, `BTC/USD`), while internal candle cache files and market definitions retain exchange pair IDs (`ZGBPZUSD`, `XXBTZUSD`) in `markets.json`.
 - **Write-Once Sub-Actions**: `botv5/src/engine.rs` implements centralized write-once state persistence functions:
   - `redlist_pair`: Redlists unprofitable or high-cost pairs.
   - `pause_buy`: Temporarily pauses buys for symbols encountering API errors.

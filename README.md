@@ -80,12 +80,17 @@ The bot automatically persists runtime state and trading history to JSON data fi
 - `paused_for_buy.json`: Stores buy-paused pairs with expiration timestamps.
 - `recorded_purchases.json`: Stores recorded buy prices and quantities for profitability checks (`is_sell_profitable`).
 - `pending_orders_dump.json`: Dumps active/placed limit orders.
+- `markets.json`: Cached market definitions and metadata (`id`, `symbol`, `precision`, `limits`).
+- `balance.json`: Cached account balance payload.
+- `volumes_trades_data.json`: Cached pair volume, spread, volatility, and trading density metrics.
 
 ### **Simulation Mode Data Files (Isolated)**
 - `sim_redlisted_pairs.json`
 - `sim_paused_for_buy.json`
 - `sim_recorded_purchases.json`
 - `sim_pending_orders_dump.json`
+
+> **Note**: Legacy Python code (`botv4.py` and helper modules) has been backed up into the `botv4/` directory.
 
 ---
 
