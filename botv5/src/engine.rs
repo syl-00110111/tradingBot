@@ -486,9 +486,14 @@ impl TradingEngine {
         let target_buy_price = last_close * (1.0 - buy_offset);
         let target_sell_price = last_close * (1.0 + sell_offset);
 
-        // Crest high check: if price is on a crest high and sma_840 is not reached, skip BUY
-        if let Some(sma) = sma_840 {
-            if last_close > sma || target_buy_price > sma {
+        let is_crest_high = if let Some(sma) = sma_840 {
+            last_close > sma || target_buy_price > sma
+        } else {
+            false
+        };
+
+        if is_crest_high {
+            if let Some(sma) = sma_840 {
                 info!("[{}] Crest High Check: price ({:.4}) > sma_840 ({:.4}), skipping BUY", symbol, last_close, sma);
             }
         }
@@ -500,12 +505,12 @@ impl TradingEngine {
 
         let required_prob = self.config.monte_carlo.sufficient_probability.min(0.50);
 
-        if signal_res.signal == Signal::Buy && buy_prob >= required_prob {
-            Some((Signal::Buy, target_buy_price, buy_prob))
-        } else if signal_res.signal == Signal::Sell && sell_prob >= required_prob {
-            Some((Signal::Sell, target_sell_price, sell_prob))
-        } else if signal_res.signal == Signal::Buy {
-            Some((Signal::Buy, target_buy_price, buy_prob))
+        if signal_res.signal == Signal::Buy {
+            if is_crest_high {
+                None
+            } else {
+                Some((Signal::Buy, target_buy_price, buy_prob))
+            }
         } else if signal_res.signal == Signal::Sell {
             Some((Signal::Sell, target_sell_price, sell_prob))
         } else {
