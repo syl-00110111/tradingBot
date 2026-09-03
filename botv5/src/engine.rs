@@ -160,13 +160,21 @@ impl TradingEngine {
                         .and_then(|l| l.get("amount"))
                         .and_then(|a| a.get("min"))
                         .and_then(|v| v.as_f64())
+                        .or_else(|| {
+                            entry
+                                .get("info")
+                                .and_then(|i| i.get("ordermin"))
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())
+                        })
                         .unwrap_or(min_amount);
 
                     let is_base_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(base));
                     let is_quote_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(quote));
+                    let has_active_recorded_purchases = self.recorded_purchases.get(base).map_or(false, |v| !v.is_empty());
                     let has_held_balance = balance.get(base).copied().unwrap_or(0.0) >= market_min_amount
                         || balance.get(quote).copied().unwrap_or(0.0) >= market_min_amount
-                        || self.recorded_purchases.contains_key(base);
+                        || has_active_recorded_purchases;
 
                     if is_base_configured || is_quote_configured || has_held_balance {
                         if !symbols.contains(sym) {
@@ -624,6 +632,34 @@ impl TradingEngine {
             }
         }
         (0.0001, 0.0001)
+    }
+
+    pub fn get_market_min_amount(&self, symbol: &str) -> f64 {
+        if Path::new("markets.json").exists() {
+            if let Ok(content) = fs::read_to_string("markets.json") {
+                if let Ok(markets) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(entry) = markets.get(symbol) {
+                        if let Some(min_val) = entry
+                            .get("limits")
+                            .and_then(|l| l.get("amount"))
+                            .and_then(|a| a.get("min"))
+                            .and_then(|v| v.as_f64())
+                        {
+                            return min_val;
+                        }
+                        if let Some(ordermin) = entry
+                            .get("info")
+                            .and_then(|i| i.get("ordermin"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())
+                        {
+                            return ordermin;
+                        }
+                    }
+                }
+            }
+        }
+        0.0001
     }
 
     pub fn round_to_precision(&self, val: f64, precision: f64) -> f64 {
@@ -1111,6 +1147,8 @@ impl TradingEngine {
                                             obj.insert("processed".into(), serde_json::json!(true));
                                             updated = true;
                                         }
+                                    } else {
+                                        info!("[Maintenance] Pending SELL order {} for {} remains open on exchange.", id, symbol);
                                     }
                                 }
                             }
@@ -1301,15 +1339,17 @@ impl TradingEngine {
                             continue;
                         }
 
+                        let market_min_amount = self.get_market_min_amount(sym);
+                        let min_amount = market_min_amount.max(0.0001);
+
                         let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
-                        let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
+                        let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, min_amount, amount_prec);
                         let raw_amount = calculated_amount.min(base_free);
                         let amount = self.round_down_to_precision(raw_amount, amount_prec);
 
-                        let min_amount = 0.0001;
                         if amount < min_amount {
-                            tracing::warn!("[{}] Skipping SELL order: available free balance {:.8} {} (sell amount {:.8}) is below min_amount {}", sym, base_free, base_asset, amount, min_amount);
+                            tracing::warn!("[{}] Skipping SELL order: available free balance {:.8} {} (sell amount {:.8}) is below market min_amount {}", sym, base_free, base_asset, amount, min_amount);
                             continue;
                         }
 
