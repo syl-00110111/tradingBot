@@ -155,10 +155,17 @@ impl TradingEngine {
                         continue;
                     }
 
+                    let market_min_amount = entry
+                        .get("limits")
+                        .and_then(|l| l.get("amount"))
+                        .and_then(|a| a.get("min"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(min_amount);
+
                     let is_base_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(base));
                     let is_quote_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(quote));
-                    let has_held_balance = balance.get(base).copied().unwrap_or(0.0) >= min_amount
-                        || balance.get(quote).copied().unwrap_or(0.0) >= min_amount
+                    let has_held_balance = balance.get(base).copied().unwrap_or(0.0) >= market_min_amount
+                        || balance.get(quote).copied().unwrap_or(0.0) >= market_min_amount
                         || self.recorded_purchases.contains_key(base);
 
                     if is_base_configured || is_quote_configured || has_held_balance {
@@ -982,14 +989,12 @@ impl TradingEngine {
                 }
                 None
             } else if buy_prob < threshold {
-                info!("[{}] Skipping BUY signal: Estimated hit probability ({:.4}) is not > {:.2}", symbol, buy_prob, threshold);
                 None
             } else {
                 Some((Signal::Buy, target_buy_price, buy_prob))
             }
         } else if is_sell {
             if sell_prob < threshold {
-                info!("[{}] Skipping SELL signal: Estimated hit probability ({:.4}) is not > {:.2}", symbol, sell_prob, threshold);
                 None
             } else {
                 Some((Signal::Sell, target_sell_price, sell_prob))
@@ -1232,9 +1237,8 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
+                        let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
-                            info!("[{}] Skipping BUY order: Estimated hit probability ({:.4}) is not > 0.96", sym, estimated_prob);
                             continue;
                         }
 
@@ -1270,9 +1274,8 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_sell, estimated_prob) = self.should_place_order(sym, "sell", rounded_target_price, last_close, &candles);
+                        let (should_sell, _estimated_prob) = self.should_place_order(sym, "sell", rounded_target_price, last_close, &candles);
                         if !should_sell {
-                            info!("[{}] Skipping SELL order: Estimated hit probability ({:.4}) is not > 0.96", sym, estimated_prob);
                             continue;
                         }
 
