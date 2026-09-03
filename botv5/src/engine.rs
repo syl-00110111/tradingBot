@@ -127,9 +127,10 @@ impl TradingEngine {
             "USD".into(), "EUR".into(), "BTC".into(), "CHF".into(), "GBP".into(), "USDC".into(), "JPY".into(), "ETH".into(),
         ];
 
-        // Explicitly generate pairs for all held non-zero balance assets
+        // Explicitly generate pairs for all held non-zero non-dust balance assets
+        let min_amount = 0.0001;
         for (asset, amt) in balance {
-            if *amt > 0.0 && !self.config.forbid_assets.contains(asset) {
+            if *amt >= min_amount && !self.config.forbid_assets.contains(asset) {
                 if asset != "USD" && asset != "ZUSD" {
                     let pair_usd = format!("{}/USD", asset);
                     if !symbols.contains(&pair_usd) {
