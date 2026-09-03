@@ -109,23 +109,22 @@ impl TradingEngine {
     }
 
     pub fn get_eur_conversion_rate(&self, quote: &str) -> f64 {
-        match quote {
+        match quote.to_uppercase().as_str() {
             "EUR" | "ZEUR" => 1.0,
-            "USD" | "ZUSD" | "USDC" => 1.0 / 1.13,
-            "BTC" | "XXBT" => 56000.0,
-            "CHF" => 1.0,
-            "GBP" => 1.2,
-            "JPY" => 1.0 / 160.0,
-            "ETH" | "XETH" => 3000.0,
+            "USD" | "ZUSD" | "USDC" | "USDT" | "USDS" => 1.0 / 1.16,
+            "BTC" | "XXBT" | "XBT" => 66875.0,
+            "ETH" | "XETH" => 2067.0,
+            "GBP" | "ZGBP" => 1.1636,
+            "CHF" => 1.062,
+            "JPY" | "ZJPY" => 1.0 / 183.0,
+            "AUD" | "ZAUD" => 1.0 / 1.76,
+            "CAD" | "ZCAD" => 1.0 / 1.58,
             _ => 1.0,
         }
     }
 
     pub fn load_market_symbols(&self, balance: &HashMap<String, f64>, markets: &serde_json::Value) -> Vec<String> {
         let mut symbols = Vec::new();
-        let base_assets: Vec<String> = vec![
-            "USD".into(), "EUR".into(), "BTC".into(), "CHF".into(), "GBP".into(), "USDC".into(), "JPY".into(), "ETH".into(),
-        ];
 
         let loaded_disk_markets = if markets.as_object().map_or(true, |m| m.is_empty()) && Path::new("markets.json").exists() {
             fs::read_to_string("markets.json")
@@ -145,50 +144,29 @@ impl TradingEngine {
             loaded_disk_markets.as_ref().and_then(|v| v.as_object())
         };
 
-        // Explicitly generate candidate pairs for held non-zero non-dust balance assets ONLY IF SUPPORTED BY EXCHANGE
         let min_amount = 0.0001;
-        for (asset, amt) in balance {
-            if *amt >= min_amount && !self.config.forbid_assets.contains(asset) {
-                for quote in &base_assets {
-                    if asset == quote {
+
+        if let Some(m_obj) = active_markets {
+            for (sym, entry) in m_obj {
+                if entry.get("active").and_then(|v| v.as_bool()).unwrap_or(true) {
+                    let base = entry.get("base").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').next().unwrap_or(""));
+                    let quote = entry.get("quote").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').nth(1).unwrap_or(""));
+
+                    if self.config.forbid_assets.contains(&base.to_string()) || self.config.forbid_assets.contains(&quote.to_string()) {
                         continue;
                     }
-                    let pair_candidate = format!("{}/{}", asset, quote);
-                    if !symbols.contains(&pair_candidate) {
-                        if let Some(m_obj) = active_markets {
-                            if m_obj.contains_key(&pair_candidate) {
-                                symbols.push(pair_candidate);
-                            }
-                        } else if quote == "USD" || quote == "EUR" {
-                            symbols.push(pair_candidate);
+
+                    let is_base_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(base));
+                    let is_quote_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(quote));
+                    let has_held_balance = balance.get(base).copied().unwrap_or(0.0) >= min_amount
+                        || balance.get(quote).copied().unwrap_or(0.0) >= min_amount
+                        || self.recorded_purchases.contains_key(base);
+
+                    if is_base_configured || is_quote_configured || has_held_balance {
+                        if !symbols.contains(sym) {
+                            symbols.push(sym.clone());
                         }
                     }
-                }
-            }
-        }
-
-        let defaults = vec![
-            "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD", "LTC/USD", "DOT/USD", "LINK/USD",
-            "AVAX/USD", "ATOM/USD", "NEAR/USD", "BCH/USD", "UNI/USD", "AAVE/USD", "DOGE/USD", "SHIB/USD",
-            "XLM/USD", "ALGO/USD", "FIL/USD", "APT/USD", "SUI/USD", "INJ/USD", "TIA/USD", "FET/USD",
-            "RENDER/USD", "GRT/USD", "LDO/USD", "ICP/USD", "ETC/USD", "POL/USD", "NEAR/EUR", "AVAX/EUR",
-            "BTC/EUR", "ETH/EUR", "SOL/EUR", "XRP/EUR", "ADA/EUR", "LTC/EUR", "DOT/EUR", "LINK/EUR",
-            "BCH/EUR", "UNI/EUR", "AAVE/EUR", "DOGE/EUR", "ALGO/EUR", "FIL/EUR", "APT/EUR", "SUI/EUR",
-            "INJ/EUR", "TIA/EUR", "LDO/EUR", "ICP/EUR", "ETC/EUR", "PEPE/USD", "BONK/USD",
-        ];
-        for d in defaults {
-            let base = d.split('/').next().unwrap_or(d);
-            let quote = d.split('/').nth(1).unwrap_or("USD");
-            if self.config.forbid_assets.contains(&base.to_string()) || self.config.forbid_assets.contains(&quote.to_string()) {
-                continue;
-            }
-            if !symbols.contains(&d.to_string()) {
-                if let Some(m_obj) = active_markets {
-                    if m_obj.contains_key(d) {
-                        symbols.push(d.to_string());
-                    }
-                } else {
-                    symbols.push(d.to_string());
                 }
             }
         }
@@ -749,8 +727,24 @@ impl TradingEngine {
             false
         };
 
-        let buy_prob = mc_engine.estimate_hit_probability(last_close, target_buy_price, 0.01, 0.0, "below");
-        let sell_prob = mc_engine.estimate_hit_probability(last_close, target_sell_price, 0.01, 0.0, "above");
+        let mut volatility = 0.0;
+        let mut drift = 0.0;
+        if active_candles.len() > 1 {
+            let returns: Vec<f64> = active_candles
+                .windows(2)
+                .map(|w| (w[1].close / w[0].close).ln())
+                .filter(|v| v.is_finite())
+                .collect();
+            if returns.len() > 1 {
+                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+                let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+                volatility = var.sqrt();
+                drift = mean;
+            }
+        }
+
+        let buy_prob = mc_engine.estimate_hit_probability(last_close, target_buy_price, volatility, drift, "below");
+        let sell_prob = mc_engine.estimate_hit_probability(last_close, target_sell_price, volatility, drift, "above");
 
         let signal_res = StrategyAggregator::aggregate(active_candles, &self.config);
 
@@ -768,17 +762,27 @@ impl TradingEngine {
             }
         }
 
+        let threshold = self.config.monte_carlo.sufficient_probability;
+
         if is_buy {
             if is_crest_high {
                 if let Some(sma) = sma_840 {
                     info!("[{}] Crest High Check: price ({:.4}) > sma_840 ({:.4}), skipping BUY", symbol, last_close, sma);
                 }
                 None
+            } else if buy_prob < threshold {
+                info!("[{}] Skipping BUY signal: Estimated hit probability ({:.4}) is not > {:.2}", symbol, buy_prob, threshold);
+                None
             } else {
                 Some((Signal::Buy, target_buy_price, buy_prob))
             }
         } else if is_sell {
-            Some((Signal::Sell, target_sell_price, sell_prob))
+            if sell_prob < threshold {
+                info!("[{}] Skipping SELL signal: Estimated hit probability ({:.4}) is not > {:.2}", symbol, sell_prob, threshold);
+                None
+            } else {
+                Some((Signal::Sell, target_sell_price, sell_prob))
+            }
         } else {
             None
         }
