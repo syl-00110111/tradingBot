@@ -108,8 +108,13 @@ To trigger a clean and graceful shutdown at any time:
 - **Multi-Core & Dual-Core Parallel Processing**: Uses `Rayon` thread pools to analyze multiple trading symbols concurrently across all CPU cores.
 - **Async I/O Engine**: Built on `Tokio` for low-latency REST API connectivity with CCXT/Kraken-compatible exchanges.
 - **Monte Carlo Probability Engine**: Multi-threaded strategy hit probability estimation (`botv5::monte_carlo`).
+- **OHLC Non-Repetition Window Calibration**: Dynamically calibrates candle history window sizes based on non-repetitive active candles (checking Open, High, Low, Close relative differences against `epsilon = 1e-5`).
 
-### 🛡 Risk Management & Sub-Actions Architecture
+### 🛡 Risk Management & Advanced Execution Features
+- **Deprecated Order Editing & Cancellation**: `cleanup_open_orders` checks crest high conditions (against 5-week SMA `SMA_840`), evaluates Monte Carlo hit probabilities, edits open orders when prices/amounts change, or cancels orders with insufficient hit probability (< 0.96).
+- **Hit Probability & Multi-Quote Profitability Checks**: Enforces Monte Carlo hit probability thresholds (> 0.96) before order placement and checks cross-quote weighted average purchase prices (with a 0.3% profit margin) before executing sells.
+- **Simultaneous Signal & Wind-Choice Prioritization**: Prioritizes simultaneous BUY/SELL signals using hit probabilities and applies "Wind-Choice" quote asset prioritization to pass on buys if a higher quote balance exists for the base asset in another pair.
+- **Max Buyings & Sizing Limits**: Caps maximum positions to 4 per base asset, enforces package sizing bounds between 5.07 EUR minimum and 12.23 EUR maximum per trade, and redlists pairs exceeding 12.23 EUR cost unless base balance is held.
 - **Write-Once Centralized Sub-Actions**: Redlisting pairs, pausing buys on error, recording purchases, and dumping pending orders are written once and shared across all pipelines.
 - **Simulation Mode Isolation**: Run paper trading simulation or backtesting with strictly isolated state files (`sim_redlisted_pairs.json`, `sim_paused_for_buy.json`, `sim_recorded_purchases.json`) so live runs are never polluted!
 
@@ -150,6 +155,7 @@ cargo build --release
   ```
 
 - **Backtest Mode**:
+  Runs historical backtesting simulations across calibrated non-repetition candle windows, evaluating strategy aggregation signals, Monte Carlo probabilities, signal prioritization, and tracking balance, win rate, profit factor, and maximum drawdown:
   ```bash
   cargo run -- --mode backtest
   ```
