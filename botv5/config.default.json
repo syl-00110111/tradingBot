@@ -3,7 +3,7 @@
     "max_lots_per_symbol": 1,
     "max_trade_percentage": 2.0,
     "quote_asset": "USD",
-    "max_number_of_pairs": 40,
+    "max_number_of_pairs": 100,
     "include_inventory_pairs": true,
     "include_all_quote_pairs": false,
     "min_profit_margin": 0.01,
@@ -75,6 +75,7 @@
         "macd_display_threshold": 0.001
     },
     "trading": {
+        "max_buyings_per_base_asset": 4,
         "min_candles_for_analysis": 250,
         "backtest_profit_candles": 400,
         "base_target_pct": 0.75,

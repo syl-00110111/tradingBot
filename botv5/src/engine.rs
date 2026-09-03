@@ -127,9 +127,10 @@ impl TradingEngine {
             "USD".into(), "EUR".into(), "BTC".into(), "CHF".into(), "GBP".into(), "USDC".into(), "JPY".into(), "ETH".into(),
         ];
 
-        // Explicitly generate pairs for all held non-zero balance assets
+        // Explicitly generate pairs for all held non-zero non-dust balance assets
+        let min_amount = 0.0001;
         for (asset, amt) in balance {
-            if *amt > 0.0 && !self.config.forbid_assets.contains(asset) {
+            if *amt >= min_amount && !self.config.forbid_assets.contains(asset) {
                 if asset != "USD" && asset != "ZUSD" {
                     let pair_usd = format!("{}/USD", asset);
                     if !symbols.contains(&pair_usd) {
@@ -953,8 +954,8 @@ impl TradingEngine {
                     let last_close = candles.last().map(|c| c.close).unwrap_or(target_price);
 
                     if signal == Signal::Buy {
-                        if self.count_buyings_for_base_asset(base_asset) >= 4 {
-                            info!("[Trading Loop] Skipping BUY for {}: Reached max 4 buyings for base asset {}", sym, base_asset);
+                        if self.count_buyings_for_base_asset(base_asset) >= self.config.max_buyings_per_base_asset {
+                            info!("[Trading Loop] Skipping BUY for {}: Reached max {} buyings for base asset {}", sym, self.config.max_buyings_per_base_asset, base_asset);
                             continue;
                         }
 

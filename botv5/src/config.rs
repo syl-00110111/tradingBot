@@ -72,6 +72,8 @@ pub struct Config {
     pub exchange_id: String,
     #[serde(default = "default_max_num_pairs")]
     pub max_num_pairs: usize,
+    #[serde(default = "default_max_buyings_per_base_asset")]
+    pub max_buyings_per_base_asset: usize,
     #[serde(default = "default_mini_count")]
     pub mini_count: usize,
     #[serde(default = "default_base_assets")]
@@ -90,6 +92,10 @@ fn default_exchange_id() -> String {
 
 fn default_max_num_pairs() -> usize {
     100
+}
+
+fn default_max_buyings_per_base_asset() -> usize {
+    4
 }
 
 fn default_mini_count() -> usize {
@@ -161,6 +167,7 @@ impl Default for Config {
             api_secret: String::new(),
             exchange_id: default_exchange_id(),
             max_num_pairs: default_max_num_pairs(),
+            max_buyings_per_base_asset: default_max_buyings_per_base_asset(),
             mini_count: default_mini_count(),
             base_assets: default_base_assets(),
             forbid_assets: default_forbid_assets(),
@@ -189,6 +196,11 @@ impl Config {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(n) = json_val.get("max_number_of_pairs").and_then(|v| v.as_u64()) {
                         config.max_num_pairs = n as usize;
+                    }
+                    if let Some(t) = json_val.get("trading") {
+                        if let Some(b) = t.get("max_buyings_per_base_asset").and_then(|v| v.as_u64()) {
+                            config.max_buyings_per_base_asset = b as usize;
+                        }
                     }
                     if let Some(mc) = json_val.get("monte_carlo") {
                         if let Some(sp) = mc.get("profit_threshold").and_then(|v| v.as_f64()) {

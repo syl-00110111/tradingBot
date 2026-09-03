@@ -59,6 +59,34 @@ pub trait ExchangeClient: Send + Sync {
     async fn fetch_open_orders(&self, symbol: Option<&str>) -> Result<Vec<Order>>;
 }
 
+pub fn normalize_kraken_symbol(asset: &str) -> &str {
+    match asset {
+        "ZEUR" | "EUR" => "EUR",
+        "ZGBP" | "GBP" => "GBP",
+        "ZUSD" | "USD" => "USD",
+        "ZAUD" | "AUD" => "AUD",
+        "ZCAD" | "CAD" => "CAD",
+        "ZJPY" | "JPY" => "JPY",
+        "XXBT" | "XBT" | "BTC" => "BTC",
+        "XETH" | "ETH" => "ETH",
+        "XXLM" | "XLM" => "XLM",
+        "XXRP" | "XRP" => "XRP",
+        _ => {
+            if let Some(stripped) = asset.strip_prefix('Z') {
+                if ["EUR", "GBP", "USD", "AUD", "CAD", "JPY"].contains(&stripped) {
+                    return stripped;
+                }
+            }
+            if let Some(stripped) = asset.strip_prefix('X') {
+                if ["XBT", "ETH", "LTC", "XRP", "XLM", "XMR", "ZEC"].contains(&stripped) {
+                    return stripped;
+                }
+            }
+            asset
+        }
+    }
+}
+
 pub struct GenericExchange {
     pub exchange_id: String,
     pub api_key: String,
@@ -169,7 +197,12 @@ impl ExchangeClient for GenericExchange {
             symbol.to_string()
         };
         let formatted_pair = if symbol_mapped.contains('/') {
-            symbol_mapped.replace('/', "")
+            let parts: Vec<&str> = symbol_mapped.split('/').collect();
+            if parts.len() == 2 {
+                format!("{}{}", normalize_kraken_symbol(parts[0]), normalize_kraken_symbol(parts[1]))
+            } else {
+                symbol_mapped.replace('/', "")
+            }
         } else {
             let clean = symbol_mapped.strip_prefix('Z').unwrap_or(&symbol_mapped).strip_prefix('X').unwrap_or(&symbol_mapped);
             clean.to_string()
@@ -251,7 +284,16 @@ impl ExchangeClient for GenericExchange {
 
     async fn fetch_ticker(&self, symbol: &str) -> Result<Ticker> {
         self.apply_rate_limit().await;
-        let formatted_pair = symbol.replace('/', "");
+        let formatted_pair = if symbol.contains('/') {
+            let parts: Vec<&str> = symbol.split('/').collect();
+            if parts.len() == 2 {
+                format!("{}{}", normalize_kraken_symbol(parts[0]), normalize_kraken_symbol(parts[1]))
+            } else {
+                symbol.replace('/', "")
+            }
+        } else {
+            symbol.replace('/', "")
+        };
         let url = format!("https://api.kraken.com/0/public/Ticker?pair={}", formatted_pair);
 
         if let Ok(resp) = self.http_client.get(&url).send().await {
@@ -286,7 +328,16 @@ impl ExchangeClient for GenericExchange {
 
     async fn fetch_order_book(&self, symbol: &str) -> Result<OrderBook> {
         self.apply_rate_limit().await;
-        let formatted_pair = symbol.replace('/', "");
+        let formatted_pair = if symbol.contains('/') {
+            let parts: Vec<&str> = symbol.split('/').collect();
+            if parts.len() == 2 {
+                format!("{}{}", normalize_kraken_symbol(parts[0]), normalize_kraken_symbol(parts[1]))
+            } else {
+                symbol.replace('/', "")
+            }
+        } else {
+            symbol.replace('/', "")
+        };
         let url = format!("https://api.kraken.com/0/public/Depth?pair={}", formatted_pair);
 
         if let Ok(resp) = self.http_client.get(&url).send().await {
@@ -329,8 +380,19 @@ impl ExchangeClient for GenericExchange {
     }
 
     async fn create_limit_buy(&self, symbol: &str, amount: f64, price: f64) -> Result<Order> {
+        let formatted_pair = if symbol.contains('/') {
+            let parts: Vec<&str> = symbol.split('/').collect();
+            if parts.len() == 2 {
+                format!("{}{}", normalize_kraken_symbol(parts[0]), normalize_kraken_symbol(parts[1]))
+            } else {
+                symbol.replace('/', "")
+            }
+        } else {
+            symbol.replace('/', "")
+        };
+
         let mut params = vec![
-            ("pair", symbol.replace('/', "")),
+            ("pair", formatted_pair),
             ("type", "buy".to_string()),
             ("ordertype", "limit".to_string()),
             ("price", price.to_string()),
@@ -365,8 +427,19 @@ impl ExchangeClient for GenericExchange {
     }
 
     async fn create_limit_sell(&self, symbol: &str, amount: f64, price: f64) -> Result<Order> {
+        let formatted_pair = if symbol.contains('/') {
+            let parts: Vec<&str> = symbol.split('/').collect();
+            if parts.len() == 2 {
+                format!("{}{}", normalize_kraken_symbol(parts[0]), normalize_kraken_symbol(parts[1]))
+            } else {
+                symbol.replace('/', "")
+            }
+        } else {
+            symbol.replace('/', "")
+        };
+
         let mut params = vec![
-            ("pair", symbol.replace('/', "")),
+            ("pair", formatted_pair),
             ("type", "sell".to_string()),
             ("ordertype", "limit".to_string()),
             ("price", price.to_string()),
