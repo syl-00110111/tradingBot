@@ -1261,7 +1261,7 @@ impl TradingEngine {
                 let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
 
                 let base_asset = sym.split('/').next().unwrap_or(sym);
-                let quote_asset = sym.split('/').nth(1).unwrap_or("USD");
+                let _quote_asset = sym.split('/').nth(1).unwrap_or("USD");
                 let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
                 let market_min_amount = self.get_market_min_amount(sym);
                 let min_amount = market_min_amount.max(0.0001);
@@ -1341,7 +1341,7 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
+                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
                             info!("[DEBUG BUY] [{}] should_place_order returned false (estimated_prob={:.4})", sym, estimated_prob);
                             continue;
