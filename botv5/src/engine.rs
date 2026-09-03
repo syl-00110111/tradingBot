@@ -1369,12 +1369,14 @@ impl TradingEngine {
                     if signal == Signal::Buy {
                         let current_buyings = self.count_buyings_for_base_asset(base_asset);
                         if current_buyings >= self.config.max_buyings_per_base_asset {
+                            info!("[{}] Skipping BUY signal: reached max buyings per base asset (current {}, max {})", sym, current_buyings, self.config.max_buyings_per_base_asset);
                             continue;
                         }
 
                         let now_ts = chrono::Utc::now().timestamp();
                         if let Some(expiry) = self.paused_for_buy.get(sym) {
                             if now_ts < *expiry {
+                                info!("[{}] Skipping BUY signal: pair is paused for buy until timestamp {} (current ts {})", sym, expiry, now_ts);
                                 continue;
                             }
                         }
@@ -1395,8 +1397,9 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
+                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
+                            info!("[{}] Skipping BUY signal: should_place_order probability check failed (estimated_prob={:.4})", sym, estimated_prob);
                             continue;
                         }
 
