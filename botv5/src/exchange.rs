@@ -47,6 +47,14 @@ pub struct OrderBook {
     pub asks: Vec<(f64, f64)>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trade {
+    pub price: f64,
+    pub amount: f64,
+    pub timestamp: i64,
+    pub side: String,
+}
+
 #[async_trait]
 pub trait ExchangeClient: Send + Sync {
     async fn fetch_balance(&self) -> Result<serde_json::Value>;
@@ -54,6 +62,9 @@ pub trait ExchangeClient: Send + Sync {
     async fn fetch_ohlcv(&self, symbol: &str, timeframe: &str, limit: usize, since: Option<i64>) -> Result<Vec<Candle>>;
     async fn fetch_ticker(&self, symbol: &str) -> Result<Ticker>;
     async fn fetch_order_book(&self, symbol: &str) -> Result<OrderBook>;
+    async fn fetch_trades(&self, _symbol: &str, _limit: usize) -> Result<Vec<Trade>> {
+        Ok(Vec::new())
+    }
     async fn create_limit_buy(&self, symbol: &str, amount: f64, price: f64) -> Result<Order>;
     async fn create_limit_sell(&self, symbol: &str, amount: f64, price: f64) -> Result<Order>;
     async fn cancel_order(&self, order_id: &str, symbol: &str) -> Result<bool>;
@@ -493,6 +504,52 @@ impl ExchangeClient for GenericExchange {
             bids: vec![(49995.0, 1.2)],
             asks: vec![(50005.0, 1.5)],
         })
+    }
+
+    async fn fetch_trades(&self, symbol: &str, limit: usize) -> Result<Vec<Trade>> {
+        self.apply_rate_limit().await;
+        let formatted_pair = resolve_pair_id(symbol);
+        let url = format!("https://api.kraken.com/0/public/Trades?pair={}", formatted_pair);
+
+        if let Ok(resp) = self.http_client.get(&url).send().await {
+            if let Ok(json_res) = resp.json::<serde_json::Value>().await {
+                if let Some(result_obj) = json_res.get("result").and_then(|r| r.as_object()) {
+                    for (key, trades_val) in result_obj {
+                        if key == "last" {
+                            continue;
+                        }
+                        if let Some(trades_arr) = trades_val.as_array() {
+                            let mut trades = Vec::new();
+                            for item in trades_arr {
+                                if let Some(arr) = item.as_array() {
+                                    let price = arr.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                    let amount = arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                    let ts_sec = arr.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let timestamp = (ts_sec * 1000.0) as i64;
+                                    let side = arr.get(3).and_then(|v| v.as_str()).unwrap_or("b").to_string();
+
+                                    trades.push(Trade {
+                                        price,
+                                        amount,
+                                        timestamp,
+                                        side,
+                                    });
+                                }
+                            }
+                            if !trades.is_empty() {
+                                if trades.len() > limit {
+                                    let start_idx = trades.len() - limit;
+                                    return Ok(trades[start_idx..].to_vec());
+                                }
+                                return Ok(trades);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Vec::new())
     }
 
     async fn create_limit_buy(&self, symbol: &str, amount: f64, price: f64) -> Result<Order> {
