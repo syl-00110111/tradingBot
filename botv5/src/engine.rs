@@ -1160,20 +1160,43 @@ impl TradingEngine {
         info!("          BOTV5 BACKTEST SIMULATION ENGINE        ");
         info!("==================================================");
 
-        let empty_balance = HashMap::new();
-        let sample_pairs = self.load_market_symbols(&empty_balance);
-
-        let mut sim_balance_map = HashMap::new();
-        sim_balance_map.insert("USD".to_string(), 10000.0);
-        sim_balance_map.insert("EUR".to_string(), 10000.0);
-
-        let sim_balance_json = serde_json::json!({
-            "free": sim_balance_map,
-            "total": sim_balance_map
+        let balance_json = self.exchange.fetch_balance().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch balance for backtest ({}), using fallback.", e);
+            serde_json::json!({
+                "free": { "USD": 10000.0, "EUR": 10000.0 },
+                "total": { "USD": 10000.0, "EUR": 10000.0 }
+            })
         });
-        if let Ok(json_str) = serde_json::to_string_pretty(&sim_balance_json) {
+
+        let mut balance_map: HashMap<String, f64> = HashMap::new();
+        if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
+            for (k, v) in free_obj {
+                let val = if let Some(s) = v.as_str() {
+                    s.parse::<f64>().unwrap_or(0.0)
+                } else if let Some(n) = v.as_f64() {
+                    n
+                } else {
+                    0.0
+                };
+
+                if val >= 0.000001 {
+                    balance_map.insert(k.clone(), val);
+                }
+            }
+        }
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
             let _ = fs::write("balance.json", json_str);
         }
+
+        let mut balance_entries: Vec<String> = balance_map
+            .iter()
+            .map(|(k, v)| format!("{}: {:.10}", k, v))
+            .collect();
+        balance_entries.sort();
+        info!("Fetched balance for backtest: {}", balance_entries.join(", "));
+
+        let sample_pairs = self.load_market_symbols(&balance_map);
 
         let mut markets_obj = serde_json::Map::new();
         for sym in &sample_pairs {
@@ -1211,7 +1234,30 @@ impl TradingEngine {
         let mut winning_trades = 0;
         let mut total_profit_usd = 0.0;
         let mut total_loss_usd = 0.0;
-        let initial_balance = 10000.0;
+
+        let mut total_usd_balance = 0.0;
+        for (asset, amt) in &balance_map {
+            if asset == "USD" || asset == "ZUSD" || asset == "USDC" || asset == "USDT" {
+                total_usd_balance += amt;
+            } else if asset == "EUR" || asset == "ZEUR" {
+                total_usd_balance += amt * 1.08;
+            } else if asset == "GBP" || asset == "ZGBP" {
+                total_usd_balance += amt * 1.27;
+            } else {
+                let pair = format!("{}/USD", asset);
+                if let Ok(ticker) = self.exchange.fetch_ticker(&pair).await {
+                    if ticker.last > 0.0 {
+                        total_usd_balance += amt * ticker.last;
+                    }
+                }
+            }
+        }
+
+        let initial_balance = if total_usd_balance > 0.0 {
+            total_usd_balance
+        } else {
+            10000.0
+        };
         let mut current_balance = initial_balance;
         let mut peak_balance = initial_balance;
         let mut max_drawdown = 0.0;
