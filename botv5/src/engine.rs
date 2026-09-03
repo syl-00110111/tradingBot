@@ -438,6 +438,62 @@ impl TradingEngine {
         (is_optimal, score, reasons, chars)
     }
 
+    pub async fn re_evaluate_pair(&self, symbol: &str) -> (bool, i32, Vec<&'static str>, PairCharacteristics) {
+        info!("[Pair Re-evaluation] Force re-evaluating pair score for {} due to Insufficient funds on SELL order...", symbol);
+        let chars = match self.fetch_symbol_characteristics(symbol).await {
+            Ok(c) => c,
+            Err(_) => {
+                let candles = self.load_cached_candles(symbol);
+                self.compute_pair_characteristics(&candles)
+            }
+        };
+
+        let now_sec = chrono::Utc::now().timestamp();
+        let mut volumes = Vec::new();
+        if Path::new("volumes_trades_data.json").exists() {
+            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
+                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    volumes = parsed;
+                }
+            }
+        }
+
+        let mut found = false;
+        for v in &mut volumes {
+            if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("timestamp".into(), serde_json::json!(now_sec));
+                    obj.insert("volume_48h".into(), serde_json::json!(chars.volume_48h));
+                    obj.insert("spread_pct".into(), serde_json::json!(chars.spread_pct));
+                    obj.insert("volatility_pct".into(), serde_json::json!(chars.volatility_pct));
+                    obj.insert("trades_per_minute".into(), serde_json::json!(chars.trades_per_minute));
+                }
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            volumes.push(serde_json::json!({
+                "symbol": symbol,
+                "id": symbol.replace('/', ""),
+                "timestamp": now_sec,
+                "volume_48h": chars.volume_48h,
+                "spread_pct": chars.spread_pct,
+                "volatility_pct": chars.volatility_pct,
+                "trades_per_minute": chars.trades_per_minute
+            }));
+        }
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&volumes) {
+            let _ = fs::write("volumes_trades_data.json", json_str);
+        }
+
+        let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+        info!("[Pair Re-evaluation] Re-evaluated {} -> is_optimal: {}, score: {}", symbol, is_optimal, score);
+        (is_optimal, score, reasons, chars)
+    }
+
     pub async fn filter_available_pairs(
         &mut self,
         sample_symbols: &[String],
@@ -1351,6 +1407,7 @@ impl TradingEngine {
                                     if let Ok(nb) = self.handle_insufficient_funds(sym).await {
                                         balance_map = nb;
                                     }
+                                    let _ = self.re_evaluate_pair(sym).await;
                                 }
                             }
                         }
@@ -1483,6 +1540,7 @@ impl TradingEngine {
                                     if let Ok(nb) = self.handle_insufficient_funds(sym).await {
                                         balance_map = nb;
                                     }
+                                    let _ = self.re_evaluate_pair(sym).await;
                                 }
                             }
                         }
