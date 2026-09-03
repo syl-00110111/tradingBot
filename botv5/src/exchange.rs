@@ -163,10 +163,15 @@ impl ExchangeClient for GenericExchange {
 
     async fn fetch_ohlcv(&self, symbol: &str, timeframe: &str, limit: usize, since: Option<i64>) -> Result<Vec<Candle>> {
         self.apply_rate_limit().await;
-        let formatted_pair = if symbol.contains('/') {
-            symbol.replace('/', "")
+        let symbol_mapped = if symbol.to_uppercase().contains("MATIC") {
+            symbol.replace("MATIC", "POL").replace("matic", "pol")
         } else {
-            let clean = symbol.strip_prefix('Z').unwrap_or(symbol).strip_prefix('X').unwrap_or(symbol);
+            symbol.to_string()
+        };
+        let formatted_pair = if symbol_mapped.contains('/') {
+            symbol_mapped.replace('/', "")
+        } else {
+            let clean = symbol_mapped.strip_prefix('Z').unwrap_or(&symbol_mapped).strip_prefix('X').unwrap_or(&symbol_mapped);
             clean.to_string()
         };
         let interval_min = if timeframe.eq_ignore_ascii_case("4h") { 240 } else { 1 };
