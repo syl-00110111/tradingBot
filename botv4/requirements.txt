@@ -1,0 +1,10 @@
+ccxt
+pandas
+pandas-ta
+rich
+readchar
+matplotlib
+torch
+py-cpuinfo
+plotext
+psutil
