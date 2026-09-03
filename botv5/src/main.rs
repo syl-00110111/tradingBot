@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
 
     let mut engine = TradingEngine::new(config);
 
-    if config.mode == RunMode::Backtest {
+    if engine.config.mode == RunMode::Backtest {
         if let Err(e) = engine.run_backtest().await {
             tracing::error!("Backtest engine error: {}", e);
         }
