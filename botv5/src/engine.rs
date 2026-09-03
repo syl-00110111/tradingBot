@@ -155,10 +155,17 @@ impl TradingEngine {
                         continue;
                     }
 
+                    let market_min_amount = entry
+                        .get("limits")
+                        .and_then(|l| l.get("amount"))
+                        .and_then(|a| a.get("min"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(min_amount);
+
                     let is_base_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(base));
                     let is_quote_configured = self.config.base_assets.iter().any(|b| b.eq_ignore_ascii_case(quote));
-                    let has_held_balance = balance.get(base).copied().unwrap_or(0.0) >= min_amount
-                        || balance.get(quote).copied().unwrap_or(0.0) >= min_amount
+                    let has_held_balance = balance.get(base).copied().unwrap_or(0.0) >= market_min_amount
+                        || balance.get(quote).copied().unwrap_or(0.0) >= market_min_amount
                         || self.recorded_purchases.contains_key(base);
 
                     if is_base_configured || is_quote_configured || has_held_balance {
@@ -594,6 +601,65 @@ impl TradingEngine {
         count
     }
 
+    pub fn get_market_precision(&self, symbol: &str) -> (f64, f64) {
+        if Path::new("markets.json").exists() {
+            if let Ok(content) = fs::read_to_string("markets.json") {
+                if let Ok(markets) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(entry) = markets.get(symbol) {
+                        let price_prec = entry
+                            .get("precision")
+                            .and_then(|p| p.get("price"))
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0001);
+                        let amount_prec = entry
+                            .get("precision")
+                            .and_then(|p| p.get("amount"))
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0001);
+                        return (price_prec, amount_prec);
+                    }
+                }
+            }
+        }
+        (0.0001, 0.0001)
+    }
+
+    pub fn round_to_precision(&self, val: f64, precision: f64) -> f64 {
+        if precision <= 0.0 || !val.is_finite() {
+            return val;
+        }
+        let decimals = if precision >= 1.0 {
+            precision as i32
+        } else {
+            (-precision.log10()).round() as i32
+        };
+
+        if decimals <= 0 {
+            val.round()
+        } else {
+            let factor = 10.0_f64.powi(decimals);
+            (val * factor).round() / factor
+        }
+    }
+
+    pub fn round_down_to_precision(&self, val: f64, precision: f64) -> f64 {
+        if precision <= 0.0 || !val.is_finite() {
+            return val;
+        }
+        let decimals = if precision >= 1.0 {
+            precision as i32
+        } else {
+            (-precision.log10()).round() as i32
+        };
+
+        if decimals <= 0 {
+            val.floor()
+        } else {
+            let factor = 10.0_f64.powi(decimals);
+            (val * factor).floor() / factor
+        }
+    }
+
     pub fn calculate_package_amount(&self, price: f64, quote_eur_rate: f64, min_amount: f64, amount_precision: f64) -> f64 {
         if price <= 0.0 || quote_eur_rate <= 0.0 {
             return min_amount;
@@ -941,14 +1007,12 @@ impl TradingEngine {
                 }
                 None
             } else if buy_prob < threshold {
-                info!("[{}] Skipping BUY signal: Estimated hit probability ({:.4}) is not > {:.2}", symbol, buy_prob, threshold);
                 None
             } else {
                 Some((Signal::Buy, target_buy_price, buy_prob))
             }
         } else if is_sell {
             if sell_prob < threshold {
-                info!("[{}] Skipping SELL signal: Estimated hit probability ({:.4}) is not > {:.2}", symbol, sell_prob, threshold);
                 None
             } else {
                 Some((Signal::Sell, target_sell_price, sell_prob))
@@ -1013,19 +1077,58 @@ impl TradingEngine {
         let raw_symbols = self.load_market_symbols(&balance_map, &markets_val);
         let _re_evaluated = self.filter_available_pairs(&raw_symbols, &balance_map).await;
 
-        // 4. Order cancellation check for open orders
-        let open_orders = self.exchange.fetch_open_orders(None).await.unwrap_or_default();
-        for order in open_orders {
-            if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
-                let mc_engine = MonteCarloEngine::new(1000, 240);
-                let mc_score = mc_engine.validate_strategy(&candles);
-                info!("[Maintenance] Order {} for {} has mc_score={:.4}", order.id, order.symbol, mc_score);
+        // 4. Order cancellation check and filled SELL order processing for open orders
+        if let Ok(open_orders) = self.exchange.fetch_open_orders(None).await {
+            let open_order_ids: std::collections::HashSet<String> = open_orders.iter().map(|o| o.id.clone()).collect();
 
-                if mc_score < 0.42 {
-                    info!("[Maintenance] Cancelling order {} ({}) due to low mc_score ({:.4} < 0.42)", order.id, order.symbol, mc_score);
-                    let _ = self.exchange.cancel_order(&order.id, &order.symbol).await;
+            for order in &open_orders {
+                if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
+                    let mc_engine = MonteCarloEngine::new(1000, 240);
+                    let mc_score = mc_engine.validate_strategy(&candles);
+                    info!("[Maintenance] Order {} for {} has mc_score={:.4}", order.id, order.symbol, mc_score);
+
+                    if mc_score < 0.42 {
+                        info!("[Maintenance] Cancelling order {} ({}) due to low mc_score ({:.4} < 0.42)", order.id, order.symbol, mc_score);
+                        let _ = self.exchange.cancel_order(&order.id, &order.symbol).await;
+                    }
                 }
             }
+
+            // Check pending dump file for filled SELL orders
+            let pending_path = self.config.pending_file();
+            if Path::new(pending_path).exists() {
+                if let Ok(content) = fs::read_to_string(pending_path) {
+                    if let Ok(mut pending_list) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                        let mut updated = false;
+                        for entry in &mut pending_list {
+                            if let Some(order_val) = entry.get("order") {
+                                let side = order_val.get("side").and_then(|s| s.as_str()).unwrap_or("");
+                                let id = order_val.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                                let symbol = order_val.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+                                let processed = entry.get("processed").and_then(|p| p.as_bool()).unwrap_or(false);
+
+                                if side.eq_ignore_ascii_case("sell") && !id.is_empty() && !id.starts_with("sell_") && !processed {
+                                    if !open_order_ids.contains(id) {
+                                        info!("[Maintenance] Pending SELL order {} for {} is effectively processed/filled on exchange. Clearing recorded purchases.", id, symbol);
+                                        let _ = self.remove_recorded_purchases(symbol);
+                                        if let Some(obj) = entry.as_object_mut() {
+                                            obj.insert("processed".into(), serde_json::json!(true));
+                                            updated = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if updated {
+                            if let Ok(json_str) = serde_json::to_string_pretty(&pending_list) {
+                                let _ = fs::write(pending_path, json_str);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            tracing::warn!("[Maintenance] Could not fetch open orders from exchange API. Skipping pending filled order check.");
         }
 
         self.last_maintenance_ts = now_ts;
@@ -1152,47 +1255,71 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
+                        let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
-                            info!("[{}] Skipping BUY order: Estimated hit probability ({:.4}) is not > 0.96", sym, estimated_prob);
                             continue;
                         }
 
-                        let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
-                        let amount = self.calculate_package_amount(target_price, quote_eur_rate, 0.0001, 0.0001);
+                        let (price_prec, amount_prec) = self.get_market_precision(sym);
+                        let rounded_target_price = self.round_to_precision(target_price, price_prec);
 
-                        let edited = self.cleanup_open_orders(sym, target_price, "buy", &candles, last_close, amount).await?;
+                        let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
+                        let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
+
+                        let edited = self.cleanup_open_orders(sym, rounded_target_price, "buy", &candles, last_close, amount).await?;
                         if edited.is_some() {
                             info!("[{}] BUY order updated via edit/replace", sym);
-                            self.record_purchase(sym, amount, target_price)?;
+                            self.record_purchase(sym, amount, rounded_target_price)?;
+                            let last_idx = candles.len().saturating_sub(1);
+                            self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
                         } else {
-                            if let Ok(order) = self.execute_limit_order(sym, "buy", amount, target_price).await {
+                            if let Ok(order) = self.execute_limit_order(sym, "buy", amount, rounded_target_price).await {
                                 self.dump_pending_order(&order)?;
-                                self.record_purchase(sym, amount, target_price)?;
+                                self.record_purchase(sym, amount, rounded_target_price)?;
+                                let last_idx = candles.len().saturating_sub(1);
+                                self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
                             } else {
                                 self.pause_buy(sym, 14400)?;
                             }
                         }
                     } else if signal == Signal::Sell {
-                        let (profitable, details) = self.is_sell_profitable(sym, target_price);
+                        let (price_prec, amount_prec) = self.get_market_precision(sym);
+                        let rounded_target_price = self.round_to_precision(target_price, price_prec);
+
+                        let (profitable, details) = self.is_sell_profitable(sym, rounded_target_price);
                         if !profitable {
                             info!("[{}] Ignoring SELL event because unprofitable: {}", sym, details);
                             continue;
                         }
 
-                        let (should_sell, estimated_prob) = self.should_place_order(sym, "sell", target_price, last_close, &candles);
+                        let (should_sell, _estimated_prob) = self.should_place_order(sym, "sell", rounded_target_price, last_close, &candles);
                         if !should_sell {
-                            info!("[{}] Skipping SELL order: Estimated hit probability ({:.4}) is not > 0.96", sym, estimated_prob);
                             continue;
                         }
 
+                        let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
-                        let amount = self.calculate_package_amount(target_price, quote_eur_rate, 0.0001, 0.0001);
+                        let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
+                        let raw_amount = calculated_amount.min(base_free);
+                        let amount = self.round_down_to_precision(raw_amount, amount_prec);
 
-                        self.cleanup_open_orders(sym, target_price, "sell", &candles, last_close, amount).await?;
-                        if let Ok(order) = self.execute_limit_order(sym, "sell", amount, target_price).await {
-                            self.dump_pending_order(&order)?;
-                            self.remove_recorded_purchases(sym)?;
+                        let min_amount = 0.0001;
+                        if amount < min_amount {
+                            tracing::warn!("[{}] Skipping SELL order: available free balance {:.8} {} (sell amount {:.8}) is below min_amount {}", sym, base_free, base_asset, amount, min_amount);
+                            continue;
+                        }
+
+                        self.cleanup_open_orders(sym, rounded_target_price, "sell", &candles, last_close, amount).await?;
+                        match self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
+                            Ok(order) => {
+                                self.dump_pending_order(&order)?;
+                                info!("[{}] SELL limit order {} placed on exchange and dumped to pending orders. Purchases will be cleared when order is filled.", sym, order.id);
+                                let last_idx = candles.len().saturating_sub(1);
+                                self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
+                            }
+                            Err(e) => {
+                                tracing::error!("[{}] SELL order execution failed on exchange: {}. Preserving recorded purchases.", sym, e);
+                            }
                         }
                     }
                 }
