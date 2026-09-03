@@ -1147,6 +1147,8 @@ impl TradingEngine {
                                             obj.insert("processed".into(), serde_json::json!(true));
                                             updated = true;
                                         }
+                                    } else {
+                                        info!("[Maintenance] Pending SELL order {} for {} remains open on exchange.", id, symbol);
                                     }
                                 }
                             }
