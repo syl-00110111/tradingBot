@@ -954,8 +954,8 @@ impl TradingEngine {
                     let last_close = candles.last().map(|c| c.close).unwrap_or(target_price);
 
                     if signal == Signal::Buy {
-                        if self.count_buyings_for_base_asset(base_asset) >= 4 {
-                            info!("[Trading Loop] Skipping BUY for {}: Reached max 4 buyings for base asset {}", sym, base_asset);
+                        if self.count_buyings_for_base_asset(base_asset) >= self.config.max_buyings_per_base_asset {
+                            info!("[Trading Loop] Skipping BUY for {}: Reached max {} buyings for base asset {}", sym, self.config.max_buyings_per_base_asset, base_asset);
                             continue;
                         }
 
