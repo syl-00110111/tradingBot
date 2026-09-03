@@ -1110,7 +1110,7 @@ impl TradingEngine {
         let mut peak_balance = initial_balance;
         let mut max_drawdown = 0.0;
 
-        for symbol in sample_pairs {
+        for symbol in &sample_pairs {
             let candles = match self.fetch_pair_candles(symbol).await {
                 Ok(c) if !c.is_empty() => c,
                 _ => continue,
