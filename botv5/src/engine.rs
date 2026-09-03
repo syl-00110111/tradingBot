@@ -1259,6 +1259,39 @@ impl TradingEngine {
                 let candles_4h = self.fetch_pair_candles_4h(sym).await.ok();
 
                 let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
+
+                let base_asset = sym.split('/').next().unwrap_or(sym);
+                let quote_asset = sym.split('/').nth(1).unwrap_or("USD");
+                let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
+                let market_min_amount = self.get_market_min_amount(sym);
+                let min_amount = market_min_amount.max(0.0001);
+
+                let (is_optimal, score, _reasons, _chars) = self.get_only_optimal(sym).await;
+
+                if !is_optimal && base_free >= min_amount {
+                    info!("[{}] Pair is no longer scored correctly (score: {}, optimal: false). Generating SELL order to sell everything (held balance: {:.8})...", sym, score, base_free);
+                    let (price_prec, amount_prec) = self.get_market_precision(sym);
+                    let target_price = last_close * 1.0005;
+                    let rounded_target_price = self.round_to_precision(target_price, price_prec);
+                    let amount = self.round_down_to_precision(base_free, amount_prec);
+
+                    if amount >= min_amount {
+                        self.cleanup_open_orders(sym, rounded_target_price, "sell", &candles, last_close, amount).await?;
+                        match self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
+                            Ok(order) => {
+                                self.dump_pending_order(&order)?;
+                                info!("[{}] Unscored pair SELL ALL limit order {} placed on exchange for {:.8} at price {:.8}", sym, order.id, amount, rounded_target_price);
+                                let last_idx = candles.len().saturating_sub(1);
+                                self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
+                            }
+                            Err(e) => {
+                                tracing::error!("[{}] Unscored pair SELL ALL limit order execution failed on exchange (amount: {:.8}, price: {:.8}): {}", sym, amount, rounded_target_price, e);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let eval = self.evaluate_symbol_parallel(sym, &candles, candles_4h.as_deref(), last_close);
 
                 if let Some((signal, target_price, prob)) = eval {
