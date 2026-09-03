@@ -175,9 +175,17 @@ impl Config {
         let mut config = Config::default();
         config.mode = mode;
 
-        // 1. Read config.default.json if present
-        if Path::new("config.default.json").exists() {
-            if let Ok(content) = fs::read_to_string("config.default.json") {
+        // 1. Read config.default.json if present (or fallback to botv5/config.default.json)
+        let config_default_path = if Path::new("config.default.json").exists() {
+            "config.default.json"
+        } else if Path::new("botv5/config.default.json").exists() {
+            "botv5/config.default.json"
+        } else {
+            ""
+        };
+
+        if !config_default_path.is_empty() {
+            if let Ok(content) = fs::read_to_string(config_default_path) {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(n) = json_val.get("max_number_of_pairs").and_then(|v| v.as_u64()) {
                         config.max_num_pairs = n as usize;
@@ -192,8 +200,16 @@ impl Config {
         }
 
         // 2. Read config.json overrides if present
-        if Path::new("config.json").exists() {
-            if let Ok(content) = fs::read_to_string("config.json") {
+        let config_path = if Path::new("config.json").exists() {
+            "config.json"
+        } else if Path::new("botv5/config.json").exists() {
+            "botv5/config.json"
+        } else {
+            ""
+        };
+
+        if !config_path.is_empty() {
+            if let Ok(content) = fs::read_to_string(config_path) {
                 if let Ok(override_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(n) = override_val.get("max_num_pairs").and_then(|v| v.as_u64()) {
                         config.max_num_pairs = n as usize;
@@ -202,9 +218,21 @@ impl Config {
             }
         }
 
-        // 3. Read api.json for exchange credentials if present
-        if Path::new("api.json").exists() {
-            if let Ok(file) = fs::File::open("api.json") {
+        // 3. Read api.json or api.json.example for exchange credentials
+        let api_path = if Path::new("api.json").exists() {
+            "api.json"
+        } else if Path::new("botv5/api.json").exists() {
+            "botv5/api.json"
+        } else if Path::new("api.json.example").exists() {
+            "api.json.example"
+        } else if Path::new("botv5/api.json.example").exists() {
+            "botv5/api.json.example"
+        } else {
+            ""
+        };
+
+        if !api_path.is_empty() {
+            if let Ok(file) = fs::File::open(api_path) {
                 if let Ok(creds) = serde_json::from_reader::<_, ApiCredentials>(file) {
                     config.api_key = creds.api_key;
                     config.api_secret = creds.api_secret;
