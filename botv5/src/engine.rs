@@ -134,6 +134,54 @@ impl TradingEngine {
         false
     }
 
+    pub fn is_dust_balance(&self, asset: &str, amount: f64, markets: Option<&serde_json::Value>) -> bool {
+        if amount <= 0.0 {
+            return true;
+        }
+
+        let loaded_disk_markets = if markets.map_or(true, |m| m.as_object().map_or(true, |obj| obj.is_empty())) && Path::new("markets.json").exists() {
+            fs::read_to_string("markets.json")
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        } else {
+            None
+        };
+
+        let active_markets = markets.and_then(|m| m.as_object()).or_else(|| loaded_disk_markets.as_ref().and_then(|v| v.as_object()));
+
+        let mut min_asset_amount = 0.0001;
+
+        if let Some(m_obj) = active_markets {
+            for (sym, entry) in m_obj {
+                let base = entry.get("base").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').next().unwrap_or(""));
+                let quote = entry.get("quote").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').nth(1).unwrap_or(""));
+
+                if base.eq_ignore_ascii_case(asset) || quote.eq_ignore_ascii_case(asset) {
+                    let market_min_amount = entry
+                        .get("limits")
+                        .and_then(|l| l.get("amount"))
+                        .and_then(|a| a.get("min"))
+                        .and_then(|v| v.as_f64())
+                        .or_else(|| {
+                            entry
+                                .get("info")
+                                .and_then(|i| i.get("ordermin"))
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())
+                        })
+                        .unwrap_or(0.0001);
+
+                    if market_min_amount > 0.0 {
+                        min_asset_amount = market_min_amount;
+                        break;
+                    }
+                }
+            }
+        }
+
+        amount < min_asset_amount
+    }
+
     pub fn load_market_symbols(&self, balance: &HashMap<String, f64>, markets: &serde_json::Value) -> Vec<String> {
         let mut symbols = Vec::new();
 
@@ -435,6 +483,62 @@ impl TradingEngine {
         }
 
         let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+        (is_optimal, score, reasons, chars)
+    }
+
+    pub async fn re_evaluate_pair(&self, symbol: &str) -> (bool, i32, Vec<&'static str>, PairCharacteristics) {
+        info!("[Pair Re-evaluation] Force re-evaluating pair score for {} due to Insufficient funds on SELL order...", symbol);
+        let chars = match self.fetch_symbol_characteristics(symbol).await {
+            Ok(c) => c,
+            Err(_) => {
+                let candles = self.load_cached_candles(symbol);
+                self.compute_pair_characteristics(&candles)
+            }
+        };
+
+        let now_sec = chrono::Utc::now().timestamp();
+        let mut volumes = Vec::new();
+        if Path::new("volumes_trades_data.json").exists() {
+            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
+                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    volumes = parsed;
+                }
+            }
+        }
+
+        let mut found = false;
+        for v in &mut volumes {
+            if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("timestamp".into(), serde_json::json!(now_sec));
+                    obj.insert("volume_48h".into(), serde_json::json!(chars.volume_48h));
+                    obj.insert("spread_pct".into(), serde_json::json!(chars.spread_pct));
+                    obj.insert("volatility_pct".into(), serde_json::json!(chars.volatility_pct));
+                    obj.insert("trades_per_minute".into(), serde_json::json!(chars.trades_per_minute));
+                }
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            volumes.push(serde_json::json!({
+                "symbol": symbol,
+                "id": symbol.replace('/', ""),
+                "timestamp": now_sec,
+                "volume_48h": chars.volume_48h,
+                "spread_pct": chars.spread_pct,
+                "volatility_pct": chars.volatility_pct,
+                "trades_per_minute": chars.trades_per_minute
+            }));
+        }
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&volumes) {
+            let _ = fs::write("volumes_trades_data.json", json_str);
+        }
+
+        let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+        info!("[Pair Re-evaluation] Re-evaluated {} -> is_optimal: {}, score: {}", symbol, is_optimal, score);
         (is_optimal, score, reasons, chars)
     }
 
@@ -1094,6 +1198,9 @@ impl TradingEngine {
         let balance_json = self.exchange.fetch_balance().await?;
         let mut balance_map: HashMap<String, f64> = HashMap::new();
 
+        let markets_content = fs::read_to_string("markets.json").unwrap_or_else(|_| "{}".to_string());
+        let markets_val: serde_json::Value = serde_json::from_str(&markets_content).unwrap_or_default();
+
         if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
             for (k, v) in free_obj {
                 let val = if let Some(s) = v.as_str() {
@@ -1104,8 +1211,12 @@ impl TradingEngine {
                     0.0
                 };
 
-                if val >= 0.000001 {
-                    balance_map.insert(k.clone(), val);
+                if val > 0.0 {
+                    if !self.is_dust_balance(k, val, Some(&markets_val)) {
+                        balance_map.insert(k.clone(), val);
+                    } else {
+                        info!("[Dust Check] Filtered out dust asset balance {}: {:.8}", k, val);
+                    }
                 }
             }
         }
@@ -1237,6 +1348,14 @@ impl TradingEngine {
         info!("Trading engine started in mode: {:?}", self.config.mode);
 
         loop {
+            let markets_json = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
+                tracing::warn!("Failed to fetch markets from exchange API: {}", e);
+                serde_json::json!({})
+            });
+            if let Ok(json_str) = serde_json::to_string_pretty(&markets_json) {
+                let _ = fs::write("markets.json", json_str);
+            }
+
             let balance_json = self.exchange.fetch_balance().await?;
             let mut balance_map: HashMap<String, f64> = HashMap::new();
 
@@ -1250,8 +1369,12 @@ impl TradingEngine {
                         0.0
                     };
 
-                    if val >= 0.000001 {
-                        balance_map.insert(k.clone(), val);
+                    if val > 0.0 {
+                        if !self.is_dust_balance(k, val, Some(&markets_json)) {
+                            balance_map.insert(k.clone(), val);
+                        } else {
+                            info!("[Dust Check] Filtered out dust asset balance at startup: {}: {:.8}", k, val);
+                        }
                     }
                 }
             }
@@ -1351,6 +1474,7 @@ impl TradingEngine {
                                     if let Ok(nb) = self.handle_insufficient_funds(sym).await {
                                         balance_map = nb;
                                     }
+                                    let _ = self.re_evaluate_pair(sym).await;
                                 }
                             }
                         }
@@ -1369,12 +1493,14 @@ impl TradingEngine {
                     if signal == Signal::Buy {
                         let current_buyings = self.count_buyings_for_base_asset(base_asset);
                         if current_buyings >= self.config.max_buyings_per_base_asset {
+                            info!("[{}] Skipping BUY signal: reached max buyings per base asset (current {}, max {})", sym, current_buyings, self.config.max_buyings_per_base_asset);
                             continue;
                         }
 
                         let now_ts = chrono::Utc::now().timestamp();
                         if let Some(expiry) = self.paused_for_buy.get(sym) {
                             if now_ts < *expiry {
+                                info!("[{}] Skipping BUY signal: pair is paused for buy until timestamp {} (current ts {})", sym, expiry, now_ts);
                                 continue;
                             }
                         }
@@ -1395,8 +1521,9 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
+                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
+                            info!("[{}] Skipping BUY signal: should_place_order probability check failed (estimated_prob={:.4})", sym, estimated_prob);
                             continue;
                         }
 
@@ -1480,6 +1607,7 @@ impl TradingEngine {
                                     if let Ok(nb) = self.handle_insufficient_funds(sym).await {
                                         balance_map = nb;
                                     }
+                                    let _ = self.re_evaluate_pair(sym).await;
                                 }
                             }
                         }
@@ -1892,5 +2020,26 @@ mod tests {
         let mut engine = TradingEngine::new(config);
         let _ = engine.redlist_pair("TEST/USD", 0.0, 0.0);
         assert!(engine.is_pair_redlisted("TEST/USD"));
+    }
+
+    #[test]
+    fn test_is_dust_balance_filters_dust_amounts() {
+        let config = Config::default();
+        let engine = TradingEngine::new(config);
+
+        let markets = serde_json::json!({
+            "DOGE/USD": {
+                "id": "DOGEUSD",
+                "symbol": "DOGE/USD",
+                "base": "DOGE",
+                "quote": "USD",
+                "limits": {
+                    "amount": { "min": 10.0 }
+                }
+            }
+        });
+
+        assert!(engine.is_dust_balance("DOGE", 5.0, Some(&markets)), "5.0 DOGE should be dust when min is 10.0");
+        assert!(!engine.is_dust_balance("DOGE", 15.0, Some(&markets)), "15.0 DOGE should NOT be dust when min is 10.0");
     }
 }
