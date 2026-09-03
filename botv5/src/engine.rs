@@ -1043,14 +1043,20 @@ impl TradingEngine {
         let threshold = self.config.monte_carlo.sufficient_probability;
 
         if is_buy {
+            info!("[DEBUG BUY] StrategyAggregator returned BUY for {}: last_close={:.8}, target_price={:.8}, buy_prob={:.4}, threshold={:.4}, num_peaks={}, is_crest_high={}", symbol, last_close, target_buy_price, buy_prob, threshold, num_peaks, is_crest_high);
+
             if is_crest_high {
                 if let Some(sma) = sma_840 {
-                    info!("[{}] Crest High Check: price ({:.4}) > sma_840 ({:.4}), skipping BUY", symbol, last_close, sma);
+                    info!("[DEBUG BUY] [{}] Crest High Check REJECTED: price ({:.8}) > sma_840 ({:.8}) with num_peaks={}", symbol, last_close, sma, num_peaks);
+                } else {
+                    info!("[DEBUG BUY] [{}] Crest High Check REJECTED: price > sma_840 with num_peaks={}", symbol, num_peaks);
                 }
                 None
             } else if buy_prob < threshold {
+                info!("[DEBUG BUY] [{}] Probability REJECTED: buy_prob ({:.4}) < threshold ({:.4})", symbol, buy_prob, threshold);
                 None
             } else {
+                info!("[DEBUG BUY] [{}] BUY signal PASSED evaluation! target_price={:.8}, buy_prob={:.4}", symbol, target_buy_price, buy_prob);
                 Some((Signal::Buy, target_buy_price, buy_prob))
             }
         } else if is_sell {
@@ -1262,22 +1268,25 @@ impl TradingEngine {
                     let quote_asset = sym.split('/').nth(1).unwrap_or("USD");
 
                     if signal == Signal::Buy {
-                        if self.count_buyings_for_base_asset(base_asset) >= self.config.max_buyings_per_base_asset {
-                            info!("[Trading Loop] Skipping BUY for {}: Reached max {} buyings for base asset {}", sym, self.config.max_buyings_per_base_asset, base_asset);
+                        info!("[DEBUG BUY] Processing BUY signal in trading loop for {}...", sym);
+
+                        let current_buyings = self.count_buyings_for_base_asset(base_asset);
+                        if current_buyings >= self.config.max_buyings_per_base_asset {
+                            info!("[DEBUG BUY] [{}] SKIPPED: Reached max buyings per base asset (current {}, max {})", sym, current_buyings, self.config.max_buyings_per_base_asset);
                             continue;
                         }
 
                         let now_ts = chrono::Utc::now().timestamp();
                         if let Some(expiry) = self.paused_for_buy.get(sym) {
                             if now_ts < *expiry {
-                                info!("[Trading Loop] Skipping BUY for {} (paused until {})", sym, expiry);
+                                info!("[DEBUG BUY] [{}] SKIPPED: Paused for buy until timestamp {} (current ts {})", sym, expiry, now_ts);
                                 continue;
                             }
                         }
 
                         // Quote Asset Remaining Prioritization (Wind-choice)
                         let mut pass_on_buy = false;
-                        if self.count_buyings_for_base_asset(base_asset) == 0 {
+                        if current_buyings == 0 {
                             let current_quote_free = balance_map.get(quote_asset).copied().unwrap_or(0.0);
                             for other_sym in &available_pairs {
                                 let other_base = other_sym.split('/').next().unwrap_or(other_sym);
@@ -1287,7 +1296,7 @@ impl TradingEngine {
                                     let conversion_rate = self.get_eur_conversion_rate(other_quote) / self.get_eur_conversion_rate(quote_asset);
                                     let other_quote_converted = other_quote_free * conversion_rate;
                                     if other_quote_converted > current_quote_free {
-                                        info!("[{}] Wind-choice: Passing on buy because {} has more available funds ({:.2} vs {:.2} {})", sym, other_sym, other_quote_converted, current_quote_free, quote_asset);
+                                        info!("[DEBUG BUY] [{}] Wind-choice SKIPPED: {} has more available funds ({:.2} vs {:.2} {})", sym, other_sym, other_quote_converted, current_quote_free, quote_asset);
                                         pass_on_buy = true;
                                         break;
                                     }
@@ -1301,6 +1310,7 @@ impl TradingEngine {
 
                         let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
+                            info!("[DEBUG BUY] [{}] should_place_order returned false (estimated_prob={:.4})", sym, estimated_prob);
                             continue;
                         }
 
