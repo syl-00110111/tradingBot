@@ -1181,6 +1181,8 @@ impl TradingEngine {
         });
 
         let sample_pairs = self.load_market_symbols(&balance_map, &markets_json);
+        let selected_pairs = self.filter_available_pairs(&sample_pairs, &balance_map);
+        info!("[Backtest] Selected {} available pairs out of {} market candidates for backtesting.", selected_pairs.len(), sample_pairs.len());
 
         let mut total_simulated_trades = 0;
         let mut winning_trades = 0;
@@ -1214,7 +1216,7 @@ impl TradingEngine {
         let mut peak_balance = initial_balance;
         let mut max_drawdown = 0.0;
 
-        for symbol in &sample_pairs {
+        for symbol in &selected_pairs {
             let candles = match self.fetch_pair_candles(symbol).await {
                 Ok(c) if !c.is_empty() => c,
                 _ => continue,
