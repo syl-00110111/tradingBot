@@ -29,7 +29,6 @@ pub struct PairCharacteristics {
 pub struct TradingEngine {
     pub config: Config,
     pub exchange: Box<dyn ExchangeClient + Send + Sync>,
-    pub paused_for_buy: HashMap<String, i64>,
     pub recorded_purchases: HashMap<String, Vec<RecordedPurchase>>,
     pub last_maintenance_ts: i64,
     pub previous_selected_pairs: Vec<String>,
@@ -47,7 +46,6 @@ impl TradingEngine {
         let mut engine = Self {
             config,
             exchange,
-            paused_for_buy: HashMap::new(),
             recorded_purchases: HashMap::new(),
             last_maintenance_ts: 0,
             previous_selected_pairs: Vec::new(),
@@ -59,22 +57,6 @@ impl TradingEngine {
     }
 
     pub fn load_saved_state(&mut self) {
-        let pause_path = self.config.pause_file();
-        let actual_pause_file = if !Path::new(pause_path).exists() && self.config.mode == crate::config::RunMode::Simulation {
-            "paused_for_buy.json"
-        } else {
-            pause_path
-        };
-
-        if Path::new(actual_pause_file).exists() {
-            if let Ok(content) = fs::read_to_string(actual_pause_file) {
-                if let Ok(map) = serde_json::from_str::<HashMap<String, i64>>(&content) {
-                    self.paused_for_buy = map;
-                    info!("Loaded {} paused buy entries from {}", self.paused_for_buy.len(), actual_pause_file);
-                }
-            }
-        }
-
         let purchases_path = self.config.purchases_file();
         let actual_purchases_file = if !Path::new(purchases_path).exists() && self.config.mode == crate::config::RunMode::Simulation {
             "recorded_purchases.json"
@@ -93,11 +75,6 @@ impl TradingEngine {
     }
 
     pub fn save_state(&self) -> Result<()> {
-        let pause_path = self.config.pause_file();
-        if let Ok(json_str) = serde_json::to_string_pretty(&self.paused_for_buy) {
-            let _ = fs::write(pause_path, json_str);
-        }
-
         let purchases_path = self.config.purchases_file();
         if let Ok(json_str) = serde_json::to_string_pretty(&self.recorded_purchases) {
             let _ = fs::write(purchases_path, json_str);
@@ -1211,12 +1188,9 @@ impl TradingEngine {
                     0.0
                 };
 
-                if val > 0.0 {
-                    if !self.is_dust_balance(k, val, Some(&markets_val)) {
-                        balance_map.insert(k.clone(), val);
-                    } else {
-                        info!("[Dust Check] Filtered out dust asset balance {}: {:.8}", k, val);
-                    }
+                let norm_k = crate::exchange::normalize_kraken_symbol(k);
+                if val > 0.0 && !self.is_dust_balance(&norm_k, val, Some(&markets_val)) {
+                    balance_map.insert(norm_k, val);
                 }
             }
         }
@@ -1369,12 +1343,9 @@ impl TradingEngine {
                         0.0
                     };
 
-                    if val > 0.0 {
-                        if !self.is_dust_balance(k, val, Some(&markets_json)) {
-                            balance_map.insert(k.clone(), val);
-                        } else {
-                            info!("[Dust Check] Filtered out dust asset balance at startup: {}: {:.8}", k, val);
-                        }
+                    let norm_k = crate::exchange::normalize_kraken_symbol(k);
+                    if val > 0.0 && !self.is_dust_balance(&norm_k, val, Some(&markets_json)) {
+                        balance_map.insert(norm_k, val);
                     }
                 }
             }
@@ -1497,14 +1468,6 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let now_ts = chrono::Utc::now().timestamp();
-                        if let Some(expiry) = self.paused_for_buy.get(sym) {
-                            if now_ts < *expiry {
-                                info!("[{}] Skipping BUY signal: pair is paused for buy until timestamp {} (current ts {})", sym, expiry, now_ts);
-                                continue;
-                            }
-                        }
-
                         let (price_prec, amount_prec) = self.get_market_precision(sym);
                         let rounded_target_price = self.round_to_precision(target_price, price_prec);
 
@@ -1542,7 +1505,7 @@ impl TradingEngine {
                                     self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
                                 }
                                 Err(e) => {
-                                    tracing::error!("[{}] BUY order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Pausing buys.", sym, amount, rounded_target_price, e);
+                                    tracing::error!("[{}] BUY order execution failed on exchange (amount: {:.8}, price: {:.8}): {}.", sym, amount, rounded_target_price, e);
                                     let err_str = e.to_string();
                                     if err_str.contains("EAccount:Invalid permissions") {
                                         let _ = self.redlist_pair(sym, 0.0, 0.0);
@@ -1551,7 +1514,6 @@ impl TradingEngine {
                                             balance_map = nb;
                                         }
                                     }
-                                    self.pause_buy(sym, 14400)?;
                                 }
                             }
                         }
@@ -1643,15 +1605,6 @@ impl TradingEngine {
         Ok(())
     }
 
-    pub fn pause_buy(&mut self, symbol: &str, duration_secs: i64) -> Result<()> {
-        let expiry = chrono::Utc::now().timestamp() + duration_secs;
-        self.paused_for_buy.insert(symbol.to_string(), expiry);
-
-        let file_path = self.config.pause_file();
-        fs::write(file_path, serde_json::to_string_pretty(&self.paused_for_buy)?)?;
-        info!("[Sub-action] Paused buys for {} until timestamp {} in {}", symbol, expiry, file_path);
-        Ok(())
-    }
 
     pub fn dump_pending_order(&self, order: &Order) -> Result<()> {
         let file_path = self.config.pending_file();

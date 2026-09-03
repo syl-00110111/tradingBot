@@ -71,8 +71,31 @@ pub trait ExchangeClient: Send + Sync {
     async fn fetch_open_orders(&self, symbol: Option<&str>) -> Result<Vec<Order>>;
 }
 
-pub fn normalize_kraken_symbol(asset: &str) -> &str {
-    match asset {
+pub fn normalize_kraken_symbol(asset: &str) -> String {
+    if std::path::Path::new("markets.json").exists() {
+        if let Ok(content) = std::fs::read_to_string("markets.json") {
+            if let Ok(markets) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(m_obj) = markets.as_object() {
+                    for (_sym, entry) in m_obj {
+                        if let Some(info) = entry.get("info") {
+                            if info.get("base").and_then(|v| v.as_str()) == Some(asset) {
+                                if let Some(base) = entry.get("base").and_then(|v| v.as_str()) {
+                                    return base.to_string();
+                                }
+                            }
+                            if info.get("quote").and_then(|v| v.as_str()) == Some(asset) {
+                                if let Some(quote) = entry.get("quote").and_then(|v| v.as_str()) {
+                                    return quote.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let clean = match asset {
         "ZEUR" | "EUR" => "EUR",
         "ZGBP" | "GBP" => "GBP",
         "ZUSD" | "USD" => "USD",
@@ -86,17 +109,18 @@ pub fn normalize_kraken_symbol(asset: &str) -> &str {
         _ => {
             if let Some(stripped) = asset.strip_prefix('Z') {
                 if ["EUR", "GBP", "USD", "AUD", "CAD", "JPY"].contains(&stripped) {
-                    return stripped;
+                    return stripped.to_string();
                 }
             }
             if let Some(stripped) = asset.strip_prefix('X') {
                 if ["XBT", "ETH", "LTC", "XRP", "XLM", "XMR", "ZEC"].contains(&stripped) {
-                    return stripped;
+                    return stripped.to_string();
                 }
             }
             asset
         }
-    }
+    };
+    clean.to_string()
 }
 
 pub fn resolve_pair_id(symbol: &str) -> String {
@@ -232,8 +256,8 @@ impl ExchangeClient for GenericExchange {
                         let raw_base = pair_val.get("base").and_then(|v| v.as_str()).unwrap_or("");
                         let raw_quote = pair_val.get("quote").and_then(|v| v.as_str()).unwrap_or("");
 
-                        let base = normalize_kraken_symbol(raw_base).to_string();
-                        let quote = normalize_kraken_symbol(raw_quote).to_string();
+                        let base = normalize_kraken_symbol(raw_base);
+                        let quote = normalize_kraken_symbol(raw_quote);
 
                         let symbol = if let Some(ws) = wsname {
                             if ws.contains('/') {
@@ -673,5 +697,21 @@ impl ExchangeClient for GenericExchange {
         }
 
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_kraken_symbol() {
+        assert_eq!(normalize_kraken_symbol("ZEUR"), "EUR");
+        assert_eq!(normalize_kraken_symbol("ZUSD"), "USD");
+        assert_eq!(normalize_kraken_symbol("ZGBP"), "GBP");
+        assert_eq!(normalize_kraken_symbol("ZCAD"), "CAD");
+        assert_eq!(normalize_kraken_symbol("ZAUD"), "AUD");
+        assert_eq!(normalize_kraken_symbol("ZJPY"), "JPY");
+        assert_eq!(normalize_kraken_symbol("XXBT"), "BTC");
     }
 }
