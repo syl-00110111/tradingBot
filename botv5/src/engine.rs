@@ -177,34 +177,36 @@ impl TradingEngine {
         let mut score = 0;
         let mut reasons = Vec::new();
 
-        if chars.volume_48h > 120000.0 {
+        let thresholds = &self.config.timeframe_thresholds;
+
+        if chars.volume_48h > thresholds.volume_48h.high {
             score += 1;
             reasons.push("High Vol");
-        } else if chars.volume_48h < 1000.0 {
+        } else if chars.volume_48h < thresholds.volume_48h.low {
             score -= 1;
             reasons.push("Low Vol");
         }
 
-        if chars.spread_pct < 0.001 {
+        if chars.spread_pct < thresholds.spread_pct.low {
             score += 1;
             reasons.push("Tight Spread");
-        } else if chars.spread_pct > 0.04 {
+        } else if chars.spread_pct > thresholds.spread_pct.high {
             score -= 1;
             reasons.push("Wide Spread");
         }
 
-        if chars.volatility_pct < 0.01 {
+        if chars.volatility_pct < thresholds.volatility_pct.low {
             score += 1;
             reasons.push("Stable");
-        } else if chars.volatility_pct > 0.1 {
+        } else if chars.volatility_pct > thresholds.volatility_pct.high {
             score -= 1;
             reasons.push("Volatile");
         }
 
-        if chars.trades_per_minute > 40.0 {
+        if chars.trades_per_minute > thresholds.trades_per_minute.high {
             score += 1;
             reasons.push("Active");
-        } else if chars.trades_per_minute < 1.0 {
+        } else if chars.trades_per_minute < thresholds.trades_per_minute.low {
             score -= 1;
             reasons.push("Inactive");
         }
@@ -254,8 +256,11 @@ impl TradingEngine {
     }
 
     pub async fn fetch_symbol_characteristics(&self, symbol: &str) -> Result<PairCharacteristics> {
+        let cached = self.load_cached_candles(symbol);
+        let last_ts = cached.last().map(|c| c.timestamp);
+
         let ticker = self.exchange.fetch_ticker(symbol).await.ok();
-        let ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", 60, None).await.ok();
+        let ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", 60, last_ts).await.ok();
         let trades = self.exchange.fetch_trades(symbol, 1000).await.ok();
 
         let last_price = ticker.as_ref().map(|t| t.last).unwrap_or(0.0);
@@ -336,6 +341,7 @@ impl TradingEngine {
                                         volatility_pct: vola,
                                         trades_per_minute: tpm,
                                     };
+                                    tracing::debug!("[Pair Scoring Preprocess] Reusing valid (<4h) cached characteristics for {} (ts: {})", symbol, ts);
                                     let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
                                     return (is_optimal, reasons, chars);
                                 }
@@ -346,6 +352,7 @@ impl TradingEngine {
             }
         }
 
+        info!("[Pair Scoring Preprocess] Fetching fresh characteristics for {} (missing or >4h expired cache)", symbol);
         let chars = match self.fetch_symbol_characteristics(symbol).await {
             Ok(c) => c,
             Err(_) => {
@@ -403,10 +410,6 @@ impl TradingEngine {
         sample_symbols: &[String],
         balance: &HashMap<String, f64>,
     ) -> Vec<String> {
-        if !Path::new("volumes_trades_data.json").exists() {
-            info!("Computing volumes and trades data for new volumes_trades_data.json file, please wait...");
-        }
-
         let mut sell_candidates = Vec::new();
         let mut volume_candidates = Vec::new();
         let mut reasons_map: HashMap<String, String> = HashMap::new();
@@ -964,8 +967,48 @@ impl TradingEngine {
         }
 
         info!("[Maintenance] Running 42-minute maintenance batch task...");
-        let open_orders = self.exchange.fetch_open_orders(None).await?;
 
+        // 1. Refresh markets.json from exchange
+        if let Ok(markets_json) = self.exchange.fetch_markets().await {
+            if let Ok(json_str) = serde_json::to_string_pretty(&markets_json) {
+                let _ = fs::write("markets.json", json_str);
+                info!("[Maintenance] Refreshed markets.json");
+            }
+        }
+
+        // 2. Refresh balance.json from exchange
+        if let Ok(balance_json) = self.exchange.fetch_balance().await {
+            let mut balance_map: HashMap<String, f64> = HashMap::new();
+            if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
+                for (k, v) in free_obj {
+                    let val = if let Some(s) = v.as_str() {
+                        s.parse::<f64>().unwrap_or(0.0)
+                    } else if let Some(n) = v.as_f64() {
+                        n
+                    } else {
+                        0.0
+                    };
+                    if val >= 0.000001 {
+                        balance_map.insert(k.clone(), val);
+                    }
+                }
+            }
+            if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
+                let _ = fs::write("balance.json", json_str);
+                info!("[Maintenance] Refreshed balance.json");
+            }
+            self.previous_balance_map = balance_map;
+        }
+
+        // 3. Re-evaluate symbols with volumes_trades_data (refreshing 4-hour expired timestamps)
+        let markets_content = fs::read_to_string("markets.json").unwrap_or_else(|_| "{}".to_string());
+        let markets_val: serde_json::Value = serde_json::from_str(&markets_content).unwrap_or_default();
+        let balance_map = self.previous_balance_map.clone();
+        let raw_symbols = self.load_market_symbols(&balance_map, &markets_val);
+        let _re_evaluated = self.filter_available_pairs(&raw_symbols, &balance_map).await;
+
+        // 4. Order cancellation check for open orders
+        let open_orders = self.exchange.fetch_open_orders(None).await.unwrap_or_default();
         for order in open_orders {
             if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
                 let mc_engine = MonteCarloEngine::new(1000, 240);
@@ -1049,24 +1092,12 @@ impl TradingEngine {
             let available_pairs = self.filter_available_pairs(&raw_symbols, &balance_map).await;
             info!("Running trading loop for {} pairs...", available_pairs.len());
 
-            let mut volumes_cache = Vec::new();
-
             for sym in &available_pairs {
                 let candles = match self.fetch_pair_candles(sym).await {
                     Ok(c) if !c.is_empty() => c,
                     _ => continue,
                 };
                 let candles_4h = self.fetch_pair_candles_4h(sym).await.ok();
-
-                let chars = self.compute_pair_characteristics(&candles);
-                volumes_cache.push(serde_json::json!({
-                    "symbol": sym,
-                    "timestamp": chrono::Utc::now().timestamp(),
-                    "volume_48h": chars.volume_48h,
-                    "spread_pct": chars.spread_pct,
-                    "volatility_pct": chars.volatility_pct,
-                    "trades_per_minute": chars.trades_per_minute
-                }));
 
                 let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
                 let eval = self.evaluate_symbol_parallel(sym, &candles, candles_4h.as_deref(), last_close);
@@ -1159,10 +1190,6 @@ impl TradingEngine {
                         }
                     }
                 }
-            }
-
-            if let Ok(json_str) = serde_json::to_string_pretty(&volumes_cache) {
-                let _ = fs::write("volumes_trades_data.json", json_str);
             }
 
             self.run_maintenance().await?;

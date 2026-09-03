@@ -38,6 +38,51 @@ pub struct ApiCredentials {
     pub options: HashMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RangeThreshold {
+    pub low: f64,
+    pub high: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TimeframeThresholds {
+    #[serde(default = "default_vol_48h")]
+    pub volume_48h: RangeThreshold,
+    #[serde(default = "default_spread_pct")]
+    pub spread_pct: RangeThreshold,
+    #[serde(default = "default_volatility_pct")]
+    pub volatility_pct: RangeThreshold,
+    #[serde(default = "default_trades_per_min")]
+    pub trades_per_minute: RangeThreshold,
+}
+
+fn default_vol_48h() -> RangeThreshold {
+    RangeThreshold { low: 1000.0, high: 120000.0 }
+}
+
+fn default_spread_pct() -> RangeThreshold {
+    RangeThreshold { low: 0.001, high: 0.04 }
+}
+
+fn default_volatility_pct() -> RangeThreshold {
+    RangeThreshold { low: 0.01, high: 0.1 }
+}
+
+fn default_trades_per_min() -> RangeThreshold {
+    RangeThreshold { low: 1.0, high: 40.0 }
+}
+
+impl Default for TimeframeThresholds {
+    fn default() -> Self {
+        Self {
+            volume_48h: default_vol_48h(),
+            spread_pct: default_spread_pct(),
+            volatility_pct: default_volatility_pct(),
+            trades_per_minute: default_trades_per_min(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonteCarloConfig {
     #[serde(default = "default_prob")]
@@ -84,6 +129,8 @@ pub struct Config {
     pub base_assets: Vec<String>,
     #[serde(default = "default_forbid_assets")]
     pub forbid_assets: Vec<String>,
+    #[serde(default)]
+    pub timeframe_thresholds: TimeframeThresholds,
     #[serde(default)]
     pub monte_carlo: MonteCarloConfig,
     #[serde(default = "default_strategies")]
@@ -185,8 +232,39 @@ impl Default for Config {
             mini_count: default_mini_count(),
             base_assets: default_base_assets(),
             forbid_assets: default_forbid_assets(),
+            timeframe_thresholds: TimeframeThresholds::default(),
             monte_carlo: MonteCarloConfig::default(),
             strategies: default_strategies(),
+        }
+    }
+}
+
+pub fn log_config_diff(default_val: &serde_json::Value, loaded_val: &serde_json::Value, prefix: &str) {
+    match (default_val, loaded_val) {
+        (serde_json::Value::Object(def_map), serde_json::Value::Object(load_map)) => {
+            for (k, v_load) in load_map {
+                let current_path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
+                if let Some(v_def) = def_map.get(k) {
+                    if v_def != v_load {
+                        if v_def.is_object() && v_load.is_object() {
+                            log_config_diff(v_def, v_load, &current_path);
+                        } else {
+                            tracing::info!("[Config Diff] {}: default = {}, loaded = {}", current_path, v_def, v_load);
+                        }
+                    }
+                } else {
+                    tracing::info!("[Config Diff] {} (custom setting): loaded = {}", current_path, v_load);
+                }
+            }
+        }
+        _ => {
+            if default_val != loaded_val {
+                tracing::info!("[Config Diff] {}: default = {}, loaded = {}", prefix, default_val, loaded_val);
+            }
         }
     }
 }
@@ -205,9 +283,11 @@ impl Config {
             ""
         };
 
+        let mut default_json_val = serde_json::json!({});
         if !config_default_path.is_empty() {
             if let Ok(content) = fs::read_to_string(config_default_path) {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    default_json_val = json_val.clone();
                     if let Some(n) = json_val.get("max_number_of_pairs").and_then(|v| v.as_u64()) {
                         config.max_num_pairs = n as usize;
                     }
@@ -229,6 +309,11 @@ impl Config {
                             config.monte_carlo.sufficient_probability = sp.max(0.96);
                         }
                     }
+                    if let Some(tf) = json_val.get("timeframe_thresholds") {
+                        if let Ok(thresholds) = serde_json::from_value::<TimeframeThresholds>(tf.clone()) {
+                            config.timeframe_thresholds = thresholds;
+                        }
+                    }
                 }
             }
         }
@@ -245,6 +330,8 @@ impl Config {
         if !config_path.is_empty() {
             if let Ok(content) = fs::read_to_string(config_path) {
                 if let Ok(override_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    log_config_diff(&default_json_val, &override_val, "");
+
                     if let Some(n) = override_val.get("max_num_pairs").and_then(|v| v.as_u64()) {
                         config.max_num_pairs = n as usize;
                     }
