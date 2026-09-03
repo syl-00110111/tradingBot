@@ -409,6 +409,7 @@ impl StrategyAggregator {
                 signal: Signal::Hold,
                 buy_multiplier: 0.9994,
                 sell_multiplier: 1.0006,
+                tendency: "Neutral".to_string(),
             };
         }
 

@@ -665,7 +665,7 @@ impl TradingEngine {
         Ok(edited_order)
     }
 
-    pub fn should_place_order(&self, symbol: &str, side: &str, price: f64, last_close: f64, candles: &[Candle]) -> (bool, f64) {
+    pub fn should_place_order(&self, _symbol: &str, side: &str, price: f64, last_close: f64, candles: &[Candle]) -> (bool, f64) {
         let mut volatility = 0.0;
         let mut drift = 0.0;
         if candles.len() > 1 {
@@ -1143,7 +1143,7 @@ impl TradingEngine {
                 let signal_res = StrategyAggregator::aggregate(window, &self.config);
 
                 let (should_buy, prob_buy) = self.should_place_order(symbol, "buy", last_close * signal_res.buy_multiplier, last_close, window);
-                let (should_sell, prob_sell) = self.should_place_order(symbol, "sell", last_close * signal_res.sell_multiplier, last_close, window);
+                let (should_sell, _prob_sell) = self.should_place_order(symbol, "sell", last_close * signal_res.sell_multiplier, last_close, window);
 
                 if !in_position && signal_res.signal == Signal::Buy && should_buy {
                     entry_price = last_close * signal_res.buy_multiplier;
