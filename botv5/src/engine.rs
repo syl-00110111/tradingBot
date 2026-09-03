@@ -1098,10 +1098,8 @@ impl TradingEngine {
         info!("          BOTV5 BACKTEST SIMULATION ENGINE        ");
         info!("==================================================");
 
-        let sample_pairs = vec![
-            "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD",
-            "BTC/EUR", "ETH/EUR", "LTC/EUR", "DOT/EUR", "LINK/EUR"
-        ];
+        let empty_balance = HashMap::new();
+        let sample_pairs = self.load_market_symbols(&empty_balance);
 
         let mut total_simulated_trades = 0;
         let mut winning_trades = 0;
