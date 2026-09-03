@@ -121,52 +121,46 @@ impl TradingEngine {
         }
     }
 
-    pub fn load_market_symbols(&self, balance: &HashMap<String, f64>) -> Vec<String> {
+    pub fn load_market_symbols(&self, balance: &HashMap<String, f64>, markets: &serde_json::Value) -> Vec<String> {
         let mut symbols = Vec::new();
         let base_assets: Vec<String> = vec![
             "USD".into(), "EUR".into(), "BTC".into(), "CHF".into(), "GBP".into(), "USDC".into(), "JPY".into(), "ETH".into(),
         ];
 
-        // Explicitly generate pairs for all held non-zero non-dust balance assets
+        let loaded_disk_markets = if markets.as_object().map_or(true, |m| m.is_empty()) && Path::new("markets.json").exists() {
+            fs::read_to_string("markets.json")
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        } else {
+            None
+        };
+
+        let active_markets = if let Some(m) = markets.as_object() {
+            if !m.is_empty() {
+                Some(m)
+            } else {
+                loaded_disk_markets.as_ref().and_then(|v| v.as_object())
+            }
+        } else {
+            loaded_disk_markets.as_ref().and_then(|v| v.as_object())
+        };
+
+        // Explicitly generate candidate pairs for held non-zero non-dust balance assets ONLY IF SUPPORTED BY EXCHANGE
         let min_amount = 0.0001;
         for (asset, amt) in balance {
             if *amt >= min_amount && !self.config.forbid_assets.contains(asset) {
-                if asset != "USD" && asset != "ZUSD" {
-                    let pair_usd = format!("{}/USD", asset);
-                    if !symbols.contains(&pair_usd) {
-                        symbols.push(pair_usd);
+                for quote in &base_assets {
+                    if asset == quote {
+                        continue;
                     }
-                }
-                if asset != "EUR" && asset != "ZEUR" {
-                    let pair_eur = format!("{}/EUR", asset);
-                    if !symbols.contains(&pair_eur) {
-                        symbols.push(pair_eur);
-                    }
-                }
-            }
-        }
-
-        if Path::new("markets.json").exists() {
-            if let Ok(content) = fs::read_to_string("markets.json") {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(obj) = json_val.as_object() {
-                        for (key, m_val) in obj {
-                            let sym = m_val
-                                .get("symbol")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(key.as_str());
-                            let base = m_val.get("base").and_then(|v| v.as_str()).unwrap_or("");
-                            let quote = m_val.get("quote").and_then(|v| v.as_str()).unwrap_or("");
-
-                            if self.config.forbid_assets.contains(&base.to_string())
-                                || self.config.forbid_assets.contains(&quote.to_string())
-                            {
-                                continue;
+                    let pair_candidate = format!("{}/{}", asset, quote);
+                    if !symbols.contains(&pair_candidate) {
+                        if let Some(m_obj) = active_markets {
+                            if m_obj.contains_key(&pair_candidate) {
+                                symbols.push(pair_candidate);
                             }
-
-                            if base_assets.contains(&quote.to_string()) && !symbols.contains(&sym.to_string()) {
-                                symbols.push(sym.to_string());
-                            }
+                        } else if quote == "USD" || quote == "EUR" {
+                            symbols.push(pair_candidate);
                         }
                     }
                 }
@@ -183,8 +177,19 @@ impl TradingEngine {
             "INJ/EUR", "TIA/EUR", "LDO/EUR", "ICP/EUR", "ETC/EUR", "PEPE/USD", "BONK/USD",
         ];
         for d in defaults {
+            let base = d.split('/').next().unwrap_or(d);
+            let quote = d.split('/').nth(1).unwrap_or("USD");
+            if self.config.forbid_assets.contains(&base.to_string()) || self.config.forbid_assets.contains(&quote.to_string()) {
+                continue;
+            }
             if !symbols.contains(&d.to_string()) {
-                symbols.push(d.to_string());
+                if let Some(m_obj) = active_markets {
+                    if m_obj.contains_key(d) {
+                        symbols.push(d.to_string());
+                    }
+                } else {
+                    symbols.push(d.to_string());
+                }
             }
         }
 
@@ -869,39 +874,12 @@ impl TradingEngine {
             }
             self.previous_balance_map = balance_map.clone();
 
-            let raw_symbols = self.load_market_symbols(&balance_map);
+            let markets_json = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
+                tracing::warn!("Failed to fetch markets from exchange API: {}", e);
+                serde_json::json!({})
+            });
 
-            let mut markets_obj = serde_json::Map::new();
-            for sym in &raw_symbols {
-                let clean_sym = sym.strip_prefix('Z').unwrap_or(sym).strip_prefix('X').unwrap_or(sym);
-                let base = clean_sym.split('/').next().unwrap_or(clean_sym);
-                let quote = clean_sym.split('/').nth(1).unwrap_or("USD");
-                let id = format!("{}{}", base, quote);
-
-                markets_obj.insert(clean_sym.to_string(), serde_json::json!({
-                    "id": id,
-                    "symbol": clean_sym,
-                    "base": base,
-                    "quote": quote,
-                    "altname": format!("{}{}", base, quote),
-                    "wsId": clean_sym,
-                    "type": "spot",
-                    "spot": true,
-                    "active": true,
-                    "precision": {
-                        "price": 0.0001,
-                        "amount": 0.0001
-                    },
-                    "limits": {
-                        "amount": { "min": 0.0001, "max": null },
-                        "price": { "min": null, "max": null },
-                        "cost": { "min": 0.5, "max": null }
-                    }
-                }));
-            }
-            if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(markets_obj)) {
-                let _ = fs::write("markets.json", json_str);
-            }
+            let raw_symbols = self.load_market_symbols(&balance_map, &markets_json);
 
             let mut pair_candles = HashMap::new();
             let mut pair_candles_4h = HashMap::new();
@@ -1197,39 +1175,12 @@ impl TradingEngine {
         balance_entries.sort();
         info!("Fetched balance for backtest: {}", balance_entries.join(", "));
 
-        let sample_pairs = self.load_market_symbols(&balance_map);
+        let markets_json = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch markets for backtest from exchange API: {}", e);
+            serde_json::json!({})
+        });
 
-        let mut markets_obj = serde_json::Map::new();
-        for sym in &sample_pairs {
-            let clean_sym = sym.strip_prefix('Z').unwrap_or(sym).strip_prefix('X').unwrap_or(sym);
-            let base = clean_sym.split('/').next().unwrap_or(clean_sym);
-            let quote = clean_sym.split('/').nth(1).unwrap_or("USD");
-            let id = format!("{}{}", base, quote);
-
-            markets_obj.insert(clean_sym.to_string(), serde_json::json!({
-                "id": id,
-                "symbol": clean_sym,
-                "base": base,
-                "quote": quote,
-                "altname": format!("{}{}", base, quote),
-                "wsId": clean_sym,
-                "type": "spot",
-                "spot": true,
-                "active": true,
-                "precision": {
-                    "price": 0.0001,
-                    "amount": 0.0001
-                },
-                "limits": {
-                    "amount": { "min": 0.0001, "max": null },
-                    "price": { "min": null, "max": null },
-                    "cost": { "min": 0.5, "max": null }
-                }
-            }));
-        }
-        if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(markets_obj)) {
-            let _ = fs::write("markets.json", json_str);
-        }
+        let sample_pairs = self.load_market_symbols(&balance_map, &markets_json);
 
         let mut total_simulated_trades = 0;
         let mut winning_trades = 0;
@@ -1371,5 +1322,41 @@ impl TradingEngine {
         info!("==================================================");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_market_symbols_filters_non_existent_pairs() {
+        let config = Config::default();
+        let engine = TradingEngine::new(config);
+
+        let mut balance = HashMap::new();
+        balance.insert("BLESS".to_string(), 1000.0);
+
+        let markets = serde_json::json!({
+            "BLESS/USD": {
+                "id": "BLESSUSD",
+                "symbol": "BLESS/USD",
+                "base": "BLESS",
+                "quote": "USD",
+                "active": true
+            },
+            "BTC/USD": {
+                "id": "XXBTZUSD",
+                "symbol": "BTC/USD",
+                "base": "BTC",
+                "quote": "USD",
+                "active": true
+            }
+        });
+
+        let symbols = engine.load_market_symbols(&balance, &markets);
+
+        assert!(symbols.contains(&"BLESS/USD".to_string()), "BLESS/USD should be included");
+        assert!(!symbols.contains(&"BLESS/EUR".to_string()), "BLESS/EUR should NOT be included because it does not exist on exchange");
     }
 }
