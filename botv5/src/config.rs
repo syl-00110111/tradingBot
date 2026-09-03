@@ -70,6 +70,10 @@ pub struct Config {
     pub api_secret: String,
     #[serde(default = "default_exchange_id")]
     pub exchange_id: String,
+    #[serde(default = "default_fee")]
+    pub default_fee: f64,
+    #[serde(default = "default_min_profit_margin")]
+    pub min_profit_margin: f64,
     #[serde(default = "default_max_num_pairs")]
     pub max_num_pairs: usize,
     #[serde(default = "default_max_buyings_per_base_asset")]
@@ -88,6 +92,14 @@ pub struct Config {
 
 fn default_exchange_id() -> String {
     "kraken".to_string()
+}
+
+fn default_fee() -> f64 {
+    0.001
+}
+
+fn default_min_profit_margin() -> f64 {
+    0.003
 }
 
 fn default_max_num_pairs() -> usize {
@@ -166,6 +178,8 @@ impl Default for Config {
             api_key: String::new(),
             api_secret: String::new(),
             exchange_id: default_exchange_id(),
+            default_fee: default_fee(),
+            min_profit_margin: default_min_profit_margin(),
             max_num_pairs: default_max_num_pairs(),
             max_buyings_per_base_asset: default_max_buyings_per_base_asset(),
             mini_count: default_mini_count(),
@@ -196,6 +210,14 @@ impl Config {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(n) = json_val.get("max_number_of_pairs").and_then(|v| v.as_u64()) {
                         config.max_num_pairs = n as usize;
+                    }
+                    if let Some(mp) = json_val.get("min_profit_margin").and_then(|v| v.as_f64()) {
+                        config.min_profit_margin = mp;
+                    }
+                    if let Some(ex) = json_val.get("exchange") {
+                        if let Some(df) = ex.get("default_fee").and_then(|v| v.as_f64()) {
+                            config.default_fee = df;
+                        }
                     }
                     if let Some(t) = json_val.get("trading") {
                         if let Some(b) = t.get("max_buyings_per_base_asset").and_then(|v| v.as_u64()) {

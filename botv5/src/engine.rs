@@ -253,7 +253,152 @@ impl TradingEngine {
         Vec::new()
     }
 
-    pub fn filter_available_pairs(
+    pub async fn fetch_symbol_characteristics(&self, symbol: &str) -> Result<PairCharacteristics> {
+        let ticker = self.exchange.fetch_ticker(symbol).await.ok();
+        let ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", 60, None).await.ok();
+        let trades = self.exchange.fetch_trades(symbol, 1000).await.ok();
+
+        let last_price = ticker.as_ref().map(|t| t.last).unwrap_or(0.0);
+        let volume_48h = ticker.as_ref().map(|t| t.volume * last_price).unwrap_or(0.0);
+
+        let spread_pct = if let Some(t) = ticker.as_ref() {
+            if t.bid > 0.0 && t.ask > 0.0 {
+                ((t.ask - t.bid) / t.bid) * 100.0
+            } else {
+                0.5
+            }
+        } else {
+            0.5
+        };
+
+        let volatility_pct = if let Some(ref candles) = ohlcv {
+            if !candles.is_empty() {
+                let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+                let min_close = closes.iter().fold(f64::MAX, |a, &b| a.min(b));
+                let max_close = closes.iter().fold(f64::MIN, |a, &b| a.max(b));
+                if min_close > 0.0 {
+                    (max_close - min_close) / min_close
+                } else {
+                    0.05
+                }
+            } else {
+                0.05
+            }
+        } else {
+            0.05
+        };
+
+        let trades_per_minute = if let Some(ref tr_list) = trades {
+            if !tr_list.is_empty() {
+                let times: Vec<i64> = tr_list.iter().map(|t| t.timestamp).collect();
+                let min_t = times.iter().copied().min().unwrap_or(0);
+                let max_t = times.iter().copied().max().unwrap_or(0);
+                let duration_mins = (max_t - min_t) as f64 / 60000.0;
+                if duration_mins > 0.0 {
+                    tr_list.len() as f64 / duration_mins
+                } else {
+                    tr_list.len() as f64
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        Ok(PairCharacteristics {
+            volume_48h,
+            spread_pct,
+            volatility_pct,
+            trades_per_minute,
+        })
+    }
+
+    pub async fn get_only_optimal(&self, symbol: &str) -> (bool, Vec<&'static str>, PairCharacteristics) {
+        let now_sec = chrono::Utc::now().timestamp();
+        let now_minus_4h = now_sec - (4 * 3600);
+
+        if Path::new("volumes_trades_data.json").exists() {
+            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
+                if let Ok(volumes) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    for v in volumes {
+                        if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
+                            if let Some(ts) = v.get("timestamp").and_then(|t| t.as_i64()) {
+                                if ts > now_minus_4h {
+                                    let vol_48h = v.get("volume_48h").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                    let spread = v.get("spread_pct").and_then(|x| x.as_f64()).unwrap_or(0.5);
+                                    let vola = v.get("volatility_pct").and_then(|x| x.as_f64()).unwrap_or(0.05);
+                                    let tpm = v.get("trades_per_minute").and_then(|x| x.as_f64()).unwrap_or(0.0);
+
+                                    let chars = PairCharacteristics {
+                                        volume_48h: vol_48h,
+                                        spread_pct: spread,
+                                        volatility_pct: vola,
+                                        trades_per_minute: tpm,
+                                    };
+                                    let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
+                                    return (is_optimal, reasons, chars);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let chars = match self.fetch_symbol_characteristics(symbol).await {
+            Ok(c) => c,
+            Err(_) => {
+                let candles = self.load_cached_candles(symbol);
+                self.compute_pair_characteristics(&candles)
+            }
+        };
+
+        let mut volumes = Vec::new();
+        if Path::new("volumes_trades_data.json").exists() {
+            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
+                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    volumes = parsed;
+                }
+            }
+        }
+
+        let mut found = false;
+        for v in &mut volumes {
+            if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("timestamp".into(), serde_json::json!(now_sec));
+                    obj.insert("volume_48h".into(), serde_json::json!(chars.volume_48h));
+                    obj.insert("spread_pct".into(), serde_json::json!(chars.spread_pct));
+                    obj.insert("volatility_pct".into(), serde_json::json!(chars.volatility_pct));
+                    obj.insert("trades_per_minute".into(), serde_json::json!(chars.trades_per_minute));
+                }
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            volumes.push(serde_json::json!({
+                "symbol": symbol,
+                "id": symbol.replace('/', ""),
+                "timestamp": now_sec,
+                "volume_48h": chars.volume_48h,
+                "spread_pct": chars.spread_pct,
+                "volatility_pct": chars.volatility_pct,
+                "trades_per_minute": chars.trades_per_minute
+            }));
+        }
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&volumes) {
+            let _ = fs::write("volumes_trades_data.json", json_str);
+        }
+
+        let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
+        (is_optimal, reasons, chars)
+    }
+
+    pub async fn filter_available_pairs(
         &mut self,
         sample_symbols: &[String],
         balance: &HashMap<String, f64>,
@@ -270,14 +415,13 @@ impl TradingEngine {
                 continue;
             }
 
-            let candles = self.load_cached_candles(sym);
-            let chars = self.compute_pair_characteristics(&candles);
-            let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
+            let (is_optimal, reasons, chars) = self.get_only_optimal(sym).await;
 
             let base_balance = balance.get(base).copied().unwrap_or(0.0);
             let has_balance = base_balance > 0.0 || self.recorded_purchases.contains_key(base);
 
             // Redlist logic: check minimum transaction cost in EUR
+            let candles = self.load_cached_candles(sym);
             let last_close = candles.last().map(|c| c.close).unwrap_or(1.0);
             let quote_eur_rate = self.get_eur_conversion_rate(quote);
             let min_amount = 0.0001;
@@ -565,11 +709,13 @@ impl TradingEngine {
         }
 
         let avg_purchase_price = weighted_sum / total_amount;
-        let target_price = avg_purchase_price * 1.003;
-        let profitable = sell_price > target_price;
+        let fee_rate = self.config.default_fee;
+        let min_profit = self.config.min_profit_margin;
+        let min_exit_price = avg_purchase_price * (1.0 + fee_rate) * (1.0 + min_profit) / (1.0 - fee_rate);
+        let profitable = sell_price >= min_exit_price;
         let details = format!(
-            "Sell Price: {:.8} vs Avg Purchase Price (converted to {}) with 0.3% margin: {:.8} (Raw Avg: {:.8}, Remaining Amount: {:.6})",
-            sell_price, current_quote, target_price, avg_purchase_price, total_amount
+            "Sell Price: {:.8} vs Min Exit Price (converted to {}, fee: {:.4}, min profit: {:.4}): {:.8} (Avg Purchase Price: {:.8}, Remaining Amount: {:.6})",
+            sell_price, current_quote, fee_rate, min_profit, min_exit_price, avg_purchase_price, total_amount
         );
 
         (profitable, details)
@@ -896,7 +1042,7 @@ impl TradingEngine {
 
             let raw_symbols = self.load_market_symbols(&balance_map, &markets_json);
 
-            let available_pairs = self.filter_available_pairs(&raw_symbols, &balance_map);
+            let available_pairs = self.filter_available_pairs(&raw_symbols, &balance_map).await;
             info!("Running trading loop for {} pairs...", available_pairs.len());
 
             let mut volumes_cache = Vec::new();
@@ -1181,7 +1327,7 @@ impl TradingEngine {
         });
 
         let sample_pairs = self.load_market_symbols(&balance_map, &markets_json);
-        let selected_pairs = self.filter_available_pairs(&sample_pairs, &balance_map);
+        let selected_pairs = self.filter_available_pairs(&sample_pairs, &balance_map).await;
         info!("[Backtest] Selected {} available pairs out of {} market candidates for backtesting.", selected_pairs.len(), sample_pairs.len());
 
         let mut total_simulated_trades = 0;
@@ -1265,30 +1411,37 @@ impl TradingEngine {
                         buy_events.push((i, entry_price));
                         info!("[Backtest BUY] {} at price {:.8}, amount {:.6} (prob: {:.4})", symbol, entry_price, entry_amount, prob_buy);
                     }
-                } else if in_position && (signal_res.signal == Signal::Sell && should_sell || i == active_candles.len() - 1) {
+                } else if in_position {
                     let exit_price = last_close * signal_res.sell_multiplier;
-                    let revenue = exit_price * entry_amount;
-                    let pnl = revenue - (entry_price * entry_amount);
+                    let fee_rate = self.config.default_fee;
+                    let min_profit = self.config.min_profit_margin;
+                    let min_exit_price = entry_price * (1.0 + fee_rate) * (1.0 + min_profit) / (1.0 - fee_rate);
+                    let is_profitable = exit_price >= min_exit_price;
 
-                    current_balance += revenue;
-                    in_position = false;
-                    sell_events.push((i, exit_price));
+                    if (signal_res.signal == Signal::Sell && should_sell && is_profitable) || i == active_candles.len() - 1 {
+                        let revenue = exit_price * entry_amount;
+                        let pnl = revenue - (entry_price * entry_amount);
 
-                    if pnl > 0.0 {
-                        winning_trades += 1;
-                        total_profit_usd += pnl;
-                        info!("[Backtest SELL Profit] {} at price {:.8}, PnL: +{:.2} USD", symbol, exit_price, pnl);
-                    } else {
-                        total_loss_usd += pnl.abs();
-                        info!("[Backtest SELL Loss] {} at price {:.8}, PnL: {:.2} USD", symbol, exit_price, pnl);
-                    }
+                        current_balance += revenue;
+                        in_position = false;
+                        sell_events.push((i, exit_price));
 
-                    if current_balance > peak_balance {
-                        peak_balance = current_balance;
-                    }
-                    let dd = (peak_balance - current_balance) / peak_balance;
-                    if dd > max_drawdown {
-                        max_drawdown = dd;
+                        if pnl > 0.0 {
+                            winning_trades += 1;
+                            total_profit_usd += pnl;
+                            info!("[Backtest SELL Profit] {} at price {:.8}, PnL: +{:.2} USD", symbol, exit_price, pnl);
+                        } else {
+                            total_loss_usd += pnl.abs();
+                            info!("[Backtest SELL Loss] {} at price {:.8}, PnL: {:.2} USD", symbol, exit_price, pnl);
+                        }
+
+                        if current_balance > peak_balance {
+                            peak_balance = current_balance;
+                        }
+                        let dd = (peak_balance - current_balance) / peak_balance;
+                        if dd > max_drawdown {
+                            max_drawdown = dd;
+                        }
                     }
                 }
             }
