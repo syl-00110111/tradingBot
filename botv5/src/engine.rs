@@ -642,6 +642,24 @@ impl TradingEngine {
         }
     }
 
+    pub fn round_down_to_precision(&self, val: f64, precision: f64) -> f64 {
+        if precision <= 0.0 || !val.is_finite() {
+            return val;
+        }
+        let decimals = if precision >= 1.0 {
+            precision as i32
+        } else {
+            (-precision.log10()).round() as i32
+        };
+
+        if decimals <= 0 {
+            val.floor()
+        } else {
+            let factor = 10.0_f64.powi(decimals);
+            (val * factor).floor() / factor
+        }
+    }
+
     pub fn calculate_package_amount(&self, price: f64, quote_eur_rate: f64, min_amount: f64, amount_precision: f64) -> f64 {
         if price <= 0.0 || quote_eur_rate <= 0.0 {
             return min_amount;
@@ -1283,7 +1301,7 @@ impl TradingEngine {
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
                         let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
                         let raw_amount = calculated_amount.min(base_free);
-                        let amount = self.round_to_precision(raw_amount, amount_prec);
+                        let amount = self.round_down_to_precision(raw_amount, amount_prec);
 
                         let min_amount = 0.0001;
                         if amount < min_amount {
