@@ -892,7 +892,8 @@ impl TradingEngine {
 
             let mode = if o_side == "buy" { "below" } else { "above" };
             let prob = mc_engine.estimate_hit_probability(last_close, order.price, volatility, drift, mode);
-            let insufficient_prob = prob < threshold;
+            let target_threshold = if o_side == "buy" { 0.73 } else { threshold };
+            let insufficient_prob = prob < target_threshold;
 
             let side_changed = o_side != side_lower;
 
@@ -940,9 +941,11 @@ impl TradingEngine {
         }
 
         let mc_engine = MonteCarloEngine::new(1000, 480);
-        let mode = if side.eq_ignore_ascii_case("buy") { "below" } else { "above" };
+        let is_buy = side.eq_ignore_ascii_case("buy");
+        let mode = if is_buy { "below" } else { "above" };
         let prob = mc_engine.estimate_hit_probability(last_close, price, volatility, drift, mode);
-        (prob > self.config.monte_carlo.sufficient_probability, prob)
+        let threshold = if is_buy { 0.73 } else { self.config.monte_carlo.sufficient_probability };
+        (prob > threshold, prob)
     }
 
     pub fn evaluate_symbol_parallel(
@@ -1043,7 +1046,8 @@ impl TradingEngine {
         let threshold = self.config.monte_carlo.sufficient_probability;
 
         if is_buy {
-            info!("[DEBUG BUY] StrategyAggregator returned BUY for {}: last_close={:.8}, target_price={:.8}, buy_prob={:.4}, threshold={:.4}, num_peaks={}, is_crest_high={}", symbol, last_close, target_buy_price, buy_prob, threshold, num_peaks, is_crest_high);
+            let buy_threshold = 0.73;
+            info!("[DEBUG BUY] StrategyAggregator returned BUY for {}: last_close={:.8}, target_price={:.8}, buy_prob={:.4}, threshold={:.4}, num_peaks={}, is_crest_high={}", symbol, last_close, target_buy_price, buy_prob, buy_threshold, num_peaks, is_crest_high);
 
             if is_crest_high {
                 if let Some(sma) = sma_840 {
@@ -1052,8 +1056,8 @@ impl TradingEngine {
                     info!("[DEBUG BUY] [{}] Crest High Check REJECTED: price > sma_840 with num_peaks={}", symbol, num_peaks);
                 }
                 None
-            } else if buy_prob < threshold {
-                info!("[DEBUG BUY] [{}] Probability REJECTED: buy_prob ({:.4}) < threshold ({:.4})", symbol, buy_prob, threshold);
+            } else if buy_prob < buy_threshold {
+                info!("[DEBUG BUY] [{}] Probability REJECTED: buy_prob ({:.4}) < threshold ({:.4})", symbol, buy_prob, buy_threshold);
                 None
             } else {
                 info!("[DEBUG BUY] [{}] BUY signal PASSED evaluation! target_price={:.8}, buy_prob={:.4}", symbol, target_buy_price, buy_prob);
