@@ -1308,7 +1308,7 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
+                        let (should_buy, _estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
                         if !should_buy {
                             info!("[DEBUG BUY] [{}] should_place_order returned false (estimated_prob={:.4})", sym, estimated_prob);
                             continue;
