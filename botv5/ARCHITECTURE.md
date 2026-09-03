@@ -38,10 +38,11 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 4. 5-Week SMA & Crest High Check
-- **Location**: `botv5/src/indicators.rs` (`TechnicalAnalysis::calculate_5_week_sma`) and `botv5/src/engine.rs` (`TradingEngine::evaluate_symbol_parallel`)
+## 4. 5-Week SMA & Crest High Check (with <= 3 Peaks Condition)
+- **Location**: `botv5/src/indicators.rs` (`TechnicalAnalysis::calculate_5_week_sma`, `TechnicalAnalysis::count_peaks`) and `botv5/src/engine.rs` (`TradingEngine::evaluate_symbol_parallel`, `TradingEngine::cleanup_open_orders`)
 - **Calculation**: Computes 5-week SMA (`SMA_840`) using 50,400 candles of 1m timeframe or falling back to 210 candles of 4h timeframe.
-- **Crest High Check**: If `last_close > sma_840` or `target_buy_price > sma_840` (crest high), limit BUY orders are skipped or cancelled to prevent buying at local market peaks.
+- **Peak Count Analysis**: Counts local maxima peaks in the last 840 candles history using `TechnicalAnalysis::count_peaks(candles, 840)`.
+- **Crest High Check**: The crest high check (`price > sma_840`) is enforced ONLY when there are no more than 3 peaks in the pair's 840 candles history (`num_peaks <= 3`). If there are more than 3 peaks, the crest high check is bypassed to allow BUY orders on multi-peak volatile assets.
 
 ---
 
@@ -55,9 +56,10 @@ This document clarifies the architecture, algorithms, and design decisions imple
 ## 6. Periodic 42-Minute Maintenance Batch Task
 - **Location**: `botv5/src/engine.rs` (`TradingEngine::run_maintenance`)
 - **Routine**:
-  - Every 42 minutes (2,520 seconds), the engine fetches all open orders.
-  - Evaluates Monte Carlo score (`mc_score`) for each open order's symbol.
-  - Cancels open orders whose `mc_score < 0.42` to free up locked capital from deteriorating strategy setups.
+  - Every 42 minutes (2,520 seconds), the engine refreshes `markets.json` and `balance.json` from the exchange API.
+  - Fetches active `open_orders` via `ExchangeClient::fetch_open_orders`.
+  - Evaluates Monte Carlo score (`mc_score`) for each open order's symbol and cancels open orders whose `mc_score < 0.42`.
+  - Cross-references pending SELL orders in `pending_orders_dump.json` against active `open_orders`. If a pending SELL order is no longer in open orders (meaning it was processed/filled on the exchange), triggers `remove_recorded_purchases(symbol)` to clear purchase history and marks the pending entry as processed.
   - Re-evaluates redlisted pairs for fit against transaction cost thresholds.
 
 ---
@@ -71,7 +73,7 @@ This document clarifies the architecture, algorithms, and design decisions imple
 - **Authenticated REST Endpoints (HMAC-SHA512 Signed)**:
   - `fetch_balance`: Queries `/0/private/Balance` with HMAC-SHA512 authentication.
   - `fetch_open_orders`: Queries `/0/private/OpenOrders` with HMAC-SHA512 authentication.
-  - `create_limit_buy` / `create_limit_sell`: Queries `/0/private/AddOrder` with HMAC-SHA512 authentication.
+  - `create_limit_buy` / `create_limit_sell`: Queries `/0/private/AddOrder` with HMAC-SHA512 authentication. Returns real exchange transaction IDs (`txid`) on success or raises errors directly on failure (never generating mock order IDs in live mode).
   - `cancel_order`: Queries `/0/private/CancelOrder` with HMAC-SHA512 authentication.
 
 ---

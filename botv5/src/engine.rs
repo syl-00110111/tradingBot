@@ -871,14 +871,16 @@ impl TradingEngine {
 
         let mut edited_order = None;
 
+        let num_peaks = TechnicalAnalysis::count_peaks(candles, 840);
+
         for order in open_orders {
             let o_side = order.side.to_lowercase();
             let side_lower = side.to_lowercase();
 
-            if o_side == "buy" {
+            if o_side == "buy" && num_peaks <= 3 {
                 if let Some(sma) = sma_840 {
                     if last_close > sma || order.price > sma {
-                        info!("[{}] Cancelling open BUY order {}: Price is on a crest high (last close {:.8}, order price {:.8}, sma_840 {:.8})", symbol, order.id, last_close, order.price, sma);
+                        info!("[{}] Cancelling open BUY order {}: Price is on a crest high (last close {:.8}, order price {:.8}, sma_840 {:.8}, peaks_840: {})", symbol, order.id, last_close, order.price, sma, num_peaks);
                         let _ = self.exchange.cancel_order(&order.id, symbol).await;
                         continue;
                     }
@@ -989,8 +991,13 @@ impl TradingEngine {
         let target_buy_price = last_close * (1.0 - buy_offset);
         let target_sell_price = last_close * (1.0 + sell_offset);
 
-        let is_crest_high = if let Some(sma) = sma_840 {
-            last_close > sma || target_buy_price > sma
+        let num_peaks = TechnicalAnalysis::count_peaks(candles, 840);
+        let is_crest_high = if num_peaks <= 3 {
+            if let Some(sma) = sma_840 {
+                last_close > sma || target_buy_price > sma
+            } else {
+                false
+            }
         } else {
             false
         };
