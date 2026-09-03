@@ -13,6 +13,26 @@ impl TechnicalAnalysis {
         Some(sum / (period as f64))
     }
 
+    pub fn count_peaks(candles: &[Candle], max_candles: usize) -> usize {
+        if candles.len() < 3 {
+            return 0;
+        }
+        let window_size = candles.len().min(max_candles);
+        let slice = &candles[candles.len() - window_size..];
+
+        let mut count = 0;
+        for i in 1..slice.len() - 1 {
+            let prev = slice[i - 1].high;
+            let curr = slice[i].high;
+            let next = slice[i + 1].high;
+
+            if curr > prev && curr > next {
+                count += 1;
+            }
+        }
+        count
+    }
+
     pub fn calculate_5_week_sma(candles_1m: &[Candle], candles_4h: Option<&[Candle]>) -> Option<f64> {
         // 5 weeks in 1m candles = 5 * 7 * 24 * 60 = 50,400 candles
         if candles_1m.len() >= 50400 {
