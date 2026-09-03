@@ -1236,11 +1236,20 @@ impl TradingEngine {
                         let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, 0.0001, amount_prec);
 
                         self.cleanup_open_orders(sym, rounded_target_price, "sell", &candles, last_close, amount).await?;
-                        if let Ok(order) = self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
-                            self.dump_pending_order(&order)?;
-                            self.remove_recorded_purchases(sym)?;
-                            let last_idx = candles.len().saturating_sub(1);
-                            self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
+                        match self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
+                            Ok(order) => {
+                                self.dump_pending_order(&order)?;
+                                if !order.id.starts_with("sell_") {
+                                    self.remove_recorded_purchases(sym)?;
+                                } else {
+                                    tracing::warn!("[{}] Skipping deletion of recorded purchases for mock order {}", sym, order.id);
+                                }
+                                let last_idx = candles.len().saturating_sub(1);
+                                self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
+                            }
+                            Err(e) => {
+                                tracing::error!("[{}] SELL order execution failed on exchange: {}. Preserving recorded purchases.", sym, e);
+                            }
                         }
                     }
                 }
