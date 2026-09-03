@@ -176,10 +176,10 @@ impl TradingEngine {
             "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD", "LTC/USD", "DOT/USD", "LINK/USD",
             "AVAX/USD", "ATOM/USD", "NEAR/USD", "BCH/USD", "UNI/USD", "AAVE/USD", "DOGE/USD", "SHIB/USD",
             "XLM/USD", "ALGO/USD", "FIL/USD", "APT/USD", "SUI/USD", "INJ/USD", "TIA/USD", "FET/USD",
-            "RENDER/USD", "GRT/USD", "LDO/USD", "ICP/USD", "ETC/USD", "MATIC/USD", "NEAR/EUR", "AVAX/EUR",
+            "RENDER/USD", "GRT/USD", "LDO/USD", "ICP/USD", "ETC/USD", "POL/USD", "NEAR/EUR", "AVAX/EUR",
             "BTC/EUR", "ETH/EUR", "SOL/EUR", "XRP/EUR", "ADA/EUR", "LTC/EUR", "DOT/EUR", "LINK/EUR",
             "BCH/EUR", "UNI/EUR", "AAVE/EUR", "DOGE/EUR", "ALGO/EUR", "FIL/EUR", "APT/EUR", "SUI/EUR",
-            "INJ/EUR", "TIA/EUR", "LDO/EUR", "ICP/EUR", "ETC/EUR", "POL/USD", "PEPE/USD", "BONK/USD",
+            "INJ/EUR", "TIA/EUR", "LDO/EUR", "ICP/EUR", "ETC/EUR", "PEPE/USD", "BONK/USD",
         ];
         for d in defaults {
             if !symbols.contains(&d.to_string()) {
@@ -1093,6 +1093,68 @@ impl TradingEngine {
         Ok(())
     }
 
+    pub fn plot_symbol_backtest(
+        &self,
+        symbol: &str,
+        candles: &[Candle],
+        buys: &[(usize, f64)],
+        sells: &[(usize, f64)],
+    ) {
+        if candles.is_empty() {
+            return;
+        }
+
+        let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        let min_p = closes.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let max_p = closes.iter().fold(f64::MIN, |a, &b| a.max(b));
+        let p_range = if (max_p - min_p).abs() < 1e-8 { 1.0 } else { max_p - min_p };
+
+        let width = 60;
+        let height = 12;
+
+        info!("--- PLOT: {} (Candles: {}, Buys: {}, Sells: {}) ---", symbol, candles.len(), buys.len(), sells.len());
+        info!("Max Price: {:.8} | Min Price: {:.8}", max_p, min_p);
+
+        let buy_map: HashMap<usize, f64> = buys.iter().cloned().collect();
+        let sell_map: HashMap<usize, f64> = sells.iter().cloned().collect();
+
+        let step = (candles.len() as f64) / (width as f64);
+
+        for row in (0..height).rev() {
+            let row_price = min_p + (p_range * (row as f64 / (height - 1) as f64));
+            let mut line = String::with_capacity(width + 15);
+            line.push_str(&format!("{:>10.4} |", row_price));
+
+            for col in 0..width {
+                let idx = ((col as f64) * step) as usize;
+                let idx = idx.min(candles.len() - 1);
+                let price = candles[idx].close;
+
+                let is_buy = buy_map.contains_key(&idx);
+                let is_sell = sell_map.contains_key(&idx);
+
+                let char_symbol = if is_buy && is_sell {
+                    'B'
+                } else if is_buy {
+                    'O'
+                } else if is_sell {
+                    'X'
+                } else {
+                    let norm = (price - min_p) / p_range;
+                    let target_row = (norm * ((height - 1) as f64)).round() as usize;
+                    if target_row == row {
+                        '*'
+                    } else {
+                        ' '
+                    }
+                };
+                line.push(char_symbol);
+            }
+            info!("{}", line);
+        }
+        info!("------------------------------------------------------------");
+    }
+
     pub async fn run_backtest(&mut self) -> Result<()> {
         info!("==================================================");
         info!("          BOTV5 BACKTEST SIMULATION ENGINE        ");
@@ -1100,6 +1162,50 @@ impl TradingEngine {
 
         let empty_balance = HashMap::new();
         let sample_pairs = self.load_market_symbols(&empty_balance);
+
+        let mut sim_balance_map = HashMap::new();
+        sim_balance_map.insert("USD".to_string(), 10000.0);
+        sim_balance_map.insert("EUR".to_string(), 10000.0);
+
+        let sim_balance_json = serde_json::json!({
+            "free": sim_balance_map,
+            "total": sim_balance_map
+        });
+        if let Ok(json_str) = serde_json::to_string_pretty(&sim_balance_json) {
+            let _ = fs::write("balance.json", json_str);
+        }
+
+        let mut markets_obj = serde_json::Map::new();
+        for sym in &sample_pairs {
+            let clean_sym = sym.strip_prefix('Z').unwrap_or(sym).strip_prefix('X').unwrap_or(sym);
+            let base = clean_sym.split('/').next().unwrap_or(clean_sym);
+            let quote = clean_sym.split('/').nth(1).unwrap_or("USD");
+            let id = format!("{}{}", base, quote);
+
+            markets_obj.insert(clean_sym.to_string(), serde_json::json!({
+                "id": id,
+                "symbol": clean_sym,
+                "base": base,
+                "quote": quote,
+                "altname": format!("{}{}", base, quote),
+                "wsId": clean_sym,
+                "type": "spot",
+                "spot": true,
+                "active": true,
+                "precision": {
+                    "price": 0.0001,
+                    "amount": 0.0001
+                },
+                "limits": {
+                    "amount": { "min": 0.0001, "max": null },
+                    "price": { "min": null, "max": null },
+                    "cost": { "min": 0.5, "max": null }
+                }
+            }));
+        }
+        if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(markets_obj)) {
+            let _ = fs::write("markets.json", json_str);
+        }
 
         let mut total_simulated_trades = 0;
         let mut winning_trades = 0;
@@ -1133,6 +1239,9 @@ impl TradingEngine {
             let mut entry_price = 0.0;
             let mut entry_amount = 0.0;
 
+            let mut buy_events: Vec<(usize, f64)> = Vec::new();
+            let mut sell_events: Vec<(usize, f64)> = Vec::new();
+
             for i in 50..active_candles.len() {
                 let window = &active_candles[..=i];
                 let last_candle = &active_candles[i];
@@ -1153,6 +1262,7 @@ impl TradingEngine {
                         current_balance -= cost;
                         in_position = true;
                         total_simulated_trades += 1;
+                        buy_events.push((i, entry_price));
                         info!("[Backtest BUY] {} at price {:.8}, amount {:.6} (prob: {:.4})", symbol, entry_price, entry_amount, prob_buy);
                     }
                 } else if in_position && (signal_res.signal == Signal::Sell && should_sell || i == active_candles.len() - 1) {
@@ -1162,6 +1272,7 @@ impl TradingEngine {
 
                     current_balance += revenue;
                     in_position = false;
+                    sell_events.push((i, exit_price));
 
                     if pnl > 0.0 {
                         winning_trades += 1;
@@ -1180,6 +1291,10 @@ impl TradingEngine {
                         max_drawdown = dd;
                     }
                 }
+            }
+
+            if !buy_events.is_empty() || !sell_events.is_empty() {
+                self.plot_symbol_backtest(symbol, active_candles, &buy_events, &sell_events);
             }
         }
 
