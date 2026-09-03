@@ -100,3 +100,29 @@ This document clarifies the architecture, algorithms, and design decisions imple
   - `pause_buy`: Temporarily pauses buys for symbols encountering API errors.
   - `record_purchase`: Persists buy price and amount for downstream profitability checks (`is_sell_profitable`).
   - `dump_pending_order`: Dumps placed orders for tracking and periodic order cleanup.
+
+---
+
+## 10. Order Cleanup & Deprecated Order Editing (`cleanup_open_orders`)
+- **Location**: `botv5/src/engine.rs` (`TradingEngine::cleanup_open_orders`)
+- **Behavior**:
+  - Fetches existing open orders for a trading symbol prior to new order placement.
+  - Cancels open BUY orders if the market price is on a crest high (`last_close > sma_840` or `order.price > sma_840`).
+  - Computes volatility and drift from candle returns and calculates Monte Carlo hit probability for each open order.
+  - Cancels orders whose hit probability is below the threshold (`0.96`).
+  - If an existing order matches the side and price/amount, reuses the order without placing a duplicate; if price/amount changed, cancels and replaces the order while updating purchase history.
+
+---
+
+## 11. Signal & Wind-Choice Balance Prioritization
+- **Simultaneous Signal Prioritization**: When both BUY and SELL signals trigger for a symbol, Monte Carlo hit probabilities (`prob_buy` vs `prob_sell`) are compared, prioritizing the higher probability direction.
+- **Wind-Choice Quote Asset Prioritization**: When entering the first purchase for a base asset (`count_buyings_for_base_asset == 0`), quote asset balances across alternative pairs sharing the base asset are evaluated. If another quote currency holds a higher balance, the current buy is skipped in favor of the pair with greater liquidity.
+
+---
+
+## 12. Backtest Engine (`run_backtest`)
+- **Location**: `botv5/src/engine.rs` (`TradingEngine::run_backtest`) and `botv5/src/main.rs`
+- **Behavior**:
+  - Activated via `--mode backtest`.
+  - Iterates through cached historical OHLCV candles, calibrates candle window lengths using `calibrate_window_by_non_repetition`, and evaluates `StrategyAggregator` signals and Monte Carlo hit probabilities step-by-step.
+  - Simulates position entries and exits with profit/loss tracking, generating portfolio performance reports (Total Return %, Win Rate, Profit Factor, Max Drawdown).
