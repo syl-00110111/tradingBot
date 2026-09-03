@@ -431,14 +431,16 @@ impl TradingEngine {
 
             let (is_optimal, score, reasons, chars) = self.get_only_optimal(sym).await;
 
+            let (_, market_min_amount) = self.get_market_precision(sym);
+            let min_amount = market_min_amount.max(0.0001);
+
             let base_balance = balance.get(base).copied().unwrap_or(0.0);
-            let has_balance = base_balance > 0.0 || self.recorded_purchases.contains_key(base);
+            let has_non_dust_balance = base_balance >= min_amount || self.recorded_purchases.contains_key(base);
 
             // Redlist logic: check minimum transaction cost in EUR
             let candles = self.load_cached_candles(sym);
             let last_close = candles.last().map(|c| c.close).unwrap_or(1.0);
             let quote_eur_rate = self.get_eur_conversion_rate(quote);
-            let min_amount = 0.0001;
             let market_min_expense_eur = min_amount * last_close * quote_eur_rate;
 
             if market_min_expense_eur > 12.23 && base_balance <= min_amount {
@@ -446,7 +448,7 @@ impl TradingEngine {
                 continue;
             }
 
-            if has_balance {
+            if has_non_dust_balance {
                 reasons_map.insert(sym.clone(), format!("Balance Inventory (Held: {:.4})", base_balance));
                 sell_candidates.push(sym.clone());
             } else if is_optimal {
@@ -671,13 +673,7 @@ impl TradingEngine {
         let desired_amount = min_amount_to_use * 1.1;
         let final_amount = desired_amount.min(max_amount_limit).max(min_amount_to_use);
 
-        if amount_precision > 0.0 {
-            let decimals = (-amount_precision.log10()).round() as i32;
-            let factor = 10.0_f64.powi(decimals.max(0));
-            (final_amount * factor).floor() / factor
-        } else {
-            final_amount
-        }
+        self.round_down_to_precision(final_amount, amount_precision)
     }
 
     pub fn record_purchase(&mut self, symbol: &str, amount: f64, price: f64) -> Result<()> {
@@ -1273,6 +1269,14 @@ impl TradingEngine {
                             let last_idx = candles.len().saturating_sub(1);
                             self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
                         } else {
+                            let quote_free = balance_map.get(quote_asset).copied().unwrap_or(0.0);
+                            let required_cost = rounded_target_price * amount;
+                            if quote_free <= 0.0 || quote_free < required_cost {
+                                tracing::warn!("[{}] Skipping BUY order: insufficient free {} balance ({:.8} free vs {:.8} required)", sym, quote_asset, quote_free, required_cost);
+                                self.pause_buy(sym, 14400)?;
+                                continue;
+                            }
+
                             if let Ok(order) = self.execute_limit_order(sym, "buy", amount, rounded_target_price).await {
                                 self.dump_pending_order(&order)?;
                                 self.record_purchase(sym, amount, rounded_target_price)?;
