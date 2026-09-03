@@ -134,6 +134,54 @@ impl TradingEngine {
         false
     }
 
+    pub fn is_dust_balance(&self, asset: &str, amount: f64, markets: Option<&serde_json::Value>) -> bool {
+        if amount <= 0.0 {
+            return true;
+        }
+
+        let loaded_disk_markets = if markets.map_or(true, |m| m.as_object().map_or(true, |obj| obj.is_empty())) && Path::new("markets.json").exists() {
+            fs::read_to_string("markets.json")
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        } else {
+            None
+        };
+
+        let active_markets = markets.and_then(|m| m.as_object()).or_else(|| loaded_disk_markets.as_ref().and_then(|v| v.as_object()));
+
+        let mut min_asset_amount = 0.0001;
+
+        if let Some(m_obj) = active_markets {
+            for (sym, entry) in m_obj {
+                let base = entry.get("base").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').next().unwrap_or(""));
+                let quote = entry.get("quote").and_then(|v| v.as_str()).unwrap_or_else(|| sym.split('/').nth(1).unwrap_or(""));
+
+                if base.eq_ignore_ascii_case(asset) || quote.eq_ignore_ascii_case(asset) {
+                    let market_min_amount = entry
+                        .get("limits")
+                        .and_then(|l| l.get("amount"))
+                        .and_then(|a| a.get("min"))
+                        .and_then(|v| v.as_f64())
+                        .or_else(|| {
+                            entry
+                                .get("info")
+                                .and_then(|i| i.get("ordermin"))
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())
+                        })
+                        .unwrap_or(0.0001);
+
+                    if market_min_amount > 0.0 {
+                        min_asset_amount = market_min_amount;
+                        break;
+                    }
+                }
+            }
+        }
+
+        amount < min_asset_amount
+    }
+
     pub fn load_market_symbols(&self, balance: &HashMap<String, f64>, markets: &serde_json::Value) -> Vec<String> {
         let mut symbols = Vec::new();
 
@@ -1150,6 +1198,9 @@ impl TradingEngine {
         let balance_json = self.exchange.fetch_balance().await?;
         let mut balance_map: HashMap<String, f64> = HashMap::new();
 
+        let markets_content = fs::read_to_string("markets.json").unwrap_or_else(|_| "{}".to_string());
+        let markets_val: serde_json::Value = serde_json::from_str(&markets_content).unwrap_or_default();
+
         if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
             for (k, v) in free_obj {
                 let val = if let Some(s) = v.as_str() {
@@ -1160,8 +1211,12 @@ impl TradingEngine {
                     0.0
                 };
 
-                if val >= 0.000001 {
-                    balance_map.insert(k.clone(), val);
+                if val > 0.0 {
+                    if !self.is_dust_balance(k, val, Some(&markets_val)) {
+                        balance_map.insert(k.clone(), val);
+                    } else {
+                        info!("[Dust Check] Filtered out dust asset balance {}: {:.8}", k, val);
+                    }
                 }
             }
         }
@@ -1293,6 +1348,14 @@ impl TradingEngine {
         info!("Trading engine started in mode: {:?}", self.config.mode);
 
         loop {
+            let markets_json = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
+                tracing::warn!("Failed to fetch markets from exchange API: {}", e);
+                serde_json::json!({})
+            });
+            if let Ok(json_str) = serde_json::to_string_pretty(&markets_json) {
+                let _ = fs::write("markets.json", json_str);
+            }
+
             let balance_json = self.exchange.fetch_balance().await?;
             let mut balance_map: HashMap<String, f64> = HashMap::new();
 
@@ -1306,8 +1369,12 @@ impl TradingEngine {
                         0.0
                     };
 
-                    if val >= 0.000001 {
-                        balance_map.insert(k.clone(), val);
+                    if val > 0.0 {
+                        if !self.is_dust_balance(k, val, Some(&markets_json)) {
+                            balance_map.insert(k.clone(), val);
+                        } else {
+                            info!("[Dust Check] Filtered out dust asset balance at startup: {}: {:.8}", k, val);
+                        }
                     }
                 }
             }
@@ -1953,5 +2020,26 @@ mod tests {
         let mut engine = TradingEngine::new(config);
         let _ = engine.redlist_pair("TEST/USD", 0.0, 0.0);
         assert!(engine.is_pair_redlisted("TEST/USD"));
+    }
+
+    #[test]
+    fn test_is_dust_balance_filters_dust_amounts() {
+        let config = Config::default();
+        let engine = TradingEngine::new(config);
+
+        let markets = serde_json::json!({
+            "DOGE/USD": {
+                "id": "DOGEUSD",
+                "symbol": "DOGE/USD",
+                "base": "DOGE",
+                "quote": "USD",
+                "limits": {
+                    "amount": { "min": 10.0 }
+                }
+            }
+        });
+
+        assert!(engine.is_dust_balance("DOGE", 5.0, Some(&markets)), "5.0 DOGE should be dust when min is 10.0");
+        assert!(!engine.is_dust_balance("DOGE", 15.0, Some(&markets)), "15.0 DOGE should NOT be dust when min is 10.0");
     }
 }
