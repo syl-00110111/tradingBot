@@ -111,7 +111,7 @@ To trigger a clean and graceful shutdown at any time:
 - **OHLC Non-Repetition Window Calibration**: Dynamically calibrates candle history window sizes based on non-repetitive active candles (checking Open, High, Low, Close relative differences against `epsilon = 1e-5`).
 
 ### 🛡 Risk Management & Advanced Execution Features
-- **Deprecated Order Editing & Cancellation**: `cleanup_open_orders` checks crest high conditions (against 5-week SMA `SMA_840`), evaluates Monte Carlo hit probabilities, edits open orders when prices/amounts change, or cancels orders with insufficient hit probability (< 0.96).
+- **Deprecated Order Editing & Cancellation**: `cleanup_open_orders` checks crest high conditions (against 5-week SMA `SMA_840` when history contains <= 3 peaks in 840 candles), evaluates Monte Carlo hit probabilities, edits open orders when prices/amounts change, or cancels orders with insufficient hit probability (< 0.96).
 - **Hit Probability & Multi-Quote Profitability Checks**: Enforces Monte Carlo hit probability thresholds (> 0.96) before order placement and checks cross-quote weighted average purchase prices (with a 0.3% profit margin) before executing sells.
 - **Simultaneous Signal & Wind-Choice Prioritization**: Prioritizes simultaneous BUY/SELL signals using hit probabilities and applies "Wind-Choice" quote asset prioritization to pass on buys if a higher quote balance exists for the base asset in another pair.
 - **Max Buyings & Sizing Limits**: Caps maximum positions to 4 per base asset, enforces package sizing bounds between 5.07 EUR minimum and 12.23 EUR maximum per trade, and redlists pairs exceeding 12.23 EUR cost unless base balance is held.
