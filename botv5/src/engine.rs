@@ -173,7 +173,7 @@ impl TradingEngine {
         symbols
     }
 
-    pub fn evaluate_pair_scoring(&self, chars: &PairCharacteristics) -> (bool, Vec<&'static str>) {
+    pub fn evaluate_pair_scoring(&self, chars: &PairCharacteristics) -> (bool, i32, Vec<&'static str>) {
         let mut score = 0;
         let mut reasons = Vec::new();
 
@@ -211,7 +211,7 @@ impl TradingEngine {
             reasons.push("Inactive");
         }
 
-        (score >= -1, reasons)
+        (score >= -1, score, reasons)
     }
 
     pub fn compute_pair_characteristics(&self, candles: &[Candle]) -> PairCharacteristics {
@@ -319,7 +319,7 @@ impl TradingEngine {
         })
     }
 
-    pub async fn get_only_optimal(&self, symbol: &str) -> (bool, Vec<&'static str>, PairCharacteristics) {
+    pub async fn get_only_optimal(&self, symbol: &str) -> (bool, i32, Vec<&'static str>, PairCharacteristics) {
         let now_sec = chrono::Utc::now().timestamp();
         let now_minus_4h = now_sec - (4 * 3600);
 
@@ -342,8 +342,8 @@ impl TradingEngine {
                                         trades_per_minute: tpm,
                                     };
                                     tracing::debug!("[Pair Scoring Preprocess] Reusing valid (<4h) cached characteristics for {} (ts: {})", symbol, ts);
-                                    let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
-                                    return (is_optimal, reasons, chars);
+                                    let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+                                    return (is_optimal, score, reasons, chars);
                                 }
                             }
                         }
@@ -401,8 +401,8 @@ impl TradingEngine {
             let _ = fs::write("volumes_trades_data.json", json_str);
         }
 
-        let (is_optimal, reasons) = self.evaluate_pair_scoring(&chars);
-        (is_optimal, reasons, chars)
+        let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+        (is_optimal, score, reasons, chars)
     }
 
     pub async fn filter_available_pairs(
@@ -411,7 +411,7 @@ impl TradingEngine {
         balance: &HashMap<String, f64>,
     ) -> Vec<String> {
         let mut sell_candidates = Vec::new();
-        let mut volume_candidates = Vec::new();
+        let mut volume_candidates: Vec<(String, i32, f64)> = Vec::new();
         let mut reasons_map: HashMap<String, String> = HashMap::new();
 
         for sym in sample_symbols {
@@ -422,7 +422,7 @@ impl TradingEngine {
                 continue;
             }
 
-            let (is_optimal, reasons, _chars) = self.get_only_optimal(sym).await;
+            let (is_optimal, score, reasons, chars) = self.get_only_optimal(sym).await;
 
             let base_balance = balance.get(base).copied().unwrap_or(0.0);
             let has_balance = base_balance > 0.0 || self.recorded_purchases.contains_key(base);
@@ -443,10 +443,16 @@ impl TradingEngine {
                 reasons_map.insert(sym.clone(), format!("Balance Inventory (Held: {:.4})", base_balance));
                 sell_candidates.push(sym.clone());
             } else if is_optimal {
-                reasons_map.insert(sym.clone(), format!("Optimal Volume ({})", reasons.join(", ")));
-                volume_candidates.push(sym.clone());
+                reasons_map.insert(sym.clone(), format!("Optimal Volume (Score: {}, Vol: {:.0}, {})", score, chars.volume_48h, reasons.join(", ")));
+                volume_candidates.push((sym.clone(), score, chars.volume_48h));
             }
         }
+
+        // Sort volume candidates by score descending, then volume_48h descending
+        volume_candidates.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
 
         let mut selected = Vec::new();
         for s in sell_candidates {
@@ -457,12 +463,12 @@ impl TradingEngine {
                 selected.push(s);
             }
         }
-        for v in volume_candidates {
+        for (v_sym, _score, _vol) in volume_candidates {
             if selected.len() >= self.config.max_num_pairs {
                 break;
             }
-            if !selected.contains(&v) {
-                selected.push(v);
+            if !selected.contains(&v_sym) {
+                selected.push(v_sym);
             }
         }
 
@@ -1544,5 +1550,50 @@ mod tests {
 
         assert!(symbols.contains(&"BLESS/USD".to_string()), "BLESS/USD should be included");
         assert!(!symbols.contains(&"BLESS/EUR".to_string()), "BLESS/EUR should NOT be included because it does not exist on exchange");
+    }
+
+    #[tokio::test]
+    async fn test_filter_available_pairs_sorting_by_score_and_volume() {
+        let mut config = Config::default();
+        config.max_num_pairs = 2;
+        let mut engine = TradingEngine::new(config);
+        let balance = HashMap::new();
+
+        // Populate cached volumes_trades_data so get_only_optimal returns known score and volume
+        let volumes = serde_json::json!([
+            {
+                "symbol": "0G/USD",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 10000.0,
+                "spread_pct": 0.05,
+                "volatility_pct": 0.05,
+                "trades_per_minute": 0.5
+            },
+            {
+                "symbol": "BTC/USD",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 500000000.0,
+                "spread_pct": 0.0001,
+                "volatility_pct": 0.02,
+                "trades_per_minute": 500.0
+            },
+            {
+                "symbol": "ETH/USD",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 200000000.0,
+                "spread_pct": 0.0002,
+                "volatility_pct": 0.02,
+                "trades_per_minute": 200.0
+            }
+        ]);
+        let _ = fs::write("volumes_trades_data.json", serde_json::to_string_pretty(&volumes).unwrap());
+
+        let samples = vec!["0G/USD".to_string(), "BTC/USD".to_string(), "ETH/USD".to_string()];
+        let selected = engine.filter_available_pairs(&samples, &balance).await;
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], "BTC/USD", "BTC/USD has highest score/volume and should be first");
+        assert_eq!(selected[1], "ETH/USD", "ETH/USD has second highest score/volume and should be second");
+        assert!(!selected.contains(&"0G/USD".to_string()), "0G/USD lower score/volume should be truncated");
     }
 }
