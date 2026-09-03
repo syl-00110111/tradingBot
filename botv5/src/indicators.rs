@@ -175,9 +175,18 @@ impl TechnicalAnalysis {
             let c2 = &candles[i - 1];
 
             let max_c = c1.close.max(c2.close).max(1e-9);
-            let diff_c = (c1.close - c2.close).abs() / max_c;
+            let max_o = c1.open.max(c2.open).max(1e-9);
+            let max_h = c1.high.max(c2.high).max(1e-9);
+            let max_l = c1.low.max(c2.low).max(1e-9);
 
-            if diff_c > epsilon {
+            let diff_c = (c1.close - c2.close).abs() / max_c;
+            let diff_o = (c1.open - c2.open).abs() / max_o;
+            let diff_h = (c1.high - c2.high).abs() / max_h;
+            let diff_l = (c1.low - c2.low).abs() / max_l;
+
+            let is_rep = diff_c <= epsilon && diff_o <= epsilon && diff_h <= epsilon && diff_l <= epsilon;
+
+            if !is_rep {
                 active_count += 1;
             }
 
