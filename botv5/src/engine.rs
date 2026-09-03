@@ -1165,10 +1165,14 @@ impl TradingEngine {
                         if edited.is_some() {
                             info!("[{}] BUY order updated via edit/replace", sym);
                             self.record_purchase(sym, amount, target_price)?;
+                            let last_idx = candles.len().saturating_sub(1);
+                            self.plot_symbol_backtest(sym, &candles, &[(last_idx, target_price)], &[]);
                         } else {
                             if let Ok(order) = self.execute_limit_order(sym, "buy", amount, target_price).await {
                                 self.dump_pending_order(&order)?;
                                 self.record_purchase(sym, amount, target_price)?;
+                                let last_idx = candles.len().saturating_sub(1);
+                                self.plot_symbol_backtest(sym, &candles, &[(last_idx, target_price)], &[]);
                             } else {
                                 self.pause_buy(sym, 14400)?;
                             }
@@ -1193,6 +1197,8 @@ impl TradingEngine {
                         if let Ok(order) = self.execute_limit_order(sym, "sell", amount, target_price).await {
                             self.dump_pending_order(&order)?;
                             self.remove_recorded_purchases(sym)?;
+                            let last_idx = candles.len().saturating_sub(1);
+                            self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, target_price)]);
                         }
                     }
                 }
