@@ -38,10 +38,11 @@ This document clarifies the architecture, algorithms, and design decisions imple
 
 ---
 
-## 4. 5-Week SMA & Crest High Check
-- **Location**: `botv5/src/indicators.rs` (`TechnicalAnalysis::calculate_5_week_sma`) and `botv5/src/engine.rs` (`TradingEngine::evaluate_symbol_parallel`)
+## 4. 5-Week SMA & Crest High Check (with <= 3 Peaks Condition)
+- **Location**: `botv5/src/indicators.rs` (`TechnicalAnalysis::calculate_5_week_sma`, `TechnicalAnalysis::count_peaks`) and `botv5/src/engine.rs` (`TradingEngine::evaluate_symbol_parallel`, `TradingEngine::cleanup_open_orders`)
 - **Calculation**: Computes 5-week SMA (`SMA_840`) using 50,400 candles of 1m timeframe or falling back to 210 candles of 4h timeframe.
-- **Crest High Check**: If `last_close > sma_840` or `target_buy_price > sma_840` (crest high), limit BUY orders are skipped or cancelled to prevent buying at local market peaks.
+- **Peak Count Analysis**: Counts local maxima peaks in the last 840 candles history using `TechnicalAnalysis::count_peaks(candles, 840)`.
+- **Crest High Check**: The crest high check (`price > sma_840`) is enforced ONLY when there are no more than 3 peaks in the pair's 840 candles history (`num_peaks <= 3`). If there are more than 3 peaks, the crest high check is bypassed to allow BUY orders on multi-peak volatile assets.
 
 ---
 
