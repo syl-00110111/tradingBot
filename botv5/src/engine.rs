@@ -24,6 +24,7 @@ pub struct PairCharacteristics {
     pub spread_pct: f64,
     pub volatility_pct: f64,
     pub trades_per_minute: f64,
+    pub last_close: f64,
 }
 
 pub struct TradingEngine {
@@ -276,6 +277,7 @@ impl TradingEngine {
                 spread_pct: 0.0005,
                 volatility_pct: 0.005,
                 trades_per_minute: 50.0,
+                last_close: 1.0,
             };
         }
 
@@ -289,11 +291,14 @@ impl TradingEngine {
         let spread_pct = if last_candle.close > 0.0 { (last_candle.high - last_candle.low) / last_candle.close } else { 0.005 };
         let trades_per_minute = (candles.len() as f64) / (60.0_f64).max(1.0);
 
+        let last_close = candles.last().map(|c| c.close).unwrap_or(1.0);
+
         PairCharacteristics {
             volume_48h,
             spread_pct,
             volatility_pct,
             trades_per_minute,
+            last_close,
         }
     }
 
@@ -366,45 +371,51 @@ impl TradingEngine {
             0.0
         };
 
+        let last_close = if last_price > 0.0 {
+            last_price
+        } else {
+            ohlcv.as_ref().and_then(|c| c.last()).map(|c| c.close).unwrap_or(1.0)
+        };
+
         Ok(PairCharacteristics {
             volume_48h,
             spread_pct,
             volatility_pct,
             trades_per_minute,
+            last_close,
         })
     }
 
-    pub async fn get_only_optimal(&self, symbol: &str) -> (bool, i32, Vec<&'static str>, PairCharacteristics) {
+    pub async fn get_only_optimal_with_cache(
+        &self,
+        symbol: &str,
+        volumes: &mut Vec<serde_json::Value>,
+    ) -> (bool, i32, Vec<&'static str>, PairCharacteristics, bool) {
         let now_sec = chrono::Utc::now().timestamp();
 
-        // Individualized TTL between 8 and 12 hours (28,800 to 43,200 seconds) derived deterministically per symbol
         let symbol_hash: u64 = symbol.bytes().fold(5381u64, |acc, b| (acc.wrapping_shl(5)).wrapping_add(acc).wrapping_add(b as u64));
         let cache_ttl_secs = 28800 + ((symbol_hash % 14400) as i64);
 
-        if Path::new("volumes_trades_data.json").exists() {
-            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
-                if let Ok(volumes) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                    for v in volumes {
-                        if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
-                            if let Some(ts) = v.get("timestamp").and_then(|t| t.as_i64()) {
-                                if now_sec - ts < cache_ttl_secs {
-                                    let vol_48h = v.get("volume_48h").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                                    let spread = v.get("spread_pct").and_then(|x| x.as_f64()).unwrap_or(0.5);
-                                    let vola = v.get("volatility_pct").and_then(|x| x.as_f64()).unwrap_or(0.05);
-                                    let tpm = v.get("trades_per_minute").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        for v in volumes.iter() {
+            if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
+                if let Some(ts) = v.get("timestamp").and_then(|t| t.as_i64()) {
+                    if now_sec - ts < cache_ttl_secs {
+                        let vol_48h = v.get("volume_48h").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        let spread = v.get("spread_pct").and_then(|x| x.as_f64()).unwrap_or(0.5);
+                        let vola = v.get("volatility_pct").and_then(|x| x.as_f64()).unwrap_or(0.05);
+                        let tpm = v.get("trades_per_minute").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        let last_close = v.get("last_close").and_then(|x| x.as_f64()).unwrap_or(1.0);
 
-                                    let chars = PairCharacteristics {
-                                        volume_48h: vol_48h,
-                                        spread_pct: spread,
-                                        volatility_pct: vola,
-                                        trades_per_minute: tpm,
-                                    };
-                                    tracing::debug!("[Pair Scoring Preprocess] Reusing valid ({:.1}h TTL) cached characteristics for {} (ts: {})", cache_ttl_secs as f64 / 3600.0, symbol, ts);
-                                    let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
-                                    return (is_optimal, score, reasons, chars);
-                                }
-                            }
-                        }
+                        let chars = PairCharacteristics {
+                            volume_48h: vol_48h,
+                            spread_pct: spread,
+                            volatility_pct: vola,
+                            trades_per_minute: tpm,
+                            last_close,
+                        };
+                        tracing::debug!("[Pair Scoring Preprocess] Reusing valid ({:.1}h TTL) cached characteristics for {} (ts: {})", cache_ttl_secs as f64 / 3600.0, symbol, ts);
+                        let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+                        return (is_optimal, score, reasons, chars, false);
                     }
                 }
             }
@@ -419,17 +430,8 @@ impl TradingEngine {
             }
         };
 
-        let mut volumes = Vec::new();
-        if Path::new("volumes_trades_data.json").exists() {
-            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
-                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                    volumes = parsed;
-                }
-            }
-        }
-
         let mut found = false;
-        for v in &mut volumes {
+        for v in volumes.iter_mut() {
             if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("timestamp".into(), serde_json::json!(now_sec));
@@ -437,6 +439,7 @@ impl TradingEngine {
                     obj.insert("spread_pct".into(), serde_json::json!(chars.spread_pct));
                     obj.insert("volatility_pct".into(), serde_json::json!(chars.volatility_pct));
                     obj.insert("trades_per_minute".into(), serde_json::json!(chars.trades_per_minute));
+                    obj.insert("last_close".into(), serde_json::json!(chars.last_close));
                 }
                 found = true;
                 break;
@@ -451,15 +454,30 @@ impl TradingEngine {
                 "volume_48h": chars.volume_48h,
                 "spread_pct": chars.spread_pct,
                 "volatility_pct": chars.volatility_pct,
-                "trades_per_minute": chars.trades_per_minute
+                "trades_per_minute": chars.trades_per_minute,
+                "last_close": chars.last_close
             }));
         }
 
-        if let Ok(json_str) = serde_json::to_string_pretty(&volumes) {
-            let _ = fs::write("volumes_trades_data.json", json_str);
-        }
-
         let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+        (is_optimal, score, reasons, chars, true)
+    }
+
+    pub async fn get_only_optimal(&self, symbol: &str) -> (bool, i32, Vec<&'static str>, PairCharacteristics) {
+        let mut volumes = Vec::new();
+        if Path::new("volumes_trades_data.json").exists() {
+            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
+                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    volumes = parsed;
+                }
+            }
+        }
+        let (is_optimal, score, reasons, chars, modified) = self.get_only_optimal_with_cache(symbol, &mut volumes).await;
+        if modified {
+            if let Ok(json_str) = serde_json::to_string_pretty(&volumes) {
+                let _ = fs::write("volumes_trades_data.json", json_str);
+            }
+        }
         (is_optimal, score, reasons, chars)
     }
 
@@ -528,6 +546,17 @@ impl TradingEngine {
         let mut volume_candidates: Vec<(String, i32, f64)> = Vec::new();
         let mut reasons_map: HashMap<String, String> = HashMap::new();
 
+        let mut volumes = Vec::new();
+        if Path::new("volumes_trades_data.json").exists() {
+            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
+                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    volumes = parsed;
+                }
+            }
+        }
+
+        let mut volumes_modified = false;
+
         for sym in sample_symbols {
             if self.is_pair_redlisted(sym) {
                 continue;
@@ -540,7 +569,10 @@ impl TradingEngine {
                 continue;
             }
 
-            let (is_optimal, score, reasons, chars) = self.get_only_optimal(sym).await;
+            let (is_optimal, score, reasons, chars, modified) = self.get_only_optimal_with_cache(sym, &mut volumes).await;
+            if modified {
+                volumes_modified = true;
+            }
 
             let (_, market_min_amount) = self.get_market_precision(sym);
             let min_amount = market_min_amount.max(0.0001);
@@ -549,8 +581,12 @@ impl TradingEngine {
             let has_non_dust_balance = base_balance >= min_amount || self.recorded_purchases.contains_key(base);
 
             // Redlist logic: check minimum transaction cost in EUR
-            let candles = self.load_cached_candles(sym);
-            let last_close = candles.last().map(|c| c.close).unwrap_or(1.0);
+            let last_close = if chars.last_close > 0.0 {
+                chars.last_close
+            } else {
+                let candles = self.load_cached_candles(sym);
+                candles.last().map(|c| c.close).unwrap_or(1.0)
+            };
             let quote_eur_rate = self.get_eur_conversion_rate(quote);
             let market_min_expense_eur = min_amount * last_close * quote_eur_rate;
 
@@ -565,6 +601,12 @@ impl TradingEngine {
             } else if is_optimal {
                 reasons_map.insert(sym.clone(), format!("Optimal Volume (Score: {}, Vol: {:.0}, {})", score, chars.volume_48h, reasons.join(", ")));
                 volume_candidates.push((sym.clone(), score, chars.volume_48h));
+            }
+        }
+
+        if volumes_modified {
+            if let Ok(json_str) = serde_json::to_string_pretty(&volumes) {
+                let _ = fs::write("volumes_trades_data.json", json_str);
             }
         }
 
@@ -1386,11 +1428,6 @@ impl TradingEngine {
                 }
             }
             self.previous_balance_map = balance_map.clone();
-
-            let markets_json = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
-                tracing::warn!("Failed to fetch markets from exchange API: {}", e);
-                serde_json::json!({})
-            });
 
             let raw_symbols = self.load_market_symbols(&balance_map, &markets_json);
 
