@@ -1116,9 +1116,9 @@ impl TradingEngine {
         let is_trend_following = adx_val > 25.0;
 
         let base_buy_offset = if is_trend_following {
-            if is_bullish { 0.0003 } else { 0.0010 }
+            if is_bullish { 0.0006 } else { 0.0020 }
         } else {
-            if is_bullish { 0.0006 } else { 0.0005 }
+            if is_bullish { 0.0012 } else { 0.0010 }
         };
 
         let base_sell_offset = if is_trend_following {
