@@ -173,16 +173,20 @@ impl GenericExchange {
             api_secret,
             http_client: Client::builder().timeout(Duration::from_secs(30)).build().unwrap_or_default(),
             rate_limiter: Arc::new(Mutex::new(0)),
-            rate_limit_ms: 1000,
+            rate_limit_ms: 250,
         }
     }
 
     pub async fn apply_rate_limit(&self) {
+        self.apply_custom_rate_limit(self.rate_limit_ms).await;
+    }
+
+    pub async fn apply_custom_rate_limit(&self, limit_ms: u64) {
         let mut last_time = self.rate_limiter.lock().await;
         let now = chrono::Utc::now().timestamp_millis();
         let elapsed = now - *last_time;
-        if elapsed < self.rate_limit_ms as i64 {
-            let delay = self.rate_limit_ms as i64 - elapsed;
+        if elapsed < limit_ms as i64 {
+            let delay = limit_ms as i64 - elapsed;
             sleep(Duration::from_millis(delay as u64)).await;
         }
         *last_time = chrono::Utc::now().timestamp_millis();
@@ -210,7 +214,7 @@ impl GenericExchange {
     }
 
     pub async fn send_private_request(&self, path: &str, params: &mut Vec<(&str, String)>) -> Result<serde_json::Value> {
-        self.apply_rate_limit().await;
+        self.apply_custom_rate_limit(1000).await;
         let nonce = chrono::Utc::now().timestamp_millis().to_string();
         params.push(("nonce", nonce.clone()));
 

@@ -29,7 +29,7 @@ pub struct PairCharacteristics {
 
 pub struct TradingEngine {
     pub config: Config,
-    pub exchange: Box<dyn ExchangeClient + Send + Sync>,
+    pub exchange: std::sync::Arc<dyn ExchangeClient + Send + Sync>,
     pub recorded_purchases: HashMap<String, Vec<RecordedPurchase>>,
     pub last_maintenance_ts: i64,
     pub previous_selected_pairs: Vec<String>,
@@ -38,7 +38,7 @@ pub struct TradingEngine {
 
 impl TradingEngine {
     pub fn new(config: Config) -> Self {
-        let exchange = Box::new(GenericExchange::new(
+        let exchange = std::sync::Arc::new(GenericExchange::new(
             config.exchange_id.clone(),
             config.api_key.clone(),
             config.api_secret.clone(),
@@ -270,7 +270,7 @@ impl TradingEngine {
         (score >= -1, score, reasons)
     }
 
-    pub fn compute_pair_characteristics(&self, candles: &[Candle]) -> PairCharacteristics {
+    pub fn compute_pair_characteristics(candles: &[Candle]) -> PairCharacteristics {
         if candles.is_empty() {
             return PairCharacteristics {
                 volume_48h: 250000.0,
@@ -302,7 +302,7 @@ impl TradingEngine {
         }
     }
 
-    pub fn load_cached_candles(&self, symbol: &str) -> Vec<Candle> {
+    pub fn load_cached_candles(symbol: &str) -> Vec<Candle> {
         let sanitized = symbol.replace('/', "");
         let cache_file = format!("ohlcv_data_{}_1m.json", sanitized);
         if Path::new(&cache_file).exists() {
@@ -316,12 +316,16 @@ impl TradingEngine {
     }
 
     pub async fn fetch_symbol_characteristics(&self, symbol: &str) -> Result<PairCharacteristics> {
-        let cached = self.load_cached_candles(symbol);
+        Self::fetch_symbol_characteristics_with_exchange(self.exchange.as_ref(), symbol).await
+    }
+
+    pub async fn fetch_symbol_characteristics_with_exchange(exchange: &(dyn ExchangeClient + Send + Sync), symbol: &str) -> Result<PairCharacteristics> {
+        let cached = Self::load_cached_candles(symbol);
         let last_ts = cached.last().map(|c| c.timestamp);
 
-        let ticker = self.exchange.fetch_ticker(symbol).await.ok();
-        let ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", 60, last_ts).await.ok();
-        let trades = self.exchange.fetch_trades(symbol, 1000).await.ok();
+        let ticker = exchange.fetch_ticker(symbol).await.ok();
+        let ohlcv = exchange.fetch_ohlcv(symbol, "1h", 60, last_ts).await.ok();
+        let trades = exchange.fetch_trades(symbol, 1000).await.ok();
 
         let last_price = ticker.as_ref().map(|t| t.last).unwrap_or(0.0);
         let volume_48h = ticker.as_ref().map(|t| t.volume * last_price).unwrap_or(0.0);
@@ -425,8 +429,8 @@ impl TradingEngine {
         let chars = match self.fetch_symbol_characteristics(symbol).await {
             Ok(c) => c,
             Err(_) => {
-                let candles = self.load_cached_candles(symbol);
-                self.compute_pair_characteristics(&candles)
+                let candles = Self::load_cached_candles(symbol);
+                Self::compute_pair_characteristics(&candles)
             }
         };
 
@@ -486,8 +490,8 @@ impl TradingEngine {
         let chars = match self.fetch_symbol_characteristics(symbol).await {
             Ok(c) => c,
             Err(_) => {
-                let candles = self.load_cached_candles(symbol);
-                self.compute_pair_characteristics(&candles)
+                let candles = Self::load_cached_candles(symbol);
+                Self::compute_pair_characteristics(&candles)
             }
         };
 
@@ -556,6 +560,9 @@ impl TradingEngine {
         }
 
         let mut volumes_modified = false;
+        let now_sec = chrono::Utc::now().timestamp();
+
+        let mut uncached_symbols = Vec::new();
 
         for sym in sample_symbols {
             if self.is_pair_redlisted(sym) {
@@ -569,38 +576,137 @@ impl TradingEngine {
                 continue;
             }
 
-            let (is_optimal, score, reasons, chars, modified) = self.get_only_optimal_with_cache(sym, &mut volumes).await;
-            if modified {
-                volumes_modified = true;
+            let symbol_hash: u64 = sym.bytes().fold(5381u64, |acc, b| (acc.wrapping_shl(5)).wrapping_add(acc).wrapping_add(b as u64));
+            let cache_ttl_secs = 28800 + ((symbol_hash % 14400) as i64);
+
+            let mut cached_chars = None;
+            for v in &volumes {
+                if v.get("symbol").and_then(|s| s.as_str()) == Some(sym) {
+                    if let Some(ts) = v.get("timestamp").and_then(|t| t.as_i64()) {
+                        if now_sec - ts < cache_ttl_secs {
+                            let vol_48h = v.get("volume_48h").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                            let spread = v.get("spread_pct").and_then(|x| x.as_f64()).unwrap_or(0.5);
+                            let vola = v.get("volatility_pct").and_then(|x| x.as_f64()).unwrap_or(0.05);
+                            let tpm = v.get("trades_per_minute").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                            let last_close = v.get("last_close").and_then(|x| x.as_f64()).unwrap_or(1.0);
+
+                            cached_chars = Some(PairCharacteristics {
+                                volume_48h: vol_48h,
+                                spread_pct: spread,
+                                volatility_pct: vola,
+                                trades_per_minute: tpm,
+                                last_close,
+                            });
+                            break;
+                        }
+                    }
+                }
             }
 
-            let (_, market_min_amount) = self.get_market_precision(sym);
-            let min_amount = market_min_amount.max(0.0001);
+            if let Some(chars) = cached_chars {
+                let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+                let (_, market_min_amount) = self.get_market_precision(sym);
+                let min_amount = market_min_amount.max(0.0001);
+                let base_balance = balance.get(base).copied().unwrap_or(0.0);
+                let has_non_dust_balance = base_balance >= min_amount || self.recorded_purchases.contains_key(base);
 
-            let base_balance = balance.get(base).copied().unwrap_or(0.0);
-            let has_non_dust_balance = base_balance >= min_amount || self.recorded_purchases.contains_key(base);
+                let last_close = if chars.last_close > 0.0 { chars.last_close } else { 1.0 };
+                let quote_eur_rate = self.get_eur_conversion_rate(quote);
+                let market_min_expense_eur = min_amount * last_close * quote_eur_rate;
 
-            // Redlist logic: check minimum transaction cost in EUR
-            let last_close = if chars.last_close > 0.0 {
-                chars.last_close
+                if market_min_expense_eur > 12.23 && base_balance <= min_amount {
+                    let _ = self.redlist_pair(sym, min_amount, last_close);
+                    continue;
+                }
+
+                if has_non_dust_balance {
+                    reasons_map.insert(sym.clone(), format!("Balance Inventory (Held: {:.4})", base_balance));
+                    sell_candidates.push(sym.clone());
+                } else if is_optimal {
+                    reasons_map.insert(sym.clone(), format!("Optimal Volume (Score: {}, Vol: {:.0}, {})", score, chars.volume_48h, reasons.join(", ")));
+                    volume_candidates.push((sym.clone(), score, chars.volume_48h));
+                }
             } else {
-                let candles = self.load_cached_candles(sym);
-                candles.last().map(|c| c.close).unwrap_or(1.0)
-            };
-            let quote_eur_rate = self.get_eur_conversion_rate(quote);
-            let market_min_expense_eur = min_amount * last_close * quote_eur_rate;
-
-            if market_min_expense_eur > 12.23 && base_balance <= min_amount {
-                let _ = self.redlist_pair(sym, min_amount, last_close);
-                continue;
+                uncached_symbols.push(sym.clone());
             }
+        }
 
-            if has_non_dust_balance {
-                reasons_map.insert(sym.clone(), format!("Balance Inventory (Held: {:.4})", base_balance));
-                sell_candidates.push(sym.clone());
-            } else if is_optimal {
-                reasons_map.insert(sym.clone(), format!("Optimal Volume (Score: {}, Vol: {:.0}, {})", score, chars.volume_48h, reasons.join(", ")));
-                volume_candidates.push((sym.clone(), score, chars.volume_48h));
+        if !uncached_symbols.is_empty() {
+            info!("[Pair Scoring Preprocess] Concurrently fetching fresh characteristics for {} symbols...", uncached_symbols.len());
+            let exchange_arc = self.exchange.clone();
+            let tasks: Vec<_> = uncached_symbols.iter().map(|sym| {
+                let sym_str = sym.clone();
+                let ex = exchange_arc.clone();
+                async move {
+                    let chars = match Self::fetch_symbol_characteristics_with_exchange(ex.as_ref(), &sym_str).await {
+                        Ok(c) => c,
+                        Err(_) => {
+                            let candles = Self::load_cached_candles(&sym_str);
+                            Self::compute_pair_characteristics(&candles)
+                        }
+                    };
+                    (sym_str, chars)
+                }
+            }).collect();
+
+            let fetched_results = futures::future::join_all(tasks).await;
+
+            for (sym, chars) in fetched_results {
+                let mut found = false;
+                for v in volumes.iter_mut() {
+                    if v.get("symbol").and_then(|s| s.as_str()) == Some(&sym) {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("timestamp".into(), serde_json::json!(now_sec));
+                            obj.insert("volume_48h".into(), serde_json::json!(chars.volume_48h));
+                            obj.insert("spread_pct".into(), serde_json::json!(chars.spread_pct));
+                            obj.insert("volatility_pct".into(), serde_json::json!(chars.volatility_pct));
+                            obj.insert("trades_per_minute".into(), serde_json::json!(chars.trades_per_minute));
+                            obj.insert("last_close".into(), serde_json::json!(chars.last_close));
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+
+                if !found {
+                    volumes.push(serde_json::json!({
+                        "symbol": sym,
+                        "id": sym.replace('/', ""),
+                        "timestamp": now_sec,
+                        "volume_48h": chars.volume_48h,
+                        "spread_pct": chars.spread_pct,
+                        "volatility_pct": chars.volatility_pct,
+                        "trades_per_minute": chars.trades_per_minute,
+                        "last_close": chars.last_close
+                    }));
+                }
+
+                volumes_modified = true;
+
+                let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+                let base = sym.split('/').next().unwrap_or(&sym);
+                let quote = sym.split('/').nth(1).unwrap_or("USD");
+                let (_, market_min_amount) = self.get_market_precision(&sym);
+                let min_amount = market_min_amount.max(0.0001);
+                let base_balance = balance.get(base).copied().unwrap_or(0.0);
+                let has_non_dust_balance = base_balance >= min_amount || self.recorded_purchases.contains_key(base);
+
+                let last_close = if chars.last_close > 0.0 { chars.last_close } else { 1.0 };
+                let quote_eur_rate = self.get_eur_conversion_rate(quote);
+                let market_min_expense_eur = min_amount * last_close * quote_eur_rate;
+
+                if market_min_expense_eur > 12.23 && base_balance <= min_amount {
+                    let _ = self.redlist_pair(&sym, min_amount, last_close);
+                    continue;
+                }
+
+                if has_non_dust_balance {
+                    reasons_map.insert(sym.clone(), format!("Balance Inventory (Held: {:.4})", base_balance));
+                    sell_candidates.push(sym.clone());
+                } else if is_optimal {
+                    reasons_map.insert(sym.clone(), format!("Optimal Volume (Score: {}, Vol: {:.0}, {})", score, chars.volume_48h, reasons.join(", ")));
+                    volume_candidates.push((sym.clone(), score, chars.volume_48h));
+                }
             }
         }
 
