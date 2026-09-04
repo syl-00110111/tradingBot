@@ -112,6 +112,42 @@ impl TradingEngine {
         false
     }
 
+    pub fn is_pair_unscored(&self, symbol: &str) -> bool {
+        let file_path = self.config.unscored_file();
+        if Path::new(file_path).exists() {
+            if let Ok(content) = fs::read_to_string(file_path) {
+                if let Ok(unscored) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content) {
+                    return unscored.contains_key(symbol);
+                }
+            }
+        }
+        false
+    }
+
+    pub fn add_unscored_pair(&mut self, symbol: &str, score: i32) -> Result<()> {
+        let file_path = self.config.unscored_file();
+        let mut unscored: HashMap<String, serde_json::Value> = if Path::new(file_path).exists() {
+            let content = fs::read_to_string(file_path)?;
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
+        if !unscored.contains_key(symbol) {
+            unscored.insert(
+                symbol.to_string(),
+                serde_json::json!({
+                    "symbol": symbol,
+                    "score": score,
+                    "timestamp": chrono::Utc::now().timestamp()
+                }),
+            );
+            fs::write(file_path, serde_json::to_string_pretty(&unscored)?)?;
+            info!("[Sub-action] Added unscored pair {} to {}", symbol, file_path);
+        }
+        Ok(())
+    }
+
     pub fn is_dust_balance(&self, asset: &str, amount: f64, markets: Option<&serde_json::Value>) -> bool {
         if amount <= 0.0 {
             return true;
@@ -1072,11 +1108,11 @@ impl TradingEngine {
 
         let avg_purchase_price = weighted_sum / total_amount;
         let fee_rate = self.config.default_fee;
-        let min_profit = self.config.min_profit_margin;
+        let min_profit = if self.is_pair_unscored(symbol) { 0.00202 } else { self.config.min_profit_margin };
         let min_exit_price = avg_purchase_price * (1.0 + fee_rate) * (1.0 + min_profit) / (1.0 - fee_rate);
         let profitable = sell_price >= min_exit_price;
         let details = format!(
-            "Sell Price: {:.8} vs Min Exit Price (converted to {}, fee: {:.4}, min profit: {:.4}): {:.8} (Avg Purchase Price: {:.8}, Remaining Amount: {:.6})",
+            "Sell Price: {:.8} vs Min Exit Price (converted to {}, fee: {:.4}, min profit: {:.5}): {:.8} (Avg Purchase Price: {:.8}, Remaining Amount: {:.6})",
             sell_price, current_quote, fee_rate, min_profit, min_exit_price, avg_purchase_price, total_amount
         );
 
@@ -1559,45 +1595,11 @@ impl TradingEngine {
 
                 let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
 
-                let base_asset = sym.split('/').next().unwrap_or(sym);
-                let _quote_asset = sym.split('/').nth(1).unwrap_or("USD");
-                let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
-                let market_min_amount = self.get_market_min_amount(sym);
-                let min_amount = market_min_amount.max(0.0001);
-
                 let (is_optimal, score, _reasons, _chars) = self.get_only_optimal(sym).await;
 
-                if !is_optimal && base_free >= min_amount {
-                    info!("[{}] Pair is no longer scored correctly (score: {}, optimal: false). Generating SELL order to sell everything (held balance: {:.8})...", sym, score, base_free);
-                    let (price_prec, amount_prec) = self.get_market_precision(sym);
-                    let target_price = last_close * 1.0005;
-                    let rounded_target_price = self.round_to_precision(target_price, price_prec);
-                    let amount = self.round_down_to_precision(base_free, amount_prec);
-
-                    if amount >= min_amount {
-                        self.cleanup_open_orders(sym, rounded_target_price, "sell", &candles, last_close, amount).await?;
-                        match self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
-                            Ok(order) => {
-                                self.dump_pending_order(&order)?;
-                                info!("[{}] Unscored pair SELL ALL limit order {} placed on exchange for {:.8} at price {:.8}", sym, order.id, amount, rounded_target_price);
-                                let last_idx = candles.len().saturating_sub(1);
-                                self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
-                            }
-                            Err(e) => {
-                                tracing::error!("[{}] Unscored pair SELL ALL limit order execution failed on exchange (amount: {:.8}, price: {:.8}): {}", sym, amount, rounded_target_price, e);
-                                let err_str = e.to_string();
-                                if err_str.contains("EAccount:Invalid permissions") {
-                                    let _ = self.redlist_pair(sym, 0.0, 0.0);
-                                } else if err_str.contains("Insufficient funds") {
-                                    if let Ok(nb) = self.handle_insufficient_funds(sym).await {
-                                        balance_map = nb;
-                                    }
-                                    let _ = self.re_evaluate_pair(sym).await;
-                                }
-                            }
-                        }
-                    }
-                    continue;
+                if !is_optimal {
+                    let _ = self.add_unscored_pair(sym, score);
+                    info!("[{}] Pair is no longer scored correctly (score: {}, optimal: false). Added to unscored pairs (buying disabled, 2.02/1000 sell threshold applied).", sym, score);
                 }
 
                 let eval = self.evaluate_symbol_parallel(sym, &candles, candles_4h.as_deref(), last_close);
@@ -1609,6 +1611,11 @@ impl TradingEngine {
                     let quote_asset = sym.split('/').nth(1).unwrap_or("USD");
 
                     if signal == Signal::Buy {
+                        if self.is_pair_unscored(sym) {
+                            info!("[{}] Skipping BUY signal: pair is in unscored pairs list (buying disabled)", sym);
+                            continue;
+                        }
+
                         let current_buyings = self.count_buyings_for_base_asset(base_asset);
                         if current_buyings >= self.config.max_buyings_per_base_asset {
                             info!("[{}] Skipping BUY signal: reached max buyings per base asset (current {}, max {})", sym, current_buyings, self.config.max_buyings_per_base_asset);
@@ -1692,7 +1699,15 @@ impl TradingEngine {
                         let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
                         let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, min_amount, amount_prec);
                         let raw_amount = calculated_amount.min(base_free);
-                        let amount = self.round_down_to_precision(raw_amount, amount_prec);
+
+                        // If selling the entire or maximum possible free balance, subtract 1 unit of precision to avoid floating-point/held precision Insufficient funds errors on exchange
+                        let adjusted_raw_amount = if (raw_amount - base_free).abs() < 1e-8 && amount_prec > 0.0 {
+                            (raw_amount - amount_prec).max(0.0)
+                        } else {
+                            raw_amount
+                        };
+
+                        let amount = self.round_down_to_precision(adjusted_raw_amount, amount_prec);
 
                         if amount < min_amount {
                             tracing::warn!("[{}] Skipping SELL order: available free balance {:.8} {} (sell amount {:.8}) is below market min_amount {}", sym, base_free, base_asset, amount, min_amount);

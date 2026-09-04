@@ -146,11 +146,11 @@ fn default_fee() -> f64 {
 }
 
 fn default_min_profit_margin() -> f64 {
-    0.003
+    0.00542
 }
 
 fn default_max_num_pairs() -> usize {
-    150
+    120
 }
 
 fn default_max_buyings_per_base_asset() -> usize {
@@ -363,7 +363,7 @@ impl Config {
         }
 
         // Apply hardcoded botv4.py defaults as strict overrides
-        config.max_num_pairs = 150;
+        config.max_num_pairs = 120;
         config.mini_count = 400;
         config.base_assets = default_base_assets();
         config.forbid_assets = default_forbid_assets();
@@ -377,6 +377,14 @@ impl Config {
             "sim_redlisted_pairs.json"
         } else {
             "redlisted_pairs.json"
+        }
+    }
+
+    pub fn unscored_file(&self) -> &'static str {
+        if self.mode == RunMode::Simulation {
+            "sim_unscored_pairs.json"
+        } else {
+            "unscored_pairs.json"
         }
     }
 
