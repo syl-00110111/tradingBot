@@ -1219,6 +1219,10 @@ impl TradingEngine {
                                 let symbol = order_val.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
                                 let processed = entry.get("processed").and_then(|p| p.as_bool()).unwrap_or(false);
 
+                                if id.is_empty() || processed || id.starts_with("buy_") || id.starts_with("sell_") || id.starts_with("mock_") || id.starts_with("sim_") {
+                                    continue;
+                                }
+
                                 let sym_base = symbol.split('/').next().unwrap_or(symbol);
                                 if let Some(target) = target_base_asset {
                                     if sym_base != target {
@@ -1226,17 +1230,17 @@ impl TradingEngine {
                                     }
                                 }
 
-                                if side.eq_ignore_ascii_case("sell") && !id.is_empty() && !id.starts_with("sell_") && !processed {
-                                    if !open_order_ids.contains(id) {
-                                        info!("[Pending Orders Check] Pending SELL order {} for {} is effectively processed/filled on exchange. Clearing recorded purchases.", id, symbol);
+                                if !open_order_ids.contains(id) {
+                                    info!("[Pending Orders Check] Pending {} order {} for {} is no longer open on exchange (filled/processed).", side.to_uppercase(), id, symbol);
+                                    if side.eq_ignore_ascii_case("sell") {
                                         let _ = self.remove_recorded_purchases(symbol);
-                                        if let Some(obj) = entry.as_object_mut() {
-                                            obj.insert("processed".into(), serde_json::json!(true));
-                                            updated = true;
-                                        }
-                                    } else {
-                                        info!("[Pending Orders Check] Pending SELL order {} for {} remains open on exchange.", id, symbol);
                                     }
+                                    if let Some(obj) = entry.as_object_mut() {
+                                        obj.insert("processed".into(), serde_json::json!(true));
+                                        updated = true;
+                                    }
+                                } else {
+                                    info!("[Pending Orders Check] Pending {} order {} for {} remains open on exchange.", side.to_uppercase(), id, symbol);
                                 }
                             }
                         }
