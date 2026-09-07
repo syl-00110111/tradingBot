@@ -500,8 +500,8 @@ impl ExchangeClient for GenericExchange {
         params.insert("pair".to_string(), self.to_kraken_pair(symbol));
         params.insert("type".to_string(), "buy".to_string());
         params.insert("ordertype".to_string(), "limit".to_string());
-        params.insert("price".to_string(), price.to_string());
-        params.insert("volume".to_string(), amount.to_string());
+        params.insert("price".to_string(), format!("{}", price));
+        params.insert("volume".to_string(), format!("{}", amount));
 
         let res = self.send_private_request("AddOrder", params).await?;
 
@@ -541,8 +541,8 @@ impl ExchangeClient for GenericExchange {
         params.insert("pair".to_string(), self.to_kraken_pair(symbol));
         params.insert("type".to_string(), "sell".to_string());
         params.insert("ordertype".to_string(), "limit".to_string());
-        params.insert("price".to_string(), price.to_string());
-        params.insert("volume".to_string(), amount.to_string());
+        params.insert("price".to_string(), format!("{}", price));
+        params.insert("volume".to_string(), format!("{}", amount));
 
         let res = self.send_private_request("AddOrder", params).await?;
 
