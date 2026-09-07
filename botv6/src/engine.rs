@@ -1525,37 +1525,30 @@ impl TradingEngine {
     pub async fn run(&mut self) -> Result<()> {
         info!("Trading engine started in mode: {:?}", self.config.mode);
 
+        // Fetch markets and balance once at startup, subsequently refreshed during maintenance or on order execution errors
+        let initial_markets = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch markets from exchange API: {}", e);
+            serde_json::json!({})
+        });
+        if let Ok(json_str) = serde_json::to_string_pretty(&initial_markets) {
+            let _ = fs::write("markets.json", json_str);
+        }
+
+        let _ = self.refresh_balance().await;
+
         loop {
-            let markets_json = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
-                tracing::warn!("Failed to fetch markets from exchange API: {}", e);
+            let markets_json: serde_json::Value = if Path::new("markets.json").exists() {
+                fs::read_to_string("markets.json")
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok())
+                    .unwrap_or_default()
+            } else {
                 serde_json::json!({})
-            });
-            if let Ok(json_str) = serde_json::to_string_pretty(&markets_json) {
-                let _ = fs::write("markets.json", json_str);
-            }
+            };
 
-            let balance_json = self.exchange.fetch_balance().await?;
-            let mut balance_map: HashMap<String, f64> = HashMap::new();
-
-            if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
-                for (k, v) in free_obj {
-                    let val = if let Some(s) = v.as_str() {
-                        s.parse::<f64>().unwrap_or(0.0)
-                    } else if let Some(n) = v.as_f64() {
-                        n
-                    } else {
-                        0.0
-                    };
-
-                    let norm_k = crate::exchange::normalize_kraken_symbol(k);
-                    if val > 0.0 && !self.is_dust_balance(&norm_k, val, Some(&markets_json)) {
-                        balance_map.insert(norm_k, val);
-                    }
-                }
-            }
-
-            if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
-                let _ = fs::write("balance.json", json_str);
+            let mut balance_map = self.previous_balance_map.clone();
+            if balance_map.is_empty() {
+                balance_map = self.refresh_balance().await.unwrap_or_default();
             }
 
             if self.previous_balance_map.is_empty() {
@@ -1613,7 +1606,7 @@ impl TradingEngine {
 
                 let (is_optimal, score, _reasons, _chars) = self.get_only_optimal(sym).await;
 
-                if !is_optimal {
+                if !is_optimal && !self.is_pair_unscored(sym) {
                     let _ = self.add_unscored_pair(sym, score);
                     info!("[{}] Pair is no longer scored correctly (score: {}, optimal: false). Added to unscored pairs (buying disabled, 2.02/1000 sell threshold applied).", sym, score);
                 }
@@ -1769,6 +1762,20 @@ impl TradingEngine {
 
         fs::write(file_path, serde_json::to_string_pretty(&redlist)?)?;
         info!("[Sub-action] Redlisted pair {} in {}", symbol, file_path);
+        Ok(())
+    }
+
+    pub fn remove_from_redlist(&mut self, symbol: &str) -> Result<()> {
+        let file_path = self.config.redlist_file();
+        if Path::new(file_path).exists() {
+            let content = fs::read_to_string(file_path)?;
+            if let Ok(mut redlist) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content) {
+                if redlist.remove(symbol).is_some() {
+                    fs::write(file_path, serde_json::to_string_pretty(&redlist)?)?;
+                    info!("[Sub-action] Removed pair {} from redlist in {}", symbol, file_path);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2160,5 +2167,44 @@ mod tests {
 
         assert!(engine.is_dust_balance("DOGE", 5.0, Some(&markets)), "5.0 DOGE should be dust when min is 10.0");
         assert!(!engine.is_dust_balance("DOGE", 15.0, Some(&markets)), "15.0 DOGE should NOT be dust when min is 10.0");
+    }
+
+    #[tokio::test]
+    async fn test_redlist_expensive_pair_when_no_balance() {
+        let mut engine = TradingEngine::new(Config::default());
+        let balance = HashMap::new();
+
+        // 1 BTC * 60,000 USD * 0.86 EUR/USD = 51,600 EUR > 12.23 EUR expense
+        let volumes = serde_json::json!([
+            {
+                "symbol": "EXPENSIVE/EUR",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 5000000.0,
+                "spread_pct": 0.001,
+                "volatility_pct": 0.02,
+                "trades_per_minute": 10.0,
+                "last_close": 50000.0
+            }
+        ]);
+        let _ = fs::write("volumes_trades_data.json", serde_json::to_string_pretty(&volumes).unwrap());
+
+        // Price = 50000, min_amount = 1.0 -> cost > 12.23 EUR. Base balance is 0.
+        let markets = serde_json::json!({
+            "EXPENSIVE/EUR": {
+                "id": "EXPENSIVEUSD",
+                "symbol": "EXPENSIVE/EUR",
+                "base": "EXPENSIVE",
+                "quote": "EUR",
+                "precision": { "price": 0.01, "amount": 1.0 },
+                "limits": { "amount": { "min": 1.0 } }
+            }
+        });
+        let _ = fs::write("markets.json", serde_json::to_string_pretty(&markets).unwrap());
+
+        let samples = vec!["EXPENSIVE/EUR".to_string()];
+        let selected = engine.filter_available_pairs(&samples, &balance).await;
+
+        assert!(!selected.contains(&"EXPENSIVE/EUR".to_string()), "Expensive pair without balance should be redlisted and excluded");
+        assert!(engine.is_pair_redlisted("EXPENSIVE/EUR"), "EXPENSIVE/EUR should be in redlist");
     }
 }
