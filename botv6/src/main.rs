@@ -26,7 +26,31 @@ async fn main() -> Result<()> {
     info!("Initializing Botv6 engine with configurable strategies in mode: {:?}", args.mode);
 
     let config = Config::load_and_merge(args.mode)?;
-    info!("Configuration loaded. Exchange ID: {}, Enabled strategies: {}", config.exchange_id, config.strategies.len());
+    let enabled_strats: Vec<String> = config
+        .strategies
+        .iter()
+        .filter(|(_, s)| s.enabled)
+        .map(|(k, _)| k.clone())
+        .collect();
+    let custom_strats: Vec<String> = config
+        .custom_strategies
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| s.name.clone())
+        .collect();
+
+    let mut all_strats = enabled_strats;
+    all_strats.extend(custom_strats);
+
+    info!(
+        "Configuration loaded. Exchange ID: {}, Enabled strategies: {} | Strategies under effect: [{}] (Aggregation Mode: {}, Min Buy Score: {:.2}, Min Sell Score: {:.2})",
+        config.exchange_id,
+        all_strats.len(),
+        all_strats.join(", "),
+        config.strategy_aggregation.mode,
+        config.strategy_aggregation.min_buy_score,
+        config.strategy_aggregation.min_sell_score
+    );
 
     let mut engine = TradingEngine::new(config);
 
