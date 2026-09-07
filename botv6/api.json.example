@@ -1,0 +1,5 @@
+{
+  "api_key": "YOUR_KRAKEN_API_KEY",
+  "api_secret": "YOUR_KRAKEN_API_SECRET",
+  "exchange_id": "kraken"
+}

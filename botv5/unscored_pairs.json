@@ -1,0 +1,62 @@
+{
+  "BTC/PYUSD": {
+    "score": -2,
+    "symbol": "BTC/PYUSD",
+    "timestamp": 1788749959
+  },
+  "BTC/USD1": {
+    "score": -2,
+    "symbol": "BTC/USD1",
+    "timestamp": 1788749962
+  },
+  "SOSO/USD": {
+    "score": -2,
+    "symbol": "SOSO/USD",
+    "timestamp": 1788744464
+  },
+  "M/USD": {
+    "score": -2,
+    "symbol": "M/USD",
+    "timestamp": 1788744450
+  },
+  "SOL/USD1": {
+    "score": -2,
+    "symbol": "SOL/USD1",
+    "timestamp": 1788744462
+  },
+  "BTC/AUSD": {
+    "score": -2,
+    "symbol": "BTC/AUSD",
+    "timestamp": 1788749899
+  },
+  "BTC/USDQ": {
+    "score": -2,
+    "symbol": "BTC/USDQ",
+    "timestamp": 1788749964
+  },
+  "UNI/BTC": {
+    "score": -2,
+    "symbol": "UNI/BTC",
+    "timestamp": 1788750736
+  },
+  "US/EUR": {
+    "score": -2,
+    "symbol": "US/EUR",
+    "timestamp": 1788744467
+  },
+  "SOSO/EUR": {
+    "score": -2,
+    "symbol": "SOSO/EUR",
+    "timestamp": 1788744463
+  },
+  "UNI/ETH": {
+    "score": -3,
+    "symbol": "UNI/ETH",
+    "timestamp": 1788750744
+  },
+  "BTC/EUROP": {
+    "score": -2,
+    "symbol": "BTC/EUROP",
+    "timestamp": 1788749954
+  }
+}

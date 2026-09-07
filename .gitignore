@@ -21,7 +21,9 @@ my_trades_cache.json
 .vs/
 recorded_purchases.json
 redlisted_pairs.json
+target/
 botv5/target/
+botv6/target/
 sim_*.json
 *.lock
 PROMPT.TXT

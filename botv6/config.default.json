@@ -1,0 +1,244 @@
+{
+    "max_open_positions": 10,
+    "max_lots_per_symbol": 1,
+    "max_trade_percentage": 2.0,
+    "quote_asset": "USD",
+    "max_number_of_pairs": 120,
+    "include_inventory_pairs": true,
+    "include_all_quote_pairs": false,
+    "min_profit_margin": 0.00542,
+    "dynamic_pair_multiplier": 1.4,
+    "global_risk_multiplier": 1.1,
+    "mc_threshold": 1.0,
+    "strategy_aggregation": {
+        "mode": "weighted_score",
+        "min_buy_score": 1.0,
+        "min_sell_score": 1.0,
+        "consensus_threshold": 0.6
+    },
+    "timeframe_thresholds": {
+        "volume_48h": {
+            "low": 1000.0,
+            "high": 120000.0
+        },
+        "spread_pct": {
+            "low": 0.001,
+            "high": 0.04
+        },
+        "volatility_pct": {
+            "low": 0.01,
+            "high": 0.1
+        },
+        "trades_per_minute": {
+            "low": 1.0,
+            "high": 40.0
+        }
+    },
+    "win_streak_bonus": {
+        "enabled": true,
+        "threshold": 2,
+        "multiplier": 1.2
+    },
+    "no_signal_threshold": 240,
+    "tema_length": 9,
+    "ema_fast": 5,
+    "ema_slow": 20,
+    "macd_fast": 8,
+    "macd_slow": 20,
+    "macd_signal": 5,
+    "rsi_period": 7,
+    "rsi_buy": 30,
+    "rsi_sell": 70,
+    "timeouts": {
+        "ohlcv_fetch": 30,
+        "ohlcv_chunk": 20,
+        "balance_fetch": 30,
+        "order_fetch": 10,
+        "sync_positions": 120,
+        "stuck_order_cleanup": 900,
+        "analysis_cooldown": 180,
+        "ui_pause_long": 30,
+        "ui_pause_short": 5,
+        "startup_wait": 4,
+        "heartbeat_interval": 30
+    },
+    "exchange": {
+        "default_fee": 0.001,
+        "min_notional_fallback": 10.0,
+        "min_amount_fallback": 1e-08,
+        "dust_threshold_amount": 1e-06,
+        "dust_threshold_cost": 1e-10,
+        "max_retries": 3,
+        "max_concurrent_syncs": 3,
+        "fetch_ohlcv_limit": 10000,
+        "fetch_chunk_size": 1000,
+        "notional_buffer": 1.05,
+        "budget_recovery_factor": 1.2,
+        "sync_tolerance": 0.001,
+        "sync_threshold": 0.99
+    },
+    "monte_carlo": {
+        "num_simulations": 1000,
+        "timeframe_candles": 100,
+        "validation_min_candles": 4000,
+        "profit_threshold": 0.0015,
+        "score_base": 0.5
+    },
+    "trading": {
+        "max_buyings_per_base_asset": 4,
+        "min_candles_for_analysis": 250,
+        "backtest_profit_candles": 400,
+        "base_target_pct": 0.75
+    },
+    "strategies": {
+        "ichimoku": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "tenkan": 9, "kijun": 26, "senkou": 52 }
+        },
+        "psar": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "af": 0.02, "max_af": 0.2 }
+        },
+        "bollinger": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "length": 20, "std": 2.0, "rsi_oversold": 35.0 }
+        },
+        "donchian": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "length": 20 }
+        },
+        "stoch_rsi": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "length": 14, "rsi_length": 14, "k": 3, "d": 3, "oversold": 20, "overbought": 80 }
+        },
+        "williams_r": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "length": 14, "oversold": -80.0, "overbought": -20.0 }
+        },
+        "vwap_momentum": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": {}
+        },
+        "renko": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "atr_length": 14 }
+        },
+        "ema_rsi_volume": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "ema_fast": 9, "ema_slow": 21, "rsi_length": 14, "vol_ma": 20 }
+        },
+        "whale_detection": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "length": 20, "std_devs": 3.0 }
+        },
+        "pump_dump": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "vol_surge": 1.5, "price_surge": 0.001 }
+        },
+        "scientific_ensemble": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "rsi_oversold": 35.0, "rsi_overbought": 65.0 }
+        },
+        "sentiment_momentum": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "roc_length": 10, "rsi_limit": 60.0, "rsi_floor": 40.0 }
+        },
+        "liquidation_cascade": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "pct_trigger": 0.001, "vol_multiplier": 1.5 }
+        },
+        "adx_trend": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "threshold": 25.0, "sma_length": 20 }
+        },
+        "pairs_trading": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "ma_length": 50, "z_threshold": 0.02 }
+        },
+        "halving_cycle": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "ema_long": 200 }
+        },
+        "listing_surge": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "ma_length": 20, "vol_multiplier": 5.0 }
+        },
+        "tema_crossover": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "ema_length": 9 }
+        },
+        "heikin_ashi": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": {}
+        },
+        "sinewave": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "sma_length": 7 }
+        },
+        "candle_patterns": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": {}
+        },
+        "mc_mean_reversion": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "threshold": 0.55, "sma_length": 20 }
+        },
+        "mc_momentum": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "threshold": 0.55, "target_profit": 0.01 }
+        },
+        "mc_dynamic_allocation": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "high_threshold": 0.8, "low_threshold": 0.6 }
+        },
+        "mc_market_making": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "threshold": 0.6 }
+        },
+        "mc_stop_loss_eval": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "threshold": 0.12, "sl_pct": 0.05 }
+        },
+        "mc_options_pricing": {
+            "enabled": true,
+            "weight": 1.0,
+            "params": { "ratio": 1.5 }
+        }
+    },
+    "custom_strategies": [
+        {
+            "name": "custom_rsi_sma_reversion",
+            "enabled": false,
+            "weight": 1.5,
+            "buy_condition": "rsi(14) < 30.0 AND close > sma(50)",
+            "sell_condition": "rsi(14) > 70.0 OR close < sma(50)"
+        }
+    ]
+}
