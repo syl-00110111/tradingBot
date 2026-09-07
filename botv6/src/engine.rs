@@ -945,22 +945,24 @@ impl TradingEngine {
         0.0001
     }
 
+    pub fn format_to_precision(&self, val: f64, precision: f64) -> String {
+        if precision <= 0.0 || !val.is_finite() {
+            return format!("{}", val);
+        }
+        let decimals = if precision >= 1.0 {
+            0
+        } else {
+            (-precision.log10()).round().max(0.0) as usize
+        };
+        format!("{:.1$}", val, decimals)
+    }
+
     pub fn round_to_precision(&self, val: f64, precision: f64) -> f64 {
         if precision <= 0.0 || !val.is_finite() {
             return val;
         }
-        let decimals = if precision >= 1.0 {
-            precision as i32
-        } else {
-            (-precision.log10()).round() as i32
-        };
-
-        if decimals <= 0 {
-            val.round()
-        } else {
-            let factor = 10.0_f64.powi(decimals);
-            (val * factor).round() / factor
-        }
+        let formatted = self.format_to_precision(val, precision);
+        formatted.parse::<f64>().unwrap_or(val)
     }
 
     pub fn round_down_to_precision(&self, val: f64, precision: f64) -> f64 {
@@ -968,16 +970,17 @@ impl TradingEngine {
             return val;
         }
         let decimals = if precision >= 1.0 {
-            precision as i32
+            0
         } else {
-            (-precision.log10()).round() as i32
+            (-precision.log10()).round().max(0.0) as usize
         };
 
-        if decimals <= 0 {
+        if decimals == 0 {
             val.floor()
         } else {
-            let factor = 10.0_f64.powi(decimals);
-            (val * factor).floor() / factor
+            let factor = 10.0_f64.powi(decimals as i32);
+            let floored = (val * factor).floor() / factor;
+            format!("{:.1$}", floored, decimals).parse::<f64>().unwrap_or(floored)
         }
     }
 
@@ -1204,10 +1207,17 @@ impl TradingEngine {
     }
 
     pub fn should_place_order(&self, _symbol: &str, side: &str, price: f64, last_close: f64, candles: &[Candle]) -> (bool, f64) {
+        let calibrated_window = TechnicalAnalysis::calibrate_window_by_non_repetition(candles, 480, 1e-5);
+        let active_candles = if candles.len() > calibrated_window {
+            &candles[candles.len() - calibrated_window..]
+        } else {
+            candles
+        };
+
         let mut volatility = 0.0;
         let mut drift = 0.0;
-        if candles.len() > 1 {
-            let returns: Vec<f64> = candles
+        if active_candles.len() > 1 {
+            let returns: Vec<f64> = active_candles
                 .windows(2)
                 .map(|w| (w[1].close / w[0].close).ln())
                 .filter(|v| v.is_finite())
@@ -1220,12 +1230,15 @@ impl TradingEngine {
             }
         }
 
-        let mc_engine = MonteCarloEngine::new(1000, 480);
+        let mc_engine = MonteCarloEngine::new(
+            self.config.monte_carlo.num_simulations,
+            self.config.monte_carlo.timeframe_candles,
+        );
         let is_buy = side.eq_ignore_ascii_case("buy");
         let mode = if is_buy { "below" } else { "above" };
         let prob = mc_engine.estimate_hit_probability(last_close, price, volatility, drift, mode);
         let threshold = if is_buy { 0.73 } else { self.config.monte_carlo.sufficient_probability };
-        (prob > threshold, prob)
+        (prob >= threshold, prob)
     }
 
     pub fn evaluate_symbol_parallel(
@@ -1344,10 +1357,17 @@ impl TradingEngine {
     }
 
     pub async fn execute_limit_order(&self, symbol: &str, side: &str, amount: f64, price: f64) -> Result<Order> {
+        let (price_prec, amount_prec) = self.get_market_precision(symbol);
+        let formatted_price = self.format_to_precision(price, price_prec);
+        let formatted_amount = self.format_to_precision(amount, amount_prec);
+
+        let parsed_price = formatted_price.parse::<f64>().unwrap_or(price);
+        let parsed_amount = formatted_amount.parse::<f64>().unwrap_or(amount);
+
         if side.eq_ignore_ascii_case("buy") {
-            self.exchange.create_limit_buy(symbol, amount, price).await
+            self.exchange.create_limit_buy(symbol, parsed_amount, parsed_price).await
         } else {
-            self.exchange.create_limit_sell(symbol, amount, price).await
+            self.exchange.create_limit_sell(symbol, parsed_amount, parsed_price).await
         }
     }
 
@@ -1634,12 +1654,6 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_buy, estimated_prob) = self.should_place_order(sym, "buy", target_price, last_close, &candles);
-                        if !should_buy {
-                            info!("[{}] Skipping BUY signal: should_place_order probability check failed (estimated_prob={:.4})", sym, estimated_prob);
-                            continue;
-                        }
-
                         let edited = self.cleanup_open_orders(sym, rounded_target_price, "buy", &candles, last_close, amount).await?;
                         if edited.is_some() {
                             info!("[{}] BUY order updated via edit/replace", sym);
@@ -1684,11 +1698,6 @@ impl TradingEngine {
                         let (profitable, details) = self.is_sell_profitable(sym, rounded_target_price);
                         if !profitable {
                             info!("[{}] Ignoring SELL event because unprofitable: {}", sym, details);
-                            continue;
-                        }
-
-                        let (should_sell, _estimated_prob) = self.should_place_order(sym, "sell", rounded_target_price, last_close, &candles);
-                        if !should_sell {
                             continue;
                         }
 
