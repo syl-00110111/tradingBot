@@ -1687,8 +1687,9 @@ impl TradingEngine {
                             continue;
                         }
 
-                        let (should_sell, _estimated_prob) = self.should_place_order(sym, "sell", rounded_target_price, last_close, &candles);
+                        let (should_sell, estimated_prob) = self.should_place_order(sym, "sell", rounded_target_price, last_close, &candles);
                         if !should_sell {
+                            info!("[{}] Skipping SELL signal: should_place_order probability check failed (estimated_prob={:.4})", sym, estimated_prob);
                             continue;
                         }
 
