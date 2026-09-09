@@ -21,6 +21,7 @@ my_trades_cache.json
 .vs/
 recorded_purchases.json
 redlisted_pairs.json
+unscored_pairs.json
 target/
 botv5/target/
 botv6/target/
