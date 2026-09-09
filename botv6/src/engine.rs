@@ -519,6 +519,62 @@ impl TradingEngine {
         (is_optimal, score, reasons, chars)
     }
 
+    pub async fn re_evaluate_pair(&self, symbol: &str) -> (bool, i32, Vec<&'static str>, PairCharacteristics) {
+        info!("[Pair Re-evaluation] Force re-evaluating pair score for {} due to Insufficient funds on SELL order...", symbol);
+        let chars = match self.fetch_symbol_characteristics(symbol).await {
+            Ok(c) => c,
+            Err(_) => {
+                let candles = Self::load_cached_candles(symbol);
+                Self::compute_pair_characteristics(&candles)
+            }
+        };
+
+        let now_sec = chrono::Utc::now().timestamp();
+        let mut volumes = Vec::new();
+        if Path::new("volumes_trades_data.json").exists() {
+            if let Ok(content) = fs::read_to_string("volumes_trades_data.json") {
+                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    volumes = parsed;
+                }
+            }
+        }
+
+        let mut found = false;
+        for v in &mut volumes {
+            if v.get("symbol").and_then(|s| s.as_str()) == Some(symbol) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("timestamp".into(), serde_json::json!(now_sec));
+                    obj.insert("volume_48h".into(), serde_json::json!(chars.volume_48h));
+                    obj.insert("spread_pct".into(), serde_json::json!(chars.spread_pct));
+                    obj.insert("volatility_pct".into(), serde_json::json!(chars.volatility_pct));
+                    obj.insert("trades_per_minute".into(), serde_json::json!(chars.trades_per_minute));
+                }
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            volumes.push(serde_json::json!({
+                "symbol": symbol,
+                "id": symbol.replace('/', ""),
+                "timestamp": now_sec,
+                "volume_48h": chars.volume_48h,
+                "spread_pct": chars.spread_pct,
+                "volatility_pct": chars.volatility_pct,
+                "trades_per_minute": chars.trades_per_minute
+            }));
+        }
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&volumes) {
+            let _ = fs::write("volumes_trades_data.json", json_str);
+        }
+
+        let (is_optimal, score, reasons) = self.evaluate_pair_scoring(&chars);
+        info!("[Pair Re-evaluation] Re-evaluated {} -> is_optimal: {}, score: {}", symbol, is_optimal, score);
+        (is_optimal, score, reasons, chars)
+    }
+
     pub async fn filter_available_pairs(
         &mut self,
         sample_symbols: &[String],
@@ -716,6 +772,43 @@ impl TradingEngine {
             }
         }
 
+        let is_initial = self.previous_selected_pairs.is_empty();
+        let added: Vec<String> = selected
+            .iter()
+            .filter(|p| !self.previous_selected_pairs.contains(p))
+            .cloned()
+            .collect();
+        let removed: Vec<String> = self
+            .previous_selected_pairs
+            .iter()
+            .filter(|p| !selected.contains(p))
+            .cloned()
+            .collect();
+
+        if is_initial {
+            info!(
+                "[Pair Selection] Initial selection of {} pairs:",
+                selected.len()
+            );
+            for p in &selected {
+                let r = reasons_map.get(p).cloned().unwrap_or_else(|| "Selected".to_string());
+                info!("  - {}: {}", p, r);
+            }
+        } else if !added.is_empty() || !removed.is_empty() {
+            info!(
+                "[Pair Selection Differential] Selected: {} pairs | Added (+{}): [{}] | Removed (-{}): [{}]",
+                selected.len(),
+                added.len(),
+                added.join(", "),
+                removed.len(),
+                removed.join(", ")
+            );
+            for p in &added {
+                let r = reasons_map.get(p).cloned().unwrap_or_else(|| "Added".to_string());
+                info!("  + Added {}: {}", p, r);
+            }
+        }
+
         self.previous_selected_pairs = selected.clone();
         selected
     }
@@ -837,6 +930,14 @@ impl TradingEngine {
                         {
                             return min_val;
                         }
+                        if let Some(ordermin) = entry
+                            .get("info")
+                            .and_then(|i| i.get("ordermin"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())
+                        {
+                            return ordermin;
+                        }
                     }
                 }
             }
@@ -844,22 +945,24 @@ impl TradingEngine {
         0.0001
     }
 
+    pub fn format_to_precision(&self, val: f64, precision: f64) -> String {
+        if precision <= 0.0 || !val.is_finite() {
+            return format!("{}", val);
+        }
+        let decimals = if precision >= 1.0 {
+            0
+        } else {
+            (-precision.log10()).round().max(0.0) as usize
+        };
+        format!("{:.1$}", val, decimals)
+    }
+
     pub fn round_to_precision(&self, val: f64, precision: f64) -> f64 {
         if precision <= 0.0 || !val.is_finite() {
             return val;
         }
-        let decimals = if precision >= 1.0 {
-            precision as i32
-        } else {
-            (-precision.log10()).round() as i32
-        };
-
-        if decimals <= 0 {
-            val.round()
-        } else {
-            let factor = 10.0_f64.powi(decimals);
-            (val * factor).round() / factor
-        }
+        let formatted = self.format_to_precision(val, precision);
+        formatted.parse::<f64>().unwrap_or(val)
     }
 
     pub fn round_down_to_precision(&self, val: f64, precision: f64) -> f64 {
@@ -867,16 +970,17 @@ impl TradingEngine {
             return val;
         }
         let decimals = if precision >= 1.0 {
-            precision as i32
+            0
         } else {
-            (-precision.log10()).round() as i32
+            (-precision.log10()).round().max(0.0) as usize
         };
 
-        if decimals <= 0 {
+        if decimals == 0 {
             val.floor()
         } else {
-            let factor = 10.0_f64.powi(decimals);
-            (val * factor).floor() / factor
+            let factor = 10.0_f64.powi(decimals as i32);
+            let floored = (val * factor).floor() / factor;
+            format!("{:.1$}", floored, decimals).parse::<f64>().unwrap_or(floored)
         }
     }
 
@@ -956,6 +1060,20 @@ impl TradingEngine {
         Ok(())
     }
 
+    pub fn remove_edited_buy_order_purchase(&mut self, symbol: &str, prev_amount: f64, prev_price: f64) -> Result<()> {
+        if let Some(purchases) = self.recorded_purchases.get_mut(symbol) {
+            if let Some(idx) = purchases.iter().position(|p| (p.amount - prev_amount).abs() < 1e-6 && (p.price - prev_price).abs() < 1e-6) {
+                purchases.remove(idx);
+                info!("[{}] Removed edited buy order purchase: price={}, amount={}", symbol, prev_price, prev_amount);
+                let file_path = self.config.purchases_file();
+                if let Ok(json_str) = serde_json::to_string_pretty(&self.recorded_purchases) {
+                    let _ = fs::write(file_path, json_str);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn is_sell_profitable(&self, symbol: &str, sell_price: f64) -> (bool, String) {
         let base_asset = symbol.split('/').next().unwrap_or(symbol);
         let current_quote = symbol.split('/').nth(1).unwrap_or("USD");
@@ -1000,6 +1118,129 @@ impl TradingEngine {
         (profitable, details)
     }
 
+    pub async fn cleanup_open_orders(
+        &mut self,
+        symbol: &str,
+        new_price: f64,
+        side: &str,
+        candles: &[Candle],
+        last_close: f64,
+        new_amount: f64,
+    ) -> Result<Option<Order>> {
+        let open_orders = self.exchange.fetch_open_orders(Some(symbol)).await.unwrap_or_default();
+        if open_orders.is_empty() {
+            return Ok(None);
+        }
+
+        let mut volatility = 0.0;
+        let mut drift = 0.0;
+        if candles.len() > 1 {
+            let returns: Vec<f64> = candles
+                .windows(2)
+                .map(|w| (w[1].close / w[0].close).ln())
+                .filter(|v| v.is_finite())
+                .collect();
+            if returns.len() > 1 {
+                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+                let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+                volatility = var.sqrt();
+                drift = mean;
+            }
+        }
+
+        let mc_engine = MonteCarloEngine::new(
+            self.config.monte_carlo.num_simulations,
+            self.config.monte_carlo.timeframe_candles,
+        );
+        let threshold = self.config.monte_carlo.sufficient_probability;
+        let sma_840 = TechnicalAnalysis::calculate_5_week_sma(candles, None);
+
+        let mut edited_order = None;
+
+        let num_peaks = TechnicalAnalysis::count_peaks(candles, 840);
+
+        for order in open_orders {
+            let o_side = order.side.to_lowercase();
+            let side_lower = side.to_lowercase();
+
+            if o_side == "buy" && num_peaks <= 3 {
+                if let Some(sma) = sma_840 {
+                    if last_close > sma || order.price > sma {
+                        info!("[{}] Cancelling open BUY order {}: Price is on a crest high (last close {:.8}, order price {:.8}, sma_840 {:.8}, peaks_840: {})", symbol, order.id, last_close, order.price, sma, num_peaks);
+                        let _ = self.exchange.cancel_order(&order.id, symbol).await;
+                        continue;
+                    }
+                }
+            }
+
+            let mode = if o_side == "buy" { "below" } else { "above" };
+            let prob = mc_engine.estimate_hit_probability(last_close, order.price, volatility, drift, mode);
+            let target_threshold = if o_side == "buy" { 0.73 } else { threshold };
+            let insufficient_prob = prob < target_threshold;
+
+            let side_changed = o_side != side_lower;
+
+            if !side_changed {
+                let price_changed = (new_price - order.price).abs() > 1e-9;
+                let amount_changed = (new_amount - order.amount).abs() > 1e-9;
+
+                if !price_changed && !amount_changed {
+                    info!("[{}] Existing order {} is already at price={} and amount={}. No edit needed.", symbol, order.id, new_price, new_amount);
+                    edited_order = Some(order.clone());
+                    break;
+                } else {
+                    info!("[{}] Attempting edit for order {} (price_changed: {}, amount_changed: {})...", symbol, order.id, price_changed, amount_changed);
+                    let _ = self.exchange.cancel_order(&order.id, symbol).await;
+                    if o_side == "buy" {
+                        let _ = self.remove_edited_buy_order_purchase(symbol, order.amount, order.price);
+                    }
+                }
+            }
+
+            if insufficient_prob || side_changed {
+                info!("[{}] Cancelling order {}: prob ({:.4}) < threshold ({:.4}) or side changed", symbol, order.id, prob, threshold);
+                let _ = self.exchange.cancel_order(&order.id, symbol).await;
+            }
+        }
+
+        Ok(edited_order)
+    }
+
+    pub fn should_place_order(&self, _symbol: &str, side: &str, price: f64, last_close: f64, candles: &[Candle]) -> (bool, f64) {
+        let calibrated_window = TechnicalAnalysis::calibrate_window_by_non_repetition(candles, 480, 1e-5);
+        let active_candles = if candles.len() > calibrated_window {
+            &candles[candles.len() - calibrated_window..]
+        } else {
+            candles
+        };
+
+        let mut volatility = 0.0;
+        let mut drift = 0.0;
+        if active_candles.len() > 1 {
+            let returns: Vec<f64> = active_candles
+                .windows(2)
+                .map(|w| (w[1].close / w[0].close).ln())
+                .filter(|v| v.is_finite())
+                .collect();
+            if returns.len() > 1 {
+                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+                let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+                volatility = var.sqrt();
+                drift = mean;
+            }
+        }
+
+        let mc_engine = MonteCarloEngine::new(
+            self.config.monte_carlo.num_simulations,
+            self.config.monte_carlo.timeframe_candles,
+        );
+        let is_buy = side.eq_ignore_ascii_case("buy");
+        let mode = if is_buy { "below" } else { "above" };
+        let prob = mc_engine.estimate_hit_probability(last_close, price, volatility, drift, mode);
+        let threshold = if is_buy { 0.73 } else { self.config.monte_carlo.sufficient_probability };
+        (prob >= threshold, prob)
+    }
+
     pub fn evaluate_symbol_parallel(
         &self,
         symbol: &str,
@@ -1009,6 +1250,7 @@ impl TradingEngine {
     ) -> Option<(Signal, f64, f64)> {
         let calibrated_window = TechnicalAnalysis::calibrate_window_by_non_repetition(candles, 480, 1e-5);
         if candles.len() < calibrated_window {
+            info!("[{}] Skipping evaluation: need at least {} candles (has {})", symbol, calibrated_window, candles.len());
             return None;
         }
 
@@ -1082,11 +1324,15 @@ impl TradingEngine {
 
         let (mut is_buy, mut is_sell) = (signal_res.signal == Signal::Buy, signal_res.signal == Signal::Sell);
 
+        // Simultaneous Signal Prioritization
         if is_buy && is_sell {
+            info!("[{}] Simultaneous BUY and SELL signals triggered. Prioritizing based on probability...", symbol);
             if buy_prob >= sell_prob {
                 is_sell = false;
+                info!("[{}] Prioritizing BUY signal (buy_prob {:.4} >= sell_prob {:.4})", symbol, buy_prob, sell_prob);
             } else {
                 is_buy = false;
+                info!("[{}] Prioritizing SELL signal (sell_prob {:.4} > buy_prob {:.4})", symbol, sell_prob, buy_prob);
             }
         }
 
@@ -1107,6 +1353,392 @@ impl TradingEngine {
             }
         } else {
             None
+        }
+    }
+
+    pub async fn execute_limit_order(&self, symbol: &str, side: &str, amount: f64, price: f64) -> Result<Order> {
+        let (price_prec, amount_prec) = self.get_market_precision(symbol);
+        let formatted_price = self.format_to_precision(price, price_prec);
+        let formatted_amount = self.format_to_precision(amount, amount_prec);
+
+        let parsed_price = formatted_price.parse::<f64>().unwrap_or(price);
+        let parsed_amount = formatted_amount.parse::<f64>().unwrap_or(amount);
+
+        if side.eq_ignore_ascii_case("buy") {
+            self.exchange.create_limit_buy(symbol, parsed_amount, parsed_price).await
+        } else {
+            self.exchange.create_limit_sell(symbol, parsed_amount, parsed_price).await
+        }
+    }
+
+    pub async fn refresh_balance(&mut self) -> Result<HashMap<String, f64>> {
+        let balance_json = self.exchange.fetch_balance().await?;
+        let mut balance_map: HashMap<String, f64> = HashMap::new();
+
+        let markets_content = fs::read_to_string("markets.json").unwrap_or_else(|_| "{}".to_string());
+        let markets_val: serde_json::Value = serde_json::from_str(&markets_content).unwrap_or_default();
+
+        if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
+            for (k, v) in free_obj {
+                let val = if let Some(s) = v.as_str() {
+                    s.parse::<f64>().unwrap_or(0.0)
+                } else if let Some(n) = v.as_f64() {
+                    n
+                } else {
+                    0.0
+                };
+
+                let norm_k = crate::exchange::normalize_kraken_symbol(k);
+                if val > 0.0 && !self.is_dust_balance(&norm_k, val, Some(&markets_val)) {
+                    balance_map.insert(norm_k, val);
+                }
+            }
+        }
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
+            let _ = fs::write("balance.json", json_str);
+        }
+
+        self.previous_balance_map = balance_map.clone();
+        Ok(balance_map)
+    }
+
+    pub async fn process_pending_orders_and_clear_purchases(&mut self, target_base_asset: Option<&str>) -> Result<()> {
+        if let Ok(open_orders) = self.exchange.fetch_open_orders(None).await {
+            let open_order_ids: std::collections::HashSet<String> = open_orders.iter().map(|o| o.id.clone()).collect();
+
+            let pending_path = self.config.pending_file();
+            if Path::new(pending_path).exists() {
+                if let Ok(content) = fs::read_to_string(pending_path) {
+                    if let Ok(mut pending_list) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                        let mut updated = false;
+                        for entry in &mut pending_list {
+                            if let Some(order_val) = entry.get("order") {
+                                let side = order_val.get("side").and_then(|s| s.as_str()).unwrap_or("");
+                                let id = order_val.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                                let symbol = order_val.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+                                let processed = entry.get("processed").and_then(|p| p.as_bool()).unwrap_or(false);
+
+                                if id.is_empty() || processed || id.starts_with("buy_") || id.starts_with("sell_") || id.starts_with("mock_") || id.starts_with("sim_") {
+                                    continue;
+                                }
+
+                                let sym_base = symbol.split('/').next().unwrap_or(symbol);
+                                if let Some(target) = target_base_asset {
+                                    if sym_base != target {
+                                        continue;
+                                    }
+                                }
+
+                                if !open_order_ids.contains(id) {
+                                    info!("[Pending Orders Check] Pending {} order {} for {} is no longer open on exchange (filled/processed).", side.to_uppercase(), id, symbol);
+                                    if side.eq_ignore_ascii_case("sell") {
+                                        let _ = self.remove_recorded_purchases(symbol);
+                                    }
+                                    if let Some(obj) = entry.as_object_mut() {
+                                        obj.insert("processed".into(), serde_json::json!(true));
+                                        updated = true;
+                                    }
+                                } else {
+                                    info!("[Pending Orders Check] Pending {} order {} for {} remains open on exchange.", side.to_uppercase(), id, symbol);
+                                }
+                            }
+                        }
+                        if updated {
+                            if let Ok(json_str) = serde_json::to_string_pretty(&pending_list) {
+                                let _ = fs::write(pending_path, json_str);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            tracing::warn!("[Pending Orders Check] Could not fetch open orders from exchange API. Skipping pending filled order check.");
+        }
+        Ok(())
+    }
+
+    pub async fn handle_insufficient_funds(&mut self, symbol: &str) -> Result<HashMap<String, f64>> {
+        let base_asset = symbol.split('/').next().unwrap_or(symbol);
+        info!("[Insufficient Funds Handler] Insufficient funds error encountered for symbol {}. Fetching fresh balance and checking pending orders for base asset {}...", symbol, base_asset);
+
+        let new_balance = self.refresh_balance().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to refresh balance after insufficient funds error on {}: {}", symbol, e);
+            self.previous_balance_map.clone()
+        });
+
+        let _ = self.process_pending_orders_and_clear_purchases(Some(base_asset)).await;
+
+        Ok(new_balance)
+    }
+
+    pub async fn run_maintenance(&mut self) -> Result<()> {
+        let now_ts = chrono::Utc::now().timestamp();
+        if now_ts - self.last_maintenance_ts < 2520 { // 42 minutes = 2520s
+            return Ok(());
+        }
+
+        info!("[Maintenance] Running 42-minute maintenance batch task...");
+
+        // 1. Refresh markets.json from exchange
+        if let Ok(markets_json) = self.exchange.fetch_markets().await {
+            if let Ok(json_str) = serde_json::to_string_pretty(&markets_json) {
+                let _ = fs::write("markets.json", json_str);
+                info!("[Maintenance] Refreshed markets.json");
+            }
+        }
+
+        // 2. Refresh balance.json from exchange
+        if let Ok(_) = self.refresh_balance().await {
+            info!("[Maintenance] Refreshed balance.json");
+        }
+
+        // 3. Re-evaluate symbols with volumes_trades_data (refreshing 4-hour expired timestamps)
+        let markets_content = fs::read_to_string("markets.json").unwrap_or_else(|_| "{}".to_string());
+        let markets_val: serde_json::Value = serde_json::from_str(&markets_content).unwrap_or_default();
+        let balance_map = self.previous_balance_map.clone();
+        let raw_symbols = self.load_market_symbols(&balance_map, &markets_val);
+        let _re_evaluated = self.filter_available_pairs(&raw_symbols, &balance_map).await;
+
+        // 4. Order cancellation check and filled SELL order processing for open orders
+        if let Ok(open_orders) = self.exchange.fetch_open_orders(None).await {
+            for order in &open_orders {
+                if let Ok(candles) = self.fetch_pair_candles(&order.symbol).await {
+                    let mc_engine = MonteCarloEngine::new(1000, 240);
+                    let mc_score = mc_engine.validate_strategy(&candles);
+                    info!("[Maintenance] Order {} for {} has mc_score={:.4}", order.id, order.symbol, mc_score);
+
+                    if mc_score < 0.42 {
+                        info!("[Maintenance] Cancelling order {} ({}) due to low mc_score ({:.4} < 0.42)", order.id, order.symbol, mc_score);
+                        let _ = self.exchange.cancel_order(&order.id, &order.symbol).await;
+                    }
+                }
+            }
+        }
+
+        let _ = self.process_pending_orders_and_clear_purchases(None).await;
+
+        self.last_maintenance_ts = now_ts;
+        Ok(())
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
+        info!("Trading engine started in mode: {:?}", self.config.mode);
+
+        // Fetch markets and balance once at startup, subsequently refreshed during maintenance or on order execution errors
+        let initial_markets = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch markets from exchange API: {}", e);
+            serde_json::json!({})
+        });
+        if let Ok(json_str) = serde_json::to_string_pretty(&initial_markets) {
+            let _ = fs::write("markets.json", json_str);
+        }
+
+        let _ = self.refresh_balance().await;
+
+        loop {
+            let markets_json: serde_json::Value = if Path::new("markets.json").exists() {
+                fs::read_to_string("markets.json")
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok())
+                    .unwrap_or_default()
+            } else {
+                serde_json::json!({})
+            };
+
+            let mut balance_map = self.previous_balance_map.clone();
+            if balance_map.is_empty() {
+                balance_map = self.refresh_balance().await.unwrap_or_default();
+            }
+
+            if self.previous_balance_map.is_empty() {
+                let mut balance_entries: Vec<String> = balance_map
+                    .iter()
+                    .map(|(k, v)| format!("{}: {:.10}", k, v))
+                    .collect();
+                balance_entries.sort();
+                info!("Fetched balance: {}", balance_entries.join(", "));
+            } else {
+                let mut diffs = Vec::new();
+                for (k, v) in &balance_map {
+                    let prev_v = self.previous_balance_map.get(k).copied().unwrap_or(0.0);
+                    let delta = v - prev_v;
+                    if delta.abs() > 1e-8 {
+                        diffs.push(format!("{}: {:+.8} ({:.8})", k, delta, v));
+                    }
+                }
+                for (k, prev_v) in &self.previous_balance_map {
+                    if !balance_map.contains_key(k) && *prev_v > 1e-8 {
+                        diffs.push(format!("{}: -{:.8} (0.00000000)", k, prev_v));
+                    }
+                }
+
+                if !diffs.is_empty() {
+                    diffs.sort();
+                    info!("Balance Diff: {}", diffs.join(", "));
+                }
+            }
+            self.previous_balance_map = balance_map.clone();
+
+            let raw_symbols = self.load_market_symbols(&balance_map, &markets_json);
+
+            let available_pairs = self.filter_available_pairs(&raw_symbols, &balance_map).await;
+            info!("Running trading loop for {} pairs...", available_pairs.len());
+
+            for sym in &available_pairs {
+                if self.is_pair_redlisted(sym) {
+                    continue;
+                }
+
+                let candles = match self.fetch_pair_candles(sym).await {
+                    Ok(c) if !c.is_empty() => c,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        if e.to_string().contains("EAccount:Invalid permissions") {
+                            let _ = self.redlist_pair(sym, 0.0, 0.0);
+                        }
+                        continue;
+                    }
+                };
+                let candles_4h = self.fetch_pair_candles_4h(sym).await.ok();
+
+                let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
+
+                let (is_optimal, score, _reasons, _chars) = self.get_only_optimal(sym).await;
+
+                if !is_optimal && !self.is_pair_unscored(sym) {
+                    let _ = self.add_unscored_pair(sym, score);
+                    info!("[{}] Pair is no longer scored correctly (score: {}, optimal: false). Added to unscored pairs (buying disabled, 2.02/1000 sell threshold applied).", sym, score);
+                }
+
+                let eval = self.evaluate_symbol_parallel(sym, &candles, candles_4h.as_deref(), last_close);
+
+                if let Some((signal, target_price, prob)) = eval {
+                    info!("[Trading Loop] Signal {:?} for {} at price {} with probability {:.4}", signal, sym, target_price, prob);
+
+                    let base_asset = sym.split('/').next().unwrap_or(sym);
+                    let quote_asset = sym.split('/').nth(1).unwrap_or("USD");
+
+                    if signal == Signal::Buy {
+                        if self.is_pair_unscored(sym) {
+                            info!("[{}] Skipping BUY signal: pair is in unscored pairs list (buying disabled)", sym);
+                            continue;
+                        }
+
+                        let current_buyings = self.count_buyings_for_base_asset(base_asset);
+                        if current_buyings >= self.config.max_buyings_per_base_asset {
+                            info!("[{}] Skipping BUY signal: reached max buyings per base asset (current {}, max {})", sym, current_buyings, self.config.max_buyings_per_base_asset);
+                            continue;
+                        }
+
+                        let (price_prec, amount_prec) = self.get_market_precision(sym);
+                        let rounded_target_price = self.round_to_precision(target_price, price_prec);
+
+                        let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
+                        let market_min_amount = self.get_market_min_amount(sym);
+                        let min_amount = market_min_amount.max(0.0001);
+                        let amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, min_amount, amount_prec);
+
+                        let quote_free = balance_map.get(quote_asset).copied().unwrap_or(0.0);
+                        let required_cost = rounded_target_price * amount;
+
+                        if amount < min_amount || quote_free <= 0.0 || quote_free < required_cost {
+                            tracing::warn!("[{}] Skipping BUY signal: insufficient free {} balance ({:.8} free vs {:.8} required, amount {:.8} vs min_amount {:.8})", sym, quote_asset, quote_free, required_cost, amount, min_amount);
+                            continue;
+                        }
+
+                        let edited = self.cleanup_open_orders(sym, rounded_target_price, "buy", &candles, last_close, amount).await?;
+                        if edited.is_some() {
+                            info!("[{}] BUY order updated via edit/replace", sym);
+                            self.record_purchase(sym, amount, rounded_target_price)?;
+                            let last_idx = candles.len().saturating_sub(1);
+                            self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
+                        } else {
+                            match self.execute_limit_order(sym, "buy", amount, rounded_target_price).await {
+                                Ok(order) => {
+                                    self.dump_pending_order(&order)?;
+                                    self.record_purchase(sym, amount, rounded_target_price)?;
+                                    let last_idx = candles.len().saturating_sub(1);
+                                    self.plot_symbol_backtest(sym, &candles, &[(last_idx, rounded_target_price)], &[]);
+                                }
+                                Err(e) => {
+                                    tracing::error!("[{}] BUY order execution failed on exchange (amount: {:.8}, price: {:.8}): {}.", sym, amount, rounded_target_price, e);
+                                    let err_str = e.to_string();
+                                    if err_str.contains("EAccount:Invalid permissions") {
+                                        let _ = self.redlist_pair(sym, 0.0, 0.0);
+                                    } else if err_str.contains("Insufficient funds") {
+                                        if let Ok(nb) = self.handle_insufficient_funds(sym).await {
+                                            balance_map = nb;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if signal == Signal::Sell {
+                        let market_min_amount = self.get_market_min_amount(sym);
+                        let min_amount = market_min_amount.max(0.0001);
+
+                        let base_free = balance_map.get(base_asset).copied().unwrap_or(0.0);
+
+                        if base_free < min_amount {
+                            tracing::warn!("[{}] Skipping SELL signal: insufficient free {} balance ({:.8} free vs min_amount {:.8})", sym, base_asset, base_free, min_amount);
+                            continue;
+                        }
+
+                        let (price_prec, amount_prec) = self.get_market_precision(sym);
+                        let rounded_target_price = self.round_to_precision(target_price, price_prec);
+
+                        let (profitable, details) = self.is_sell_profitable(sym, rounded_target_price);
+                        if !profitable {
+                            info!("[{}] Ignoring SELL event because unprofitable: {}", sym, details);
+                            continue;
+                        }
+
+                        let quote_eur_rate = self.get_eur_conversion_rate(quote_asset);
+                        let calculated_amount = self.calculate_package_amount(rounded_target_price, quote_eur_rate, min_amount, amount_prec);
+                        let raw_amount = calculated_amount.min(base_free);
+
+                        // If selling the entire or maximum possible free balance, subtract 1 unit of precision to avoid floating-point/held precision Insufficient funds errors on exchange
+                        let adjusted_raw_amount = if (raw_amount - base_free).abs() < 1e-8 && amount_prec > 0.0 {
+                            (raw_amount - amount_prec).max(0.0)
+                        } else {
+                            raw_amount
+                        };
+
+                        let amount = self.round_down_to_precision(adjusted_raw_amount, amount_prec);
+
+                        if amount < min_amount {
+                            tracing::warn!("[{}] Skipping SELL order: available free balance {:.8} {} (sell amount {:.8}) is below market min_amount {}", sym, base_free, base_asset, amount, min_amount);
+                            continue;
+                        }
+
+                        self.cleanup_open_orders(sym, rounded_target_price, "sell", &candles, last_close, amount).await?;
+                        match self.execute_limit_order(sym, "sell", amount, rounded_target_price).await {
+                            Ok(order) => {
+                                self.dump_pending_order(&order)?;
+                                info!("[{}] SELL limit order {} placed on exchange and dumped to pending orders. Purchases will be cleared when order is filled.", sym, order.id);
+                                let last_idx = candles.len().saturating_sub(1);
+                                self.plot_symbol_backtest(sym, &candles, &[], &[(last_idx, rounded_target_price)]);
+                            }
+                            Err(e) => {
+                                tracing::error!("[{}] SELL order execution failed on exchange (amount: {:.8}, price: {:.8}): {}. Preserving recorded purchases.", sym, amount, rounded_target_price, e);
+                                let err_str = e.to_string();
+                                if err_str.contains("EAccount:Invalid permissions") {
+                                    let _ = self.redlist_pair(sym, 0.0, 0.0);
+                                } else if err_str.contains("Insufficient funds") {
+                                    if let Ok(nb) = self.handle_insufficient_funds(sym).await {
+                                        balance_map = nb;
+                                    }
+                                    let _ = self.re_evaluate_pair(sym).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.run_maintenance().await?;
+            tokio::time::sleep(Duration::from_secs(4)).await;
         }
     }
 
@@ -1133,6 +1765,20 @@ impl TradingEngine {
         Ok(())
     }
 
+    pub fn remove_from_redlist(&mut self, symbol: &str) -> Result<()> {
+        let file_path = self.config.redlist_file();
+        if Path::new(file_path).exists() {
+            let content = fs::read_to_string(file_path)?;
+            if let Ok(mut redlist) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content) {
+                if redlist.remove(symbol).is_some() {
+                    fs::write(file_path, serde_json::to_string_pretty(&redlist)?)?;
+                    info!("[Sub-action] Removed pair {} from redlist in {}", symbol, file_path);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn dump_pending_order(&self, order: &Order) -> Result<()> {
         let file_path = self.config.pending_file();
         let mut pending: Vec<serde_json::Value> = if Path::new(file_path).exists() {
@@ -1152,64 +1798,66 @@ impl TradingEngine {
         Ok(())
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        info!("Trading engine started in mode: {:?}", self.config.mode);
-
-        loop {
-            let markets_json = self.exchange.fetch_markets().await.unwrap_or_default();
-            if let Ok(json_str) = serde_json::to_string_pretty(&markets_json) {
-                let _ = fs::write("markets.json", json_str);
-            }
-
-            let balance_json = self.exchange.fetch_balance().await?;
-            let mut balance_map: HashMap<String, f64> = HashMap::new();
-
-            if let Some(free_obj) = balance_json.get("free").and_then(|f| f.as_object()) {
-                for (k, v) in free_obj {
-                    let val = if let Some(s) = v.as_str() {
-                        s.parse::<f64>().unwrap_or(0.0)
-                    } else if let Some(n) = v.as_f64() {
-                        n
-                    } else {
-                        0.0
-                    };
-
-                    let norm_k = crate::exchange::normalize_kraken_symbol(k);
-                    if val > 0.0 && !self.is_dust_balance(&norm_k, val, Some(&markets_json)) {
-                        balance_map.insert(norm_k, val);
-                    }
-                }
-            }
-
-            if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
-                let _ = fs::write("balance.json", json_str);
-            }
-
-            let raw_symbols = self.load_market_symbols(&balance_map, &markets_json);
-            let available_pairs = self.filter_available_pairs(&raw_symbols, &balance_map).await;
-            info!("Running trading loop for {} pairs...", available_pairs.len());
-
-            for sym in &available_pairs {
-                if self.is_pair_redlisted(sym) {
-                    continue;
-                }
-
-                let candles = match self.fetch_pair_candles(sym).await {
-                    Ok(c) if !c.is_empty() => c,
-                    _ => continue,
-                };
-                let candles_4h = self.fetch_pair_candles_4h(sym).await.ok();
-                let last_close = candles.last().map(|c| c.close).unwrap_or(50000.0);
-
-                let eval = self.evaluate_symbol_parallel(sym, &candles, candles_4h.as_deref(), last_close);
-
-                if let Some((signal, target_price, prob)) = eval {
-                    info!("[Trading Loop] Signal {:?} for {} at price {} with probability {:.4}", signal, sym, target_price, prob);
-                }
-            }
-
-            tokio::time::sleep(Duration::from_secs(4)).await;
+    pub fn plot_symbol_backtest(
+        &self,
+        symbol: &str,
+        candles: &[Candle],
+        buys: &[(usize, f64)],
+        sells: &[(usize, f64)],
+    ) {
+        if candles.is_empty() {
+            return;
         }
+
+        let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        let min_p = closes.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let max_p = closes.iter().fold(f64::MIN, |a, &b| a.max(b));
+        let p_range = if (max_p - min_p).abs() < 1e-8 { 1.0 } else { max_p - min_p };
+
+        let width = 60;
+        let height = 12;
+
+        info!("--- PLOT: {} (Candles: {}, Buys: {}, Sells: {}) ---", symbol, candles.len(), buys.len(), sells.len());
+        info!("Max Price: {:.8} | Min Price: {:.8}", max_p, min_p);
+
+        let buy_map: HashMap<usize, f64> = buys.iter().cloned().collect();
+        let sell_map: HashMap<usize, f64> = sells.iter().cloned().collect();
+
+        let step = (candles.len() as f64) / (width as f64);
+
+        for row in (0..height).rev() {
+            let row_price = min_p + (p_range * (row as f64 / (height - 1) as f64));
+            let mut line = String::with_capacity(width + 15);
+            line.push_str(&format!("{:>10.4} |", row_price));
+
+            for col in 0..width {
+                let idx = ((col as f64) * step) as usize;
+                let idx = idx.min(candles.len() - 1);
+                let price = candles[idx].close;
+
+                let is_buy = buy_map.contains_key(&idx);
+                let is_sell = sell_map.contains_key(&idx);
+
+                let char_symbol = if is_buy && is_sell {
+                    'B'
+                } else if is_buy {
+                    'O'
+                } else if is_sell {
+                    'X'
+                } else {
+                    let norm = (price - min_p) / p_range;
+                    let target_row = (norm * ((height - 1) as f64)).round() as usize;
+                    if target_row == row {
+                        '*'
+                    } else {
+                        ' '
+                    }
+                };
+                line.push(char_symbol);
+            }
+            info!("{}", line);
+        }
+        info!("------------------------------------------------------------");
     }
 
     pub async fn run_backtest(&mut self) -> Result<()> {
@@ -1217,7 +1865,8 @@ impl TradingEngine {
         info!("          BOTV6 BACKTEST SIMULATION ENGINE        ");
         info!("==================================================");
 
-        let balance_json = self.exchange.fetch_balance().await.unwrap_or_else(|_| {
+        let balance_json = self.exchange.fetch_balance().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch balance for backtest ({}), using fallback.", e);
             serde_json::json!({
                 "free": { "USD": 10000.0, "EUR": 10000.0 },
                 "total": { "USD": 10000.0, "EUR": 10000.0 }
@@ -1241,18 +1890,57 @@ impl TradingEngine {
             }
         }
 
-        let markets_json = self.exchange.fetch_markets().await.unwrap_or_default();
+        if let Ok(json_str) = serde_json::to_string_pretty(&balance_json) {
+            let _ = fs::write("balance.json", json_str);
+        }
+
+        let mut balance_entries: Vec<String> = balance_map
+            .iter()
+            .map(|(k, v)| format!("{}: {:.10}", k, v))
+            .collect();
+        balance_entries.sort();
+        info!("Fetched balance for backtest: {}", balance_entries.join(", "));
+
+        let markets_json = self.exchange.fetch_markets().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch markets for backtest from exchange API: {}", e);
+            serde_json::json!({})
+        });
+
         let sample_pairs = self.load_market_symbols(&balance_map, &markets_json);
         let selected_pairs = self.filter_available_pairs(&sample_pairs, &balance_map).await;
-
-        info!("[Backtest] Running backtest across {} selected trading pairs...", selected_pairs.len());
+        info!("[Backtest] Selected {} available pairs out of {} market candidates for backtesting.", selected_pairs.len(), sample_pairs.len());
 
         let mut total_simulated_trades = 0;
         let mut winning_trades = 0;
         let mut total_profit_usd = 0.0;
         let mut total_loss_usd = 0.0;
-        let mut initial_balance = 10000.0;
+
+        let mut total_usd_balance = 0.0;
+        for (asset, amt) in &balance_map {
+            if asset == "USD" || asset == "ZUSD" || asset == "USDC" || asset == "USDT" {
+                total_usd_balance += amt;
+            } else if asset == "EUR" || asset == "ZEUR" {
+                total_usd_balance += amt * 1.08;
+            } else if asset == "GBP" || asset == "ZGBP" {
+                total_usd_balance += amt * 1.27;
+            } else {
+                let pair = format!("{}/USD", asset);
+                if let Ok(ticker) = self.exchange.fetch_ticker(&pair).await {
+                    if ticker.last > 0.0 {
+                        total_usd_balance += amt * ticker.last;
+                    }
+                }
+            }
+        }
+
+        let initial_balance = if total_usd_balance > 0.0 {
+            total_usd_balance
+        } else {
+            10000.0
+        };
         let mut current_balance = initial_balance;
+        let mut peak_balance = initial_balance;
+        let mut max_drawdown = 0.0;
 
         for symbol in &selected_pairs {
             let candles = match self.fetch_pair_candles(symbol).await {
@@ -1271,48 +1959,103 @@ impl TradingEngine {
                 continue;
             }
 
+            info!("[Backtest] Running pair {} across {} calibrated candles...", symbol, active_candles.len());
+
             let mut in_position = false;
             let mut entry_price = 0.0;
             let mut entry_amount = 0.0;
 
+            let mut buy_events: Vec<(usize, f64)> = Vec::new();
+            let mut sell_events: Vec<(usize, f64)> = Vec::new();
+
             for i in 50..active_candles.len() {
                 let window = &active_candles[..=i];
-                let last_close = active_candles[i].close;
+                let last_candle = &active_candles[i];
+                let last_close = last_candle.close;
 
                 let signal_res = StrategyAggregator::aggregate(window, &self.config);
 
-                if !in_position && signal_res.signal == Signal::Buy {
+                let (should_buy, prob_buy) = self.should_place_order(symbol, "buy", last_close * signal_res.buy_multiplier, last_close, window);
+                let (should_sell, _prob_sell) = self.should_place_order(symbol, "sell", last_close * signal_res.sell_multiplier, last_close, window);
+
+                if !in_position && signal_res.signal == Signal::Buy && should_buy {
                     entry_price = last_close * signal_res.buy_multiplier;
-                    entry_amount = 100.0 / entry_price;
-                    if current_balance >= 100.0 {
-                        current_balance -= 100.0;
+                    let quote_rate = self.get_eur_conversion_rate(symbol.split('/').nth(1).unwrap_or("USD"));
+                    entry_amount = self.calculate_package_amount(entry_price, quote_rate, 0.0001, 0.0001);
+
+                    let cost = entry_price * entry_amount;
+                    if current_balance >= cost && cost > 0.0 {
+                        current_balance -= cost;
                         in_position = true;
                         total_simulated_trades += 1;
+                        buy_events.push((i, entry_price));
+                        info!("[Backtest BUY] {} at price {:.8}, amount {:.6} (prob: {:.4})", symbol, entry_price, entry_amount, prob_buy);
                     }
                 } else if in_position {
                     let exit_price = last_close * signal_res.sell_multiplier;
-                    if signal_res.signal == Signal::Sell || i == active_candles.len() - 1 {
+                    let fee_rate = self.config.default_fee;
+                    let min_profit = self.config.min_profit_margin;
+                    let min_exit_price = entry_price * (1.0 + fee_rate) * (1.0 + min_profit) / (1.0 - fee_rate);
+                    let is_profitable = exit_price >= min_exit_price;
+
+                    if (signal_res.signal == Signal::Sell && should_sell && is_profitable) || i == active_candles.len() - 1 {
                         let revenue = exit_price * entry_amount;
-                        let pnl = revenue - 100.0;
+                        let pnl = revenue - (entry_price * entry_amount);
+
                         current_balance += revenue;
                         in_position = false;
+                        sell_events.push((i, exit_price));
 
                         if pnl > 0.0 {
                             winning_trades += 1;
                             total_profit_usd += pnl;
+                            info!("[Backtest SELL Profit] {} at price {:.8}, PnL: +{:.2} USD", symbol, exit_price, pnl);
                         } else {
                             total_loss_usd += pnl.abs();
+                            info!("[Backtest SELL Loss] {} at price {:.8}, PnL: {:.2} USD", symbol, exit_price, pnl);
+                        }
+
+                        if current_balance > peak_balance {
+                            peak_balance = current_balance;
+                        }
+                        let dd = (peak_balance - current_balance) / peak_balance;
+                        if dd > max_drawdown {
+                            max_drawdown = dd;
                         }
                     }
                 }
             }
+
+            if !buy_events.is_empty() || !sell_events.is_empty() {
+                for (idx, price) in &buy_events {
+                    let candle_ts = active_candles[*idx].timestamp;
+                    let dt = chrono::DateTime::from_timestamp(candle_ts / 1000, 0)
+                        .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| candle_ts.to_string());
+                    info!("[Backtest Event] BUY on {} at {} (price: {:.8})", symbol, dt, price);
+                }
+                for (idx, price) in &sell_events {
+                    let candle_ts = active_candles[*idx].timestamp;
+                    let dt = chrono::DateTime::from_timestamp(candle_ts / 1000, 0)
+                        .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| candle_ts.to_string());
+                    info!("[Backtest Event] SELL on {} at {} (price: {:.8})", symbol, dt, price);
+                }
+                self.plot_symbol_backtest(symbol, active_candles, &buy_events, &sell_events);
+            }
         }
 
         let total_pnl = current_balance - initial_balance;
+        let pnl_pct = (total_pnl / initial_balance) * 100.0;
         let win_rate = if total_simulated_trades > 0 {
             (winning_trades as f64 / total_simulated_trades as f64) * 100.0
         } else {
             0.0
+        };
+        let profit_factor = if total_loss_usd > 0.0 {
+            total_profit_usd / total_loss_usd
+        } else {
+            total_profit_usd
         };
 
         info!("==================================================");
@@ -1320,11 +2063,162 @@ impl TradingEngine {
         info!("==================================================");
         info!("Initial Portfolio Balance: ${:.2}", initial_balance);
         info!("Final Portfolio Balance:   ${:.2}", current_balance);
-        info!("Total Return (PnL):        ${:+.2}", total_pnl);
+        info!("Total Return (PnL):        {:+.2}% (${:+.2})", pnl_pct, total_pnl);
         info!("Total Executed Trades:     {}", total_simulated_trades);
-        info!("Win Rate:                  {:.1}%", win_rate);
+        info!("Winning Trades:            {} ({:.1}%)", winning_trades, win_rate);
+        info!("Profit Factor:             {:.2}", profit_factor);
+        info!("Maximum Drawdown:          {:.2}%", max_drawdown * 100.0);
         info!("==================================================");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_market_symbols_filters_non_existent_pairs() {
+        let config = Config::default();
+        let engine = TradingEngine::new(config);
+
+        let mut balance = HashMap::new();
+        balance.insert("BLESS".to_string(), 1000.0);
+
+        let markets = serde_json::json!({
+            "BLESS/USD": {
+                "id": "BLESSUSD",
+                "symbol": "BLESS/USD",
+                "base": "BLESS",
+                "quote": "USD",
+                "active": true
+            },
+            "BTC/USD": {
+                "id": "XXBTZUSD",
+                "symbol": "BTC/USD",
+                "base": "BTC",
+                "quote": "USD",
+                "active": true
+            }
+        });
+
+        let symbols = engine.load_market_symbols(&balance, &markets);
+
+        assert!(symbols.contains(&"BLESS/USD".to_string()), "BLESS/USD should be included");
+        assert!(!symbols.contains(&"BLESS/EUR".to_string()), "BLESS/EUR should NOT be included because it does not exist on exchange");
+    }
+
+    #[tokio::test]
+    async fn test_filter_available_pairs_sorting_by_score_and_volume() {
+        let mut config = Config::default();
+        config.max_num_pairs = 2;
+        let mut engine = TradingEngine::new(config);
+        let balance = HashMap::new();
+
+        // Populate cached volumes_trades_data so get_only_optimal returns known score and volume
+        let volumes = serde_json::json!([
+            {
+                "symbol": "0G/USD",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 10000.0,
+                "spread_pct": 0.05,
+                "volatility_pct": 0.05,
+                "trades_per_minute": 0.5
+            },
+            {
+                "symbol": "BTC/USD",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 500000000.0,
+                "spread_pct": 0.0001,
+                "volatility_pct": 0.02,
+                "trades_per_minute": 500.0
+            },
+            {
+                "symbol": "ETH/USD",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 200000000.0,
+                "spread_pct": 0.0002,
+                "volatility_pct": 0.02,
+                "trades_per_minute": 200.0
+            }
+        ]);
+        let _ = fs::write("volumes_trades_data.json", serde_json::to_string_pretty(&volumes).unwrap());
+
+        let samples = vec!["0G/USD".to_string(), "BTC/USD".to_string(), "ETH/USD".to_string()];
+        let selected = engine.filter_available_pairs(&samples, &balance).await;
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], "BTC/USD", "BTC/USD has highest score/volume and should be first");
+        assert_eq!(selected[1], "ETH/USD", "ETH/USD has second highest score/volume and should be second");
+        assert!(!selected.contains(&"0G/USD".to_string()), "0G/USD lower score/volume should be truncated");
+    }
+
+    #[test]
+    fn test_is_pair_redlisted_filters_redlisted_pair() {
+        let config = Config::default();
+        let mut engine = TradingEngine::new(config);
+        let _ = engine.redlist_pair("TEST/USD", 0.0, 0.0);
+        assert!(engine.is_pair_redlisted("TEST/USD"));
+    }
+
+    #[test]
+    fn test_is_dust_balance_filters_dust_amounts() {
+        let config = Config::default();
+        let engine = TradingEngine::new(config);
+
+        let markets = serde_json::json!({
+            "DOGE/USD": {
+                "id": "DOGEUSD",
+                "symbol": "DOGE/USD",
+                "base": "DOGE",
+                "quote": "USD",
+                "limits": {
+                    "amount": { "min": 10.0 }
+                }
+            }
+        });
+
+        assert!(engine.is_dust_balance("DOGE", 5.0, Some(&markets)), "5.0 DOGE should be dust when min is 10.0");
+        assert!(!engine.is_dust_balance("DOGE", 15.0, Some(&markets)), "15.0 DOGE should NOT be dust when min is 10.0");
+    }
+
+    #[tokio::test]
+    async fn test_redlist_expensive_pair_when_no_balance() {
+        let mut engine = TradingEngine::new(Config::default());
+        let balance = HashMap::new();
+
+        // 1 BTC * 60,000 USD * 0.86 EUR/USD = 51,600 EUR > 12.23 EUR expense
+        let volumes = serde_json::json!([
+            {
+                "symbol": "EXPENSIVE/EUR",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "volume_48h": 5000000.0,
+                "spread_pct": 0.001,
+                "volatility_pct": 0.02,
+                "trades_per_minute": 10.0,
+                "last_close": 50000.0
+            }
+        ]);
+        let _ = fs::write("volumes_trades_data.json", serde_json::to_string_pretty(&volumes).unwrap());
+
+        // Price = 50000, min_amount = 1.0 -> cost > 12.23 EUR. Base balance is 0.
+        let markets = serde_json::json!({
+            "EXPENSIVE/EUR": {
+                "id": "EXPENSIVEUSD",
+                "symbol": "EXPENSIVE/EUR",
+                "base": "EXPENSIVE",
+                "quote": "EUR",
+                "precision": { "price": 0.01, "amount": 1.0 },
+                "limits": { "amount": { "min": 1.0 } }
+            }
+        });
+        let _ = fs::write("markets.json", serde_json::to_string_pretty(&markets).unwrap());
+
+        let samples = vec!["EXPENSIVE/EUR".to_string()];
+        let selected = engine.filter_available_pairs(&samples, &balance).await;
+
+        assert!(!selected.contains(&"EXPENSIVE/EUR".to_string()), "Expensive pair without balance should be redlisted and excluded");
+        assert!(engine.is_pair_redlisted("EXPENSIVE/EUR"), "EXPENSIVE/EUR should be in redlist");
     }
 }

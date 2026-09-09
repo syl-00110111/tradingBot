@@ -1,4 +1,4 @@
-use crate::config::{Config, CustomStrategyConfig, StrategyConfig};
+use crate::config::{Config, StrategyConfig};
 use crate::exchange::Candle;
 use crate::indicators::TechnicalAnalysis;
 use crate::monte_carlo::MonteCarloEngine;
