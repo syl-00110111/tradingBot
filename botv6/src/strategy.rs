@@ -1,4 +1,4 @@
-use crate::config::{Config, CustomStrategyConfig, StrategyConfig};
+use crate::config::{Config, StrategyConfig};
 use crate::exchange::Candle;
 use crate::indicators::TechnicalAnalysis;
 use crate::monte_carlo::MonteCarloEngine;
@@ -443,14 +443,25 @@ impl StrategyAggregator {
     // 16. Pairs Trading Proxy Strategy
     pub fn strategy_pairs_trading(candles: &[Candle], cfg: &StrategyConfig) -> (bool, bool) {
         let ma_length = Self::get_param_usize(cfg, "ma_length", 50);
-        let z_threshold = Self::get_param_f64(cfg, "z_threshold", 0.02);
+        let z_threshold = Self::get_param_f64(cfg, "z_threshold", 2.0);
 
-        let ma_val = match TechnicalAnalysis::calculate_sma(candles, ma_length) {
-            Some(m) => m,
-            None => return (false, false),
-        };
+        if candles.len() < ma_length {
+            return (false, false);
+        }
+
+        let slice = &candles[candles.len() - ma_length..];
+        let closes: Vec<f64> = slice.iter().map(|c| c.close).collect();
+        let ma_val = closes.iter().sum::<f64>() / ma_length as f64;
+
+        let variance = closes.iter().map(|x| (x - ma_val).powi(2)).sum::<f64>() / ma_length as f64;
+        let std_dev = variance.sqrt();
+
+        if std_dev <= 1e-9 {
+            return (false, false);
+        }
+
         let last_close = candles.last().map(|c| c.close).unwrap_or(0.0);
-        let z_score = (last_close - ma_val) / ma_val.max(1e-9);
+        let z_score = (last_close - ma_val) / std_dev;
 
         let buy = z_score < -z_threshold;
         let sell = z_score > z_threshold;
