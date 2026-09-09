@@ -2027,6 +2027,20 @@ impl TradingEngine {
             }
 
             if !buy_events.is_empty() || !sell_events.is_empty() {
+                for (idx, price) in &buy_events {
+                    let candle_ts = active_candles[*idx].timestamp;
+                    let dt = chrono::DateTime::from_timestamp(candle_ts / 1000, 0)
+                        .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| candle_ts.to_string());
+                    info!("[Backtest Event] BUY on {} at {} (price: {:.8})", symbol, dt, price);
+                }
+                for (idx, price) in &sell_events {
+                    let candle_ts = active_candles[*idx].timestamp;
+                    let dt = chrono::DateTime::from_timestamp(candle_ts / 1000, 0)
+                        .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| candle_ts.to_string());
+                    info!("[Backtest Event] SELL on {} at {} (price: {:.8})", symbol, dt, price);
+                }
                 self.plot_symbol_backtest(symbol, active_candles, &buy_events, &sell_events);
             }
         }
