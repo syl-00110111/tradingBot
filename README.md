@@ -1,12 +1,12 @@
-# 🛸 Cryptocurrencies Multiplatform Trading Bot (Rust `botv5`)
+# 🛸 Cryptocurrencies Multiplatform Trading Bot (`botv6` & `botv5`)
 
-A high-performance universal cryptocurrency trading bot written in Rust (`botv5`), featuring dual-core / multi-core parallel processing (`Rayon`), vector math compute acceleration (`ndarray`), async I/O (`Tokio`), and evidence-based trading strategy models with Monte Carlo probability engines.
+A high-performance universal cryptocurrency trading bot written in Rust featuring multi-strategy aggregation (`botv6`), dual-core / multi-core parallel processing (`Rayon`), vector math acceleration (`ndarray`), async I/O (`Tokio`), custom DSL strategy rule parsing, and evidence-based trading strategy models with Monte Carlo probability engines.
 
 ---
 
 ## ⚙️ Rust Installation Instructions
 
-Before building and running `botv5`, you need to install the Rust compiler (`rustc`) and package manager (`cargo`).
+Before building and running `botv6` or `botv5`, install the Rust compiler (`rustc`) and package manager (`cargo`).
 
 ### 1. Installing Rust
 
@@ -46,18 +46,18 @@ rustup update
 
 ## 🔑 `api.json` Placement Instructions (Live Mode Credentials)
 
-To trade in **Live Mode** with real exchange API keys, place your `api.json` credentials file directly in the `botv5` working directory:
+To trade in **Live Mode** with real exchange API keys, place your `api.json` credentials file in the working directory of the bot version you are running:
 
-### **Linux / macOS Location**
+### **`botv6` Location**
 ```bash
 # Path relative to repository root:
-/path/to/tradingBot/botv5/api.json
+botv6/api.json
 ```
 
-### **Windows Location**
-```powershell
+### **`botv5` Location**
+```bash
 # Path relative to repository root:
-C:\path\to\tradingBot\botv5\api.json
+botv5/api.json
 ```
 
 ### **`api.json` Format**
@@ -73,13 +73,14 @@ C:\path\to\tradingBot\botv5\api.json
 
 ## 📁 Bot Data Files & Storage Locations
 
-The bot automatically persists runtime state and trading history to JSON data files located in the `botv5` working directory. Live mode and Simulation mode use strictly isolated filenames to prevent state pollution.
+The bot automatically persists runtime state and trading history to JSON data files located in the working directory (`botv6` or `botv5`). Live mode and Simulation mode use strictly isolated filenames to prevent state pollution.
 
 ### **Live Mode Data Files**
 - `redlisted_pairs.json`: Stores pairs suspended due to high transaction costs or API errors.
 - `paused_for_buy.json`: Stores buy-paused pairs with expiration timestamps.
 - `recorded_purchases.json`: Stores recorded buy prices and quantities for profitability checks (`is_sell_profitable`).
 - `pending_orders_dump.json`: Dumps active/placed limit orders.
+- `unscored_pairs.json`: Stores unscored / non-optimal pairs evaluated under reduced margin thresholds.
 - `markets.json`: Cached market definitions and metadata (`id`, `symbol`, `precision`, `limits`).
 - `balance.json`: Cached account balance payload.
 - `volumes_trades_data.json`: Cached pair volume, spread, volatility, and trading density metrics.
@@ -89,8 +90,9 @@ The bot automatically persists runtime state and trading history to JSON data fi
 - `sim_paused_for_buy.json`
 - `sim_recorded_purchases.json`
 - `sim_pending_orders_dump.json`
+- `sim_unscored_pairs.json`
 
-> **Note**: Legacy Python code (`botv4.py` and helper modules) has been backed up into the `botv4/` directory.
+> **Note**: Legacy Python code (`botv4.py` and helper modules) is archived in the `botv4/` directory.
 
 ---
 
@@ -102,47 +104,155 @@ To trigger a clean and graceful shutdown at any time:
 
 ---
 
-## 🛠 Main Features
+## 🛠 Main Features (`botv6`)
 
-### ⚡ Performance & Acceleration
-- **Multi-Core & Dual-Core Parallel Processing**: Uses `Rayon` thread pools to analyze multiple trading symbols concurrently across all CPU cores.
+### ⚡ Modular Strategy Aggregation & Performance
+- **Multi-Strategy Aggregation Engine**: Configurable signal voting system supporting `weighted_score`, `consensus`, and `majority` decision modes.
+- **Custom DSL Rule Evaluator**: Dynamic custom rule parsing allowing user-defined indicator conditions without code recompilation.
+- **Multi-Core & Dual-Core Parallel Processing**: Analyzes candidate pairs concurrently using `Rayon` thread pools across CPU cores.
 - **Async I/O Engine**: Built on `Tokio` for low-latency REST API connectivity with CCXT/Kraken-compatible exchanges.
-- **Monte Carlo Probability Engine**: Multi-threaded strategy hit probability estimation (`botv5::monte_carlo`).
-- **OHLC Non-Repetition Window Calibration**: Dynamically calibrates candle history window sizes based on non-repetitive active candles (checking Open, High, Low, Close relative differences against `epsilon = 1e-5`).
+- **Monte Carlo Engine**: Multi-threaded strategy hit probability estimation (`botv6::monte_carlo`).
+- **OHLC Non-Repetition Window Calibration**: Dynamically calibrates candle history window sizes based on non-repetitive active candles.
 
-### 🛡 Risk Management & Advanced Execution Features
-- **Deprecated Order Editing & Cancellation**: `cleanup_open_orders` checks crest high conditions (against 5-week SMA `SMA_840` when history contains <= 3 peaks in 840 candles), evaluates Monte Carlo hit probabilities, edits open orders when prices/amounts change, or cancels orders with insufficient hit probability (< 0.96).
-- **Hit Probability & Multi-Quote Profitability Checks**: Enforces Monte Carlo hit probability thresholds (> 0.96) before order placement and checks cross-quote weighted average purchase prices (with a 0.3% profit margin) before executing sells.
-- **Simultaneous Signal & Wind-Choice Prioritization**: Prioritizes simultaneous BUY/SELL signals using hit probabilities and applies "Wind-Choice" quote asset prioritization to pass on buys if a higher quote balance exists for the base asset in another pair.
-- **Max Buyings & Sizing Limits**: Caps maximum positions to 4 per base asset, enforces package sizing bounds between 5.07 EUR minimum and 12.23 EUR maximum per trade, and redlists pairs exceeding 12.23 EUR cost unless base balance is held.
-- **Write-Once Centralized Sub-Actions**: Redlisting pairs, pausing buys on error, recording purchases, and dumping pending orders are written once and shared across all pipelines.
-- **Simulation Mode Isolation**: Run paper trading simulation or backtesting with strictly isolated state files (`sim_redlisted_pairs.json`, `sim_paused_for_buy.json`, `sim_recorded_purchases.json`) so live runs are never polluted!
+### 🛡 Risk Management & Sizing
+- **Crest High & 5-Week SMA Protection**: Bypasses crest high buys when market prices exceed 5-week SMA (`SMA_840`) on low-peak windows (<= 3 peaks in 840 candles).
+- **Position & Sizing Bounds**: Enforces maximum buyings (4 per base asset), trade package sizing (5.07 EUR minimum to 12.23 EUR maximum), and automatic redlisting for high minimum cost pairs without held inventory.
+- **Simulation Isolation**: Paper trading and backtesting run with isolated state files (`sim_*`).
 
 ---
 
-## 📈 Supported Strategy Catalog (30+ Models)
+## 📊 Strategy Configuration Section (`botv6`)
 
-The Rust trading engine supports over 30 distinct trading strategy models categorized into specialized groups:
+`botv6` introduces a highly flexible, file-driven strategy system configured via `config.default.json` and optional user overrides in `config.json`.
 
-- **Trend Following**: `ichimoku_cloud`, `parabolic_sar`, `adx_trend_strength`, `halving_cycle_proxy`, `tema_crossover`, `heikin_ashi`.
-- **Mean Reversion & Range**: `bollinger_bands`, `pairs_trading_proxy`.
-- **Breakout & Momentum**: `donchian_channels`, `stochastic_rsi`, `williams_r`, `vwap_momentum`, `sinewave_cycle`, `candle_patterns`.
-- **Scalping & Order Flow Proxies**: `renko_proxy`, `ema_rsi_volume`.
-- **Advanced Proxies**: `scientific_ensemble`, `whale_detection_proxy`, `pump_dump_proxy`, `sentiment_momentum_proxy`, `liquidation_cascade_proxy`, `listing_surge_proxy`.
-- **Monte Carlo Engines**: `mc_mean_reversion`, `mc_momentum`, `mc_dynamic_allocation`, `mc_market_making`, `mc_stop_loss_eval`, `mc_options_pricing`.
+### 1. Configuration Merging & Diff Logging
+At startup, `botv6` loads `config.default.json` and merges custom settings from `config.json`. Any overridden values are logged automatically:
+```text
+[Config Diff] strategies.ichimoku.weight: default = 1, loaded = 1.5
+```
+
+---
+
+### 2. Strategy Aggregation Engine (`strategy_aggregation`)
+
+The strategy aggregator combines signals across all enabled strategies to determine final `Buy`, `Sell`, or `Hold` decisions.
+
+#### **Configuration Schema**
+```json
+"strategy_aggregation": {
+    "mode": "weighted_score",
+    "min_buy_score": 1.0,
+    "min_sell_score": 1.0,
+    "consensus_threshold": 0.6
+}
+```
+
+#### **Aggregation Modes**
+- **`weighted_score`** (Default): Sums the weights of strategies signalling `Buy` and `Sell`.
+  - Triggers `Buy` if `buy_score >= min_buy_score` and `buy_score > sell_score`.
+  - Triggers `Sell` if `sell_score >= min_sell_score` and `sell_score > buy_score`.
+- **`consensus`**: Evaluates the ratio of active signal weight relative to total enabled strategy weight.
+  - Triggers `Buy` if `buy_score / total_enabled_weight >= consensus_threshold` and `buy_score > sell_score`.
+  - Triggers `Sell` if `sell_score / total_enabled_weight >= consensus_threshold` and `sell_score > buy_score`.
+- **`majority`**: Simple unweighted count comparison of strategies issuing buy vs. sell signals.
+
+---
+
+### 3. Built-In Strategy Catalog & Parameters (28 Models)
+
+Each strategy entry in the `strategies` object supports `enabled` (boolean), `weight` (float multiplier), and strategy-specific `params`.
+
+```json
+"strategies": {
+    "ichimoku": {
+        "enabled": true,
+        "weight": 1.0,
+        "params": { "tenkan": 9, "kijun": 26, "senkou": 52 }
+    }
+}
+```
+
+#### **Standard Technical Strategies (22 Models)**
+
+| Strategy Name | Description | Default Parameters |
+| :--- | :--- | :--- |
+| `ichimoku` | Ichimoku Kinko Hyo cloud trend crossover | `tenkan`: 9, `kijun`: 26, `senkou`: 52 |
+| `psar` | Parabolic SAR trend reversal | `af`: 0.02, `max_af`: 0.2 |
+| `bollinger` | Bollinger Bands mean reversion with RSI oversold check | `length`: 20, `std`: 2.0, `rsi_oversold`: 35.0 |
+| `donchian` | Donchian Channel upper/lower breakout | `length`: 20 |
+| `stoch_rsi` | Stochastic RSI overbought/oversold levels | `length`: 14, `rsi_length`: 14, `k`: 3, `d`: 3, `oversold`: 20, `overbought`: 80 |
+| `williams_r` | Williams %R momentum indicator | `length`: 14, `oversold`: -80.0, `overbought`: -20.0 |
+| `vwap_momentum` | Volume-Weighted Average Price momentum proxy | `{}` |
+| `renko` | Renko brick synthetic trend proxy via ATR | `atr_length`: 14 |
+| `ema_rsi_volume` | Multi-indicator alignment combining EMA crossover, RSI, and Volume MA | `ema_fast`: 9, `ema_slow`: 21, `rsi_length`: 14, `vol_ma`: 20 |
+| `whale_detection` | Standard deviation volume spike whale order tracker | `length`: 20, `std_devs`: 3.0 |
+| `pump_dump` | High-velocity price and volume surge detector | `vol_surge`: 1.5, `price_surge`: 0.001 |
+| `scientific_ensemble` | Multi-indicator scoring ensemble (RSI, MACD, Bollinger Bands) | `rsi_oversold`: 35.0, `rsi_overbought`: 65.0 |
+| `sentiment_momentum` | Rate of Change (ROC) and RSI sentiment momentum filter | `roc_length`: 10, `rsi_limit`: 60.0, `rsi_floor`: 40.0 |
+| `liquidation_cascade` | Price cascade and volume multiplier spike detector | `pct_trigger`: 0.001, `vol_multiplier`: 1.5 |
+| `adx_trend` | ADX trend strength filter with SMA trend confirmation | `threshold`: 25.0, `sma_length`: 20 |
+| `pairs_trading` | Z-score price deviation mean reversion proxy | `ma_length`: 50, `z_threshold`: 0.02 |
+| `halving_cycle` | Long-term macro EMA cycle trend proxy | `ema_long`: 200 |
+| `listing_surge` | High volume anomaly / new listing surge tracker | `ma_length`: 20, `vol_multiplier`: 5.0 |
+| `tema_crossover` | Triple Exponential Moving Average crossover proxy | `ema_length`: 9 |
+| `heikin_ashi` | Heikin Ashi synthetic candle trend strategy | `{}` |
+| `sinewave` | SMA-based cyclical sinewave trend approximation | `sma_length`: 7 |
+| `candle_patterns` | Candlestick pattern recognition (Engulfing patterns) | `{}` |
+
+---
+
+#### **Monte Carlo Probability Strategies (6 Models)**
+
+| Strategy Name | Description | Default Parameters |
+| :--- | :--- | :--- |
+| `mc_mean_reversion` | Simulated Geometric Brownian Motion path mean-reversion probability | `threshold`: 0.55, `sma_length`: 20 |
+| `mc_momentum` | Forward path profit target hit probability engine | `threshold`: 0.55, `target_profit`: 0.01 |
+| `mc_dynamic_allocation` | Historical simulation strategy confidence score evaluator | `high_threshold`: 0.8, `low_threshold`: 0.6 |
+| `mc_market_making` | Bid/ask path hit probability estimation | `threshold`: 0.6 |
+| `mc_stop_loss_eval` | Stop-loss breach risk estimation engine | `threshold`: 0.12, `sl_pct`: 0.05 |
+| `mc_options_pricing` | Option payoff probability call/put ratio evaluator | `ratio`: 1.5 |
+
+---
+
+### 4. Custom DSL Rule Engine (`custom_strategies`)
+
+`botv6` includes a Domain-Specific Language (DSL) evaluator (`CustomRuleEvaluator`) allowing users to define custom strategy conditions in `config.json` without recompiling Rust code.
+
+#### **Configuration Schema**
+```json
+"custom_strategies": [
+    {
+        "name": "custom_rsi_sma_reversion",
+        "enabled": true,
+        "weight": 1.5,
+        "buy_condition": "rsi(14) < 30.0 AND close > sma(50)",
+        "sell_condition": "rsi(14) > 70.0 OR close < sma(50)"
+    }
+]
+```
+
+#### **Supported DSL Syntax & Components**
+- **Candle Attributes**: `close`, `open`, `high`, `low`, `volume`.
+- **Technical Indicators**:
+  - `rsi(period)` (e.g. `rsi(14)`)
+  - `sma(period)` (e.g. `sma(50)`)
+  - `ema(period)` (e.g. `ema(20)`)
+  - `adx(period)` (e.g. `adx(14)`)
+- **Comparison Operators**: `<=`, `>=`, `==`, `<`, `>`.
+- **Logical Operators**: `AND`, `OR`.
 
 ---
 
 ## 🚀 Quick Start & Building
 
-### Build
-Navigate to the `botv5` crate directory and compile:
+### Build `botv6`
+Navigate to the `botv6` directory and compile:
 ```bash
-cd botv5
+cd botv6
 cargo build --release
 ```
 
-### Execution Modes
+### Execution Modes (`botv6`)
 
 - **Live Trading**:
   ```bash
@@ -155,10 +265,12 @@ cargo build --release
   ```
 
 - **Backtest Mode**:
-  Runs historical backtesting simulations across calibrated non-repetition candle windows, evaluating strategy aggregation signals, Monte Carlo probabilities, signal prioritization, and tracking balance, win rate, profit factor, and maximum drawdown:
+  Runs historical backtesting simulations across calibrated candle windows:
   ```bash
   cargo run -- --mode backtest
   ```
+
+> For `botv5`, navigate to `botv5/` and execute standard cargo commands (`cargo run -- --mode live`).
 
 ---
 
